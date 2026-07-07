@@ -59,16 +59,14 @@ Implemented:
 - Rust core crate with SQLite persistence
 - connection CRUD, URL import/sync, password fallback/keyring attempt
 - PostgreSQL query execution and schema introspection
+- result column metadata enrichment from `pg_catalog`
 - SQL splitting and simple auto-limit pagination
 - execution-target resolution from Monaco selection/cursor/current statement
 - transaction banner plus backend transaction connection routing
 - server-side query cancellation via PostgreSQL cancel tokens
 - visible/full result export to clipboard or file
-- inline edit preview flow with apply guard until table detection is available
+- inline edit preview/apply flow with source-table and primary-key detection
+- schema-aware Monaco completions
+- OpenCode-backed Monaco inline AI completions
 - Svelte/Monaco UI shell with sidebar, tabs, editor, results, history, settings
 - pnpm install age gate
-
-In progress:
-
-- source-table and primary-key detection for applying inline edits
-- AI inline completion wiring

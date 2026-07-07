@@ -35,9 +35,13 @@ export interface Settings {
 
 export interface ColumnMeta {
   name: string;
+  sourceName?: string | null;
   typeOid: number;
   typeName: string;
   tableOid?: number | null;
+  tableSchema?: string | null;
+  tableName?: string | null;
+  columnId?: number | null;
   nullable?: boolean | null;
   generated: boolean;
   primaryKey: boolean;
@@ -115,4 +119,13 @@ export interface ExecutionTarget {
 export interface TxStatus {
   active: boolean;
   startedAt?: string | null;
+}
+
+export interface AiCompletionRequest {
+  prefix: string;
+  suffix: string;
+  language: string;
+  position: number;
+  schemaContext?: string | null;
+  model?: string | null;
 }
