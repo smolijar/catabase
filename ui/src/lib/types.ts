@@ -121,6 +121,12 @@ export interface TxStatus {
   startedAt?: string | null;
 }
 
+export interface ConnectionStats {
+  active: number;
+  idle: number;
+  poolSize: number;
+}
+
 export interface AiCompletionRequest {
   prefix: string;
   suffix: string;

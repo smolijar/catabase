@@ -11,6 +11,7 @@
     ColumnMeta,
     ConnectionInput,
     ConnectionRecord,
+    ConnectionStats,
     ExecutionTarget,
     HistoryEntry,
     HistoryStats,
@@ -51,6 +52,8 @@
   let readonlyContent = '';
   let editorRef: EditorHandle | undefined;
   let running = false;
+  let runningStartedAt = 0;
+  let nowMs = Date.now();
   let queryToken: string | null = null;
   let result: QueryResult | null = null;
   let originalRows: Record<string, unknown>[] = [];
@@ -64,6 +67,7 @@
 
   let connections: ConnectionRecord[] = [];
   let settings: Settings = { poolSize: 5, aiModel: null };
+  let poolStats: ConnectionStats | null = null;
   let poolSizeInput = 5;
   let aiModels: string[] = [];
   let aiHealth: AiHealth = { state: 'off', message: null };
@@ -112,12 +116,17 @@
     const statsInterval = window.setInterval(() => {
       if (activeConnection) void loadConnectionStats();
     }, 5000);
+    const runningInterval = window.setInterval(() => {
+      nowMs = Date.now();
+      if (running && activeConnection) void loadConnectionStats();
+    }, 1000);
     const aiInterval = window.setInterval(checkAiHealth, 30000);
 
     return () => {
       window.removeEventListener('keydown', handleKeydown);
       window.removeEventListener('beforeunload', persistDraftNow);
       window.clearInterval(statsInterval);
+      window.clearInterval(runningInterval);
       window.clearInterval(aiInterval);
     };
   });
@@ -223,12 +232,15 @@
     }
 
     running = true;
+    runningStartedAt = Date.now();
+    nowMs = runningStartedAt;
     queryError = null;
     queryToken = crypto.randomUUID();
     statusFlash = 'Running query...';
     lastExecution = target;
 
     try {
+      void loadConnectionStats();
       const next = await api.executeQuery(target.sql, queryToken, 0, PAGE_SIZE);
       setResult(next);
       flash(`Loaded ${next.rowCount}${next.hasMore ? '+' : ''} rows in ${next.durationMs} ms.`);
@@ -244,6 +256,7 @@
     } finally {
       running = false;
       queryToken = null;
+      void loadConnectionStats();
       void refreshTxStatus();
     }
   }
@@ -253,6 +266,7 @@
     running = false;
     queryToken = null;
     if (token) await api.cancelQuery(token).catch(() => undefined);
+    void loadConnectionStats();
     editorRef?.clearHighlights();
     flash('Cancelled locally. Server query may still finish in background.');
   }
@@ -260,6 +274,8 @@
   async function loadMoreRows() {
     if (!result || !lastExecution || running) return;
     running = true;
+    runningStartedAt = Date.now();
+    nowMs = runningStartedAt;
     const token = crypto.randomUUID();
     try {
       const next = await api.executeQuery(lastExecution.sql, token, result.rows.length, PAGE_SIZE);
@@ -273,6 +289,7 @@
       flash(`Load more failed: ${errorMessage(error)}`);
     } finally {
       running = false;
+      void loadConnectionStats();
     }
   }
 
@@ -413,7 +430,7 @@
   }
 
   async function loadConnectionStats() {
-    await api.connectionStats().catch(() => undefined);
+    poolStats = await api.connectionStats().catch(() => poolStats);
   }
 
   async function refreshTxStatus() {
@@ -786,6 +803,11 @@
     return new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
   }
 
+  function runningDuration(): string {
+    if (!runningStartedAt) return '0.0s';
+    return `${((nowMs - runningStartedAt) / 1000).toFixed(1)}s`;
+  }
+
   async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -821,6 +843,8 @@
     <button on:click={clearResults}>Clear Results</button>
     <div class="toolbar-spacer"></div>
     <span class="chip">{activeConnection ? activeConnection.name : 'No connection'}</span>
+    <span class="chip">{poolStats ? `${poolStats.active} active / ${poolStats.idle} idle` : `Pool ${settings.poolSize}`}</span>
+    {#if running}<span class="chip running-chip">Running {runningDuration()}</span>{/if}
     <span class="chip ai-{aiHealth.state}">AI {aiHealth.state}</span>
   </header>
 
@@ -950,6 +974,7 @@
       <section class="results-pane">
         <div class="results-head">
           <strong>Results</strong>
+          {#if running}<span class="muted">Running {runningDuration()}</span>{/if}
           <div class="row-actions">
             <button on:click={() => copyResult('csv')}>Copy CSV</button>
             <button on:click={() => copyResult('tsv')}>Copy TSV</button>
@@ -1026,8 +1051,9 @@
 
   <footer class="status-bar">
     <span>{activeConnection ? `${activeConnection.host}/${activeConnection.database}` : 'No connection'}</span>
-    <span>Pool {settings.poolSize}</span>
+    <span>{poolStats ? `Pool ${settings.poolSize}: ${poolStats.active} active, ${poolStats.idle} idle` : `Pool ${settings.poolSize}`}</span>
     <span>Schema {schemaItems.length ? `${schemaItems.length} objects` : 'not loaded'}</span>
+    {#if running}<span>Running {runningDuration()}</span>{/if}
     <span>{statusFlash}</span>
   </footer>
 </main>

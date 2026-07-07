@@ -229,19 +229,20 @@ pub async fn get_ddl(
     let client = connect_client(fields).await?;
     let row = client
         .query_one(
-            "SELECT c.relkind
+            "SELECT c.oid, c.relkind
              FROM pg_class c
              JOIN pg_namespace n ON n.oid = c.relnamespace
              WHERE n.nspname = $1 AND c.relname = $2",
             &[&schema, &name],
         )
         .await?;
-    let relkind: i8 = row.get(0);
+    let object_oid: u32 = row.get(0);
+    let relkind: i8 = row.get(1);
     let ident = format!("{}.{}", quote_ident(schema), quote_ident(name));
 
     if relkind as u8 as char == 'v' || relkind as u8 as char == 'm' {
         let view = client
-            .query_one("SELECT pg_get_viewdef($1::regclass, true)", &[&ident])
+            .query_one("SELECT pg_get_viewdef($1::oid, true)", &[&object_oid])
             .await?;
         let definition: String = view.get(0);
         return Ok(format!("CREATE VIEW {ident} AS\n{definition};"));
@@ -257,11 +258,11 @@ pub async fn get_ddl(
                 a.attgenerated <> '' AS generated
              FROM pg_attribute a
              LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-             WHERE a.attrelid = $1::regclass
+             WHERE a.attrelid = $1::oid
                AND a.attnum > 0
                AND NOT a.attisdropped
              ORDER BY a.attnum",
-            &[&ident],
+            &[&object_oid],
         )
         .await?;
     let mut lines = Vec::new();
@@ -289,9 +290,9 @@ pub async fn get_ddl(
         .query(
             "SELECT pg_get_indexdef(i.indexrelid)
              FROM pg_index i
-             WHERE i.indrelid = $1::regclass
+             WHERE i.indrelid = $1::oid
              ORDER BY i.indisprimary DESC, i.indexrelid::regclass::text",
-            &[&ident],
+            &[&object_oid],
         )
         .await?;
     let index_sql = indexes

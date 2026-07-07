@@ -132,6 +132,11 @@ label {
   color: #fbbf24;
 }
 
+.running-chip {
+  border-color: #fbbf24;
+  color: #fde68a;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: 52px auto 1fr;

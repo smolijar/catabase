@@ -6,6 +6,7 @@ import type {
   ConnectionFields,
   ConnectionInput,
   ConnectionRecord,
+  ConnectionStats,
   HistoryPage,
   HistoryStats,
   QueryResult,
@@ -30,7 +31,7 @@ export const api = {
   executeQuery: (sql: string, queryToken: string, offset = 0, pageSize = 200) =>
     invoke<QueryResult>('execute_query', { sql, queryToken, offset, pageSize }),
   cancelQuery: (queryToken: string) => invoke('cancel_query', { queryToken }),
-  connectionStats: () => invoke('connection_stats'),
+  connectionStats: () => invoke<ConnectionStats>('connection_stats'),
   txStatus: () => invoke<TxStatus>('tx_status'),
   txCommit: () => invoke<TxStatus>('tx_commit'),
   txRollback: () => invoke<TxStatus>('tx_rollback'),
