@@ -181,7 +181,7 @@
 
   async function loadConnections() {
     try {
-      connections = await api.listConnections();
+      connections = await withTimeout(api.listConnections(), 5000, 'Loading connections timed out.');
     } catch (error) {
       flash(`Connections unavailable: ${errorMessage(error)}`);
     }
@@ -334,7 +334,7 @@
     testingConnection = true;
     modalFeedback = 'Testing connection...';
     try {
-      await api.testConnection(connectionForm);
+      await withTimeout(api.testConnection(connectionForm), 12000, 'Connection test timed out.');
       modalFeedback = 'Connection test succeeded.';
     } catch (error) {
       modalFeedback = errorMessage(error);
@@ -346,7 +346,7 @@
   async function saveConnection() {
     savingConnection = true;
     try {
-      const saved = await api.saveConnection(connectionForm);
+      const saved = await withTimeout(api.saveConnection(connectionForm), 12000, 'Saving connection timed out.');
       showConnectionModal = false;
       await loadConnections();
       flash(`${saved.name} saved and ready.`);
@@ -784,6 +784,20 @@
 
   function timestamp(): string {
     return new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
+  }
+
+  async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(message)), ms);
+        })
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   function formatCell(value: unknown): string {
