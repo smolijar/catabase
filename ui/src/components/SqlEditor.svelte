@@ -3,14 +3,21 @@
   import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
   import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
   import { onDestroy, onMount } from 'svelte';
-  import type { ExecutionTarget, StatementRange } from '../lib/types';
+  import type { AiCompletionRequest, ExecutionTarget, StatementRange } from '../lib/types';
 
   export let value = '';
   export let readOnly = false;
+  export let aiEnabled = false;
+  export let aiModel: string | null | undefined = null;
+  export let schemaContext = '';
+  export let schemaSuggestions: string[] = [];
+  export let aiComplete: ((request: AiCompletionRequest) => Promise<string | null>) | undefined = undefined;
 
   let host: HTMLDivElement;
   let editor: monaco.editor.IStandaloneCodeEditor | undefined;
   let subscription: monaco.IDisposable | undefined;
+  let completionProvider: monaco.IDisposable | undefined;
+  let inlineProvider: monaco.IDisposable | undefined;
   let highlights: monaco.editor.IEditorDecorationsCollection | undefined;
 
   onMount(() => {
@@ -41,6 +48,7 @@
       fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize: 14,
       minimap: { enabled: false },
+      inlineSuggest: { enabled: true },
       readOnly,
       scrollBeyondLastLine: false,
       wordWrap: 'on'
@@ -50,10 +58,60 @@
       const next = editor?.getValue() ?? '';
       if (next !== value) value = next;
     });
+
+    completionProvider = monaco.languages.registerCompletionItemProvider('sql', {
+      triggerCharacters: ['.', ' '],
+      provideCompletionItems: (model, position) => {
+        const word = model.getWordUntilPosition(position);
+        const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
+        return {
+          suggestions: schemaSuggestions.map((label) => ({
+            label,
+            kind: label.includes('.')
+              ? monaco.languages.CompletionItemKind.Reference
+              : monaco.languages.CompletionItemKind.Field,
+            insertText: label,
+            range
+          }))
+        };
+      }
+    });
+
+    inlineProvider = monaco.languages.registerInlineCompletionsProvider('sql', {
+      provideInlineCompletions: async (model, position) => {
+        if (!aiEnabled || readOnly || !aiComplete) return { items: [] };
+        const offset = model.getOffsetAt(position);
+        const text = model.getValue();
+        const prefix = text.slice(0, offset);
+        if (!prefix.trim()) return { items: [] };
+
+        const completion = await aiComplete({
+          prefix,
+          suffix: text.slice(offset),
+          language: 'sql',
+          position: offset,
+          schemaContext,
+          model: aiModel ?? null
+        }).catch(() => null);
+        if (!completion) return { items: [] };
+
+        return {
+          items: [
+            {
+              insertText: completion,
+              range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column)
+            }
+          ]
+        };
+      },
+      freeInlineCompletions: () => undefined
+    });
   });
 
   onDestroy(() => {
     subscription?.dispose();
+    completionProvider?.dispose();
+    inlineProvider?.dispose();
     highlights?.clear();
     editor?.dispose();
   });

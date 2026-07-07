@@ -8,6 +8,7 @@
   import type {
     AiHealth,
     AppError,
+    ColumnMeta,
     ConnectionInput,
     ConnectionRecord,
     ExecutionTarget,
@@ -35,6 +36,12 @@
     oldValue: unknown;
     newValue: unknown;
   };
+  type EditTarget = {
+    schema: string;
+    table: string;
+    whereColumns: ColumnMeta[];
+    warning?: string;
+  };
 
   let sidebar: SidebarTab = 'connections';
   let sidebarOpen = true;
@@ -61,6 +68,8 @@
   let aiModels: string[] = [];
   let aiHealth: AiHealth = { state: 'off', message: null };
   let schemaItems: SchemaItem[] = [];
+  let schemaContext = '';
+  let schemaSuggestions: string[] = [];
   let schemaLoading = false;
   let schemaError = '';
   let history: HistoryEntry[] = [];
@@ -79,6 +88,20 @@
 
   $: activeConnection = connections.find((connection) => connection.isActive) ?? null;
   $: readonlyContent = readonlyTabs.find((tab) => tab.id === activeTab)?.content ?? '';
+  $: schemaContext = schemaItems
+    .map((item) => `${item.schema}.${item.name}(${item.columns.map((column) => column.name).join(', ')})`)
+    .join('\n');
+  $: schemaSuggestions = Array.from(
+    new Set(
+      schemaItems.flatMap((item) => [
+        item.name,
+        `${item.schema}.${item.name}`,
+        ...item.columns.map((column) => column.name),
+        ...item.columns.map((column) => `${item.name}.${column.name}`),
+        ...item.columns.map((column) => `${item.schema}.${item.name}.${column.name}`)
+      ])
+    )
+  );
   $: if (mounted && activeTab === 'playground') scheduleDraftSave();
 
   onMount(() => {
@@ -542,7 +565,12 @@
     editMode = true;
     originalRows = cloneRows(result.rows);
     pendingChanges = [];
-    flash('Edit mode enabled. Preview works; Apply requires single-table detection.');
+    const target = detectEditTarget();
+    flash(
+      target
+        ? `Edit mode enabled for ${target.schema}.${target.table}.${target.warning ? ` ${target.warning}` : ''}`
+        : 'Edit mode enabled. Preview only: source table could not be detected.'
+    );
   }
 
   function disableEditMode() {
@@ -598,7 +626,30 @@
   }
 
   async function applyUpdates() {
-    flash('Apply disabled until single source table and primary keys are detected. Use Preview SQL.');
+    if (!pendingChanges.length) {
+      flash('No pending changes.');
+      return;
+    }
+    const target = detectEditTarget();
+    if (!target) {
+      flash('Apply disabled: source table could not be detected. Use Preview SQL.');
+      return;
+    }
+
+    const token = crypto.randomUUID();
+    try {
+      running = true;
+      await api.executeQuery(generateUpdateSql(), token, 0, 1);
+      originalRows = result ? cloneRows(result.rows) : [];
+      pendingChanges = [];
+      editMode = false;
+      flash(`Applied updates to ${target.schema}.${target.table}.`);
+      void refreshHistory();
+    } catch (error) {
+      flash(`Apply failed: ${errorMessage(error)}`);
+    } finally {
+      running = false;
+    }
   }
 
   function discardUpdates() {
@@ -608,13 +659,72 @@
   }
 
   function generateUpdateSql(): string {
+    const target = detectEditTarget();
+    if (!target) {
+      return [
+        '-- Source table detection unavailable. Replace table_name and WHERE clause before running.',
+        ...pendingChanges.map(
+          (change) =>
+            `UPDATE table_name SET ${quoteIdent(change.column)} = ${sqlLiteral(change.newValue)} WHERE /* row ${change.rowIndex + 1} key */;`
+        )
+      ].join('\n');
+    }
+
+    const changesByRow = new Map<number, PendingChange[]>();
+    for (const change of pendingChanges) {
+      const column = columnByName(change.column);
+      if (!column || column.generated) continue;
+      const changes = changesByRow.get(change.rowIndex) ?? [];
+      changes.push(change);
+      changesByRow.set(change.rowIndex, changes);
+    }
+
     return [
-      '-- Table detection unavailable for this result. Replace table_name and WHERE clause before running.',
-      ...pendingChanges.map(
-        (change) =>
-          `UPDATE table_name SET ${quoteIdent(change.column)} = ${sqlLiteral(change.newValue)} WHERE /* row ${change.rowIndex + 1} key */;`
-      )
-    ].join('\n');
+      target.warning ? `-- ${target.warning}` : '',
+      ...Array.from(changesByRow.entries()).map(([rowIndex, changes]) => {
+        const setSql = changes
+          .map((change) => `${quoteIdent(sourceColumnName(columnByName(change.column)))} = ${sqlLiteral(change.newValue)}`)
+          .join(', ');
+        const whereSql = target.whereColumns
+          .map(
+            (column) =>
+              `${quoteIdent(sourceColumnName(column))} IS NOT DISTINCT FROM ${sqlLiteral(originalRows[rowIndex]?.[column.name])}`
+          )
+          .join(' AND ');
+        return `UPDATE ${quoteIdent(target.schema)}.${quoteIdent(target.table)} SET ${setSql} WHERE ${whereSql};`;
+      })
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  function detectEditTarget(): EditTarget | null {
+    if (!result || !result.columns.length) return null;
+    const changedColumns = pendingChanges.map((change) => columnByName(change.column)).filter(Boolean) as ColumnMeta[];
+    const relevantColumns = changedColumns.length ? changedColumns : result.columns;
+    const identities = new Set(
+      relevantColumns
+        .filter((column) => column.tableSchema && column.tableName && sourceColumnName(column))
+        .map((column) => `${column.tableSchema}\u001f${column.tableName}`)
+    );
+    if (identities.size !== 1) return null;
+
+    const [identity] = Array.from(identities);
+    const [schema, table] = identity.split('\u001f');
+    const tableColumns = result.columns.filter(
+      (column) => column.tableSchema === schema && column.tableName === table && sourceColumnName(column)
+    );
+    if (!tableColumns.length) return null;
+
+    const primaryKeyColumns = tableColumns.filter((column) => column.primaryKey);
+    if (primaryKeyColumns.length) return { schema, table, whereColumns: primaryKeyColumns };
+
+    return {
+      schema,
+      table,
+      whereColumns: tableColumns.filter((column) => !column.generated),
+      warning: 'No primary key returned; WHERE uses all original result columns.'
+    };
   }
 
   function setResult(next: QueryResult | null) {
@@ -626,6 +736,10 @@
 
   function isChanged(rowIndex: number, column: string): boolean {
     return pendingChanges.some((change) => change.rowIndex === rowIndex && change.column === column);
+  }
+
+  function canApplyUpdates(): boolean {
+    return pendingChanges.length > 0 && detectEditTarget() !== null;
   }
 
   function normalizeAppError(error: unknown): AppError {
@@ -643,6 +757,14 @@
 
   function isNumericColumn(typeName: string): boolean {
     return ['int2', 'int4', 'int8', 'float4', 'float8', 'numeric'].includes(typeName);
+  }
+
+  function columnByName(name: string): ColumnMeta | undefined {
+    return result?.columns.find((column) => column.name === name);
+  }
+
+  function sourceColumnName(column: ColumnMeta | undefined): string {
+    return column?.sourceName || column?.name || '';
   }
 
   function coerceValue(value: string, typeName: string): unknown {
@@ -796,7 +918,16 @@
           </div>
         {/if}
         {#if activeTab === 'playground'}
-          <SqlEditor bind:this={editorRef} bind:value={sql} readOnly={false} />
+          <SqlEditor
+            bind:this={editorRef}
+            bind:value={sql}
+            readOnly={false}
+            aiEnabled={aiHealth.state === 'on'}
+            aiModel={settings.aiModel}
+            {schemaContext}
+            {schemaSuggestions}
+            aiComplete={api.aiComplete}
+          />
         {:else}
           <SqlEditor value={readonlyContent} readOnly={true} />
         {/if}
@@ -814,7 +945,7 @@
             <button on:click={() => downloadResult('json', true)}>Full JSON</button>
             {#if editMode}
               <button on:click={previewUpdates}>Preview SQL</button>
-              <button disabled={!pendingChanges.length} on:click={applyUpdates}>Apply</button>
+              <button disabled={!canApplyUpdates()} on:click={applyUpdates}>Apply</button>
               <button on:click={discardUpdates}>Discard</button>
               <button on:click={disableEditMode}>Stop Edit</button>
             {:else}
@@ -824,7 +955,12 @@
         </div>
         {#if editMode}
           <div class="edit-bar">
-            {pendingChanges.length} pending changes. Apply disabled unless backend detects one source table with keys.
+            {pendingChanges.length} pending changes.
+            {#if detectEditTarget()}
+              Apply will update {detectEditTarget()?.schema}.{detectEditTarget()?.table}.
+            {:else}
+              Apply disabled: source table ambiguous or unavailable.
+            {/if}
           </div>
         {/if}
         {#if queryError}

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -18,9 +18,13 @@ pub type PgCancelToken = CancelToken;
 #[serde(rename_all = "camelCase")]
 pub struct ColumnMeta {
     pub name: String,
+    pub source_name: Option<String>,
     pub type_oid: u32,
     pub type_name: String,
     pub table_oid: Option<u32>,
+    pub table_schema: Option<String>,
+    pub table_name: Option<String>,
+    pub column_id: Option<i16>,
     pub nullable: Option<bool>,
     pub generated: bool,
     pub primary_key: bool,
@@ -102,17 +106,15 @@ pub async fn execute_on_client(
         return execute_simple(client, exec_sql, start).await;
     }
 
-    let mut rows = client.query(exec_sql, &[]).await?;
+    let statement = client.prepare(exec_sql).await?;
+    let columns = column_metas(client, statement.columns()).await?;
+    let mut rows = client.query(&statement, &[]).await?;
     let mut has_more = false;
     if auto_limited && rows.len() > requested_page {
         has_more = true;
         rows.truncate(requested_page);
     }
 
-    let columns = rows
-        .first()
-        .map(|row| row.columns().iter().map(column_meta).collect())
-        .unwrap_or_default();
     let rows = rows.iter().map(row_to_json).collect::<Vec<_>>();
     Ok(QueryResult {
         row_count: rows.len(),
@@ -320,9 +322,13 @@ async fn execute_simple(
                         .enumerate()
                         .map(|(index, column)| ColumnMeta {
                             name: column.name().to_string(),
+                            source_name: None,
                             type_oid: index as u32,
                             type_name: "text".to_string(),
                             table_oid: None,
+                            table_schema: None,
+                            table_name: None,
+                            column_id: None,
                             nullable: None,
                             generated: false,
                             primary_key: false,
@@ -401,16 +407,86 @@ fn make_tls_connector() -> MakeRustlsConnect {
     MakeRustlsConnect::new(tls_config)
 }
 
-fn column_meta(column: &tokio_postgres::Column) -> ColumnMeta {
-    ColumnMeta {
-        name: column.name().to_string(),
-        type_oid: column.type_().oid(),
-        type_name: column.type_().name().to_string(),
-        table_oid: column.table_oid(),
-        nullable: None,
-        generated: false,
-        primary_key: false,
+async fn column_metas(
+    client: &PgClient,
+    columns: &[tokio_postgres::Column],
+) -> Result<Vec<ColumnMeta>, CoreError> {
+    let mut catalog = HashMap::new();
+    for column in columns {
+        let Some(table_oid) = column.table_oid() else {
+            continue;
+        };
+        let Some(column_id) = column.column_id() else {
+            continue;
+        };
+        let key = (table_oid, column_id);
+        if catalog.contains_key(&key) {
+            continue;
+        }
+
+        if let Some(row) = client
+            .query_opt(
+                "SELECT
+                    n.nspname,
+                    c.relname,
+                    a.attname,
+                    NOT a.attnotnull,
+                    a.attgenerated <> '',
+                    EXISTS (
+                        SELECT 1
+                        FROM pg_index i
+                        WHERE i.indrelid = c.oid
+                          AND i.indisprimary
+                          AND a.attnum = ANY(i.indkey)
+                    )
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 JOIN pg_attribute a ON a.attrelid = c.oid
+                 WHERE c.oid = $1::oid
+                   AND a.attnum = $2
+                   AND NOT a.attisdropped",
+                &[&table_oid.to_string(), &column_id],
+            )
+            .await?
+        {
+            catalog.insert(
+                key,
+                (
+                    row.get::<_, String>(0),
+                    row.get::<_, String>(1),
+                    row.get::<_, String>(2),
+                    row.get::<_, bool>(3),
+                    row.get::<_, bool>(4),
+                    row.get::<_, bool>(5),
+                ),
+            );
+        }
     }
+
+    Ok(columns
+        .iter()
+        .map(|column| {
+            let key = column.table_oid().zip(column.column_id());
+            let catalog_entry = key.and_then(|key| catalog.get(&key));
+            ColumnMeta {
+                name: column.name().to_string(),
+                source_name: catalog_entry.map(|(_, _, source_name, _, _, _)| source_name.clone()),
+                type_oid: column.type_().oid(),
+                type_name: column.type_().name().to_string(),
+                table_oid: column.table_oid(),
+                table_schema: catalog_entry.map(|(schema, _, _, _, _, _)| schema.clone()),
+                table_name: catalog_entry.map(|(_, table, _, _, _, _)| table.clone()),
+                column_id: column.column_id(),
+                nullable: catalog_entry.map(|(_, _, _, nullable, _, _)| *nullable),
+                generated: catalog_entry
+                    .map(|(_, _, _, _, generated, _)| *generated)
+                    .unwrap_or(false),
+                primary_key: catalog_entry
+                    .map(|(_, _, _, _, _, primary_key)| *primary_key)
+                    .unwrap_or(false),
+            }
+        })
+        .collect())
 }
 
 fn row_to_json(row: &Row) -> Value {

@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   AiHealth,
+  AiCompletionRequest,
   AppError,
   ConnectionFields,
   ConnectionInput,
@@ -45,6 +46,7 @@ export const api = {
   loadDraft: (tabKind: string) => invoke<string | null>('load_draft', { tabKind }),
   aiHealth: () => invoke<AiHealth>('ai_health'),
   aiModels: () => invoke<string[]>('ai_models'),
+  aiComplete: (request: AiCompletionRequest) => invoke<string | null>('ai_complete', { request }),
   exportWriteFile: (path: string, content: string) => invoke<void>('export_write_file', { path, content })
 };
 
