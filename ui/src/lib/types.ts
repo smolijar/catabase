@@ -1,0 +1,118 @@
+export interface AppError {
+  message: string;
+  severity?: string | null;
+  detail?: string | null;
+  hint?: string | null;
+  code?: string | null;
+  position?: number | null;
+}
+
+export interface ConnectionFields {
+  name: string;
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password?: string | null;
+  ssl: boolean;
+}
+
+export interface ConnectionInput extends ConnectionFields {
+  id?: string | null;
+}
+
+export interface ConnectionRecord extends ConnectionFields {
+  id: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Settings {
+  poolSize: number;
+  aiModel?: string | null;
+}
+
+export interface ColumnMeta {
+  name: string;
+  typeOid: number;
+  typeName: string;
+  tableOid?: number | null;
+  nullable?: boolean | null;
+  generated: boolean;
+  primaryKey: boolean;
+}
+
+export interface QueryResult {
+  columns: ColumnMeta[];
+  rows: Record<string, unknown>[];
+  rowCount: number;
+  durationMs: number;
+  autoLimited: boolean;
+  hasMore: boolean;
+}
+
+export interface HistoryEntry {
+  id: number;
+  connectionId?: string | null;
+  query: string;
+  durationMs: number;
+  rowCount?: number | null;
+  resultSize?: number | null;
+  isError: boolean;
+  errorMessage?: string | null;
+  hasResult: boolean;
+  executedAt: string;
+}
+
+export interface HistoryPage {
+  entries: HistoryEntry[];
+  total: number;
+}
+
+export interface HistoryStats {
+  total: number;
+  errors: number;
+  lastExecutedAt?: string | null;
+}
+
+export interface SchemaColumn {
+  name: string;
+  typeName: string;
+  nullable: boolean;
+  generated: boolean;
+  primaryKey: boolean;
+}
+
+export interface SchemaItem {
+  schema: string;
+  name: string;
+  kind: string;
+  columns: SchemaColumn[];
+}
+
+export interface SchemaTree {
+  schemas: SchemaItem[];
+}
+
+export interface AiHealth {
+  state: string;
+  message?: string | null;
+}
+
+export interface StatementRange {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface ExecutionTarget {
+  sql: string;
+  start: number;
+  end: number;
+}
+
+export interface TxStatus {
+  active: boolean;
+  startedAt?: string | null;
+}
