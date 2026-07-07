@@ -205,67 +205,69 @@ impl Storage {
             .unwrap_or(false);
         let fallback_password = input.password.clone().filter(|_| !keyring_verified);
 
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        let existing = tx
-            .query_row(
-                "SELECT created_at, is_active, password_fallback FROM connections WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)? == 1,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let is_new = existing.is_none();
-        let created_at = existing
-            .as_ref()
-            .map(|(created_at, _, _)| created_at.clone())
-            .unwrap_or_else(|| now.clone());
-        let is_active = existing
-            .as_ref()
-            .map(|(_, is_active, _)| *is_active)
-            .unwrap_or(true);
-        let stored_fallback =
-            fallback_password.or_else(|| existing.and_then(|(_, _, password)| password));
+        {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction()?;
+            let existing = tx
+                .query_row(
+                    "SELECT created_at, is_active, password_fallback FROM connections WHERE id = ?1",
+                    params![id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)? == 1,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let is_new = existing.is_none();
+            let created_at = existing
+                .as_ref()
+                .map(|(created_at, _, _)| created_at.clone())
+                .unwrap_or_else(|| now.clone());
+            let is_active = existing
+                .as_ref()
+                .map(|(_, is_active, _)| *is_active)
+                .unwrap_or(true);
+            let stored_fallback =
+                fallback_password.or_else(|| existing.and_then(|(_, _, password)| password));
 
-        if is_new {
-            tx.execute("UPDATE connections SET is_active = 0", [])?;
+            if is_new {
+                tx.execute("UPDATE connections SET is_active = 0", [])?;
+            }
+
+            tx.execute(
+                "INSERT INTO connections (
+                    id, name, host, port, database, username, ssl, password_fallback,
+                    is_active, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    host = excluded.host,
+                    port = excluded.port,
+                    database = excluded.database,
+                    username = excluded.username,
+                    ssl = excluded.ssl,
+                    password_fallback = excluded.password_fallback,
+                    is_active = excluded.is_active,
+                    updated_at = excluded.updated_at",
+                params![
+                    id,
+                    input.name.trim(),
+                    input.host.trim(),
+                    input.port,
+                    input.database.trim(),
+                    input.username.trim(),
+                    bool_to_i64(input.ssl),
+                    stored_fallback,
+                    bool_to_i64(is_active || is_new),
+                    created_at,
+                    now,
+                ],
+            )?;
+            tx.commit()?;
         }
-
-        tx.execute(
-            "INSERT INTO connections (
-                id, name, host, port, database, username, ssl, password_fallback,
-                is_active, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                host = excluded.host,
-                port = excluded.port,
-                database = excluded.database,
-                username = excluded.username,
-                ssl = excluded.ssl,
-                password_fallback = excluded.password_fallback,
-                is_active = excluded.is_active,
-                updated_at = excluded.updated_at",
-            params![
-                id,
-                input.name.trim(),
-                input.host.trim(),
-                input.port,
-                input.database.trim(),
-                input.username.trim(),
-                bool_to_i64(input.ssl),
-                stored_fallback,
-                bool_to_i64(is_active || is_new),
-                created_at,
-                now,
-            ],
-        )?;
-        tx.commit()?;
 
         self.get_connection(&id)
             .and_then(|record| record.ok_or_else(|| CoreError::message("connection was not saved")))
@@ -286,14 +288,17 @@ impl Storage {
     }
 
     pub fn activate_connection(&self, id: &str) -> Result<ConnectionRecord, CoreError> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        tx.execute("UPDATE connections SET is_active = 0", [])?;
-        let changed = tx.execute(
-            "UPDATE connections SET is_active = 1, updated_at = ?2 WHERE id = ?1",
-            params![id, Utc::now().to_rfc3339()],
-        )?;
-        tx.commit()?;
+        let changed = {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction()?;
+            tx.execute("UPDATE connections SET is_active = 0", [])?;
+            let changed = tx.execute(
+                "UPDATE connections SET is_active = 1, updated_at = ?2 WHERE id = ?1",
+                params![id, Utc::now().to_rfc3339()],
+            )?;
+            tx.commit()?;
+            changed
+        };
         if changed == 0 {
             return Err(CoreError::message("connection not found"));
         }
@@ -711,5 +716,38 @@ mod tests {
 
         assert_eq!(storage.history_page(None, 0, 20).unwrap().total, 1);
         assert!(storage.history_result(id).unwrap().is_some());
+    }
+
+    #[test]
+    fn saves_and_activates_connections_without_deadlock() {
+        let storage = Storage::in_memory().unwrap();
+        let first = storage
+            .save_connection(ConnectionInput {
+                id: None,
+                name: "first".to_string(),
+                host: "localhost".to_string(),
+                port: 5432,
+                database: "postgres".to_string(),
+                username: "postgres".to_string(),
+                password: None,
+                ssl: false,
+            })
+            .unwrap();
+        let second = storage
+            .save_connection(ConnectionInput {
+                id: None,
+                name: "second".to_string(),
+                host: "localhost".to_string(),
+                port: 5432,
+                database: "postgres".to_string(),
+                username: "postgres".to_string(),
+                password: None,
+                ssl: false,
+            })
+            .unwrap();
+
+        assert!(second.is_active);
+        assert_eq!(storage.activate_connection(&first.id).unwrap().id, first.id);
+        assert_eq!(storage.active_connection().unwrap().unwrap().id, first.id);
     }
 }
