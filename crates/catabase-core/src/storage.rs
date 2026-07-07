@@ -198,12 +198,13 @@ impl Storage {
             .id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let keyring_verified = input
+        let incoming_password = input
             .password
-            .as_deref()
-            .map(|password| set_and_verify_keyring_password(&id, password))
-            .unwrap_or(false);
-        let fallback_password = input.password.clone().filter(|_| !keyring_verified);
+            .clone()
+            .filter(|password| !password.is_empty());
+        if let Some(password) = incoming_password.as_deref() {
+            let _ = set_and_verify_keyring_password(&id, password);
+        }
 
         {
             let mut conn = self.lock()?;
@@ -230,8 +231,9 @@ impl Storage {
                 .as_ref()
                 .map(|(_, is_active, _)| *is_active)
                 .unwrap_or(true);
-            let stored_fallback =
-                fallback_password.or_else(|| existing.and_then(|(_, _, password)| password));
+            let stored_fallback = incoming_password
+                .clone()
+                .or_else(|| existing.and_then(|(_, _, password)| password));
 
             if is_new {
                 tx.execute("UPDATE connections SET is_active = 0", [])?;
