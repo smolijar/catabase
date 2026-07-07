@@ -1,6 +1,8 @@
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::Duration,
 };
 
 use chrono::Utc;
@@ -12,6 +14,7 @@ use crate::{ConnectionFields, CoreError};
 
 const KEYRING_SERVICE: &str = "catabase";
 const RESULT_JSON_CAP_BYTES: usize = 256 * 1024;
+const KEYRING_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct Storage {
@@ -195,16 +198,12 @@ impl Storage {
             .id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let keyring_saved = input
+        let keyring_verified = input
             .password
             .as_deref()
-            .map(|password| set_keyring_password(&id, password).is_ok())
+            .map(|password| set_and_verify_keyring_password(&id, password))
             .unwrap_or(false);
-        let fallback_password = if keyring_saved {
-            None
-        } else {
-            input.password.clone()
-        };
+        let fallback_password = input.password.clone().filter(|_| !keyring_verified);
 
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
@@ -604,27 +603,64 @@ fn row_to_history(row: &rusqlite::Row<'_>) -> Result<HistoryEntry, rusqlite::Err
 }
 
 fn resolve_connection_password(mut record: ConnectionRecord) -> ConnectionRecord {
-    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &record.id)
-        && let Ok(password) = entry.get_password()
-    {
+    if let Some(password) = get_keyring_password(&record.id) {
         record.password = Some(password);
         return record;
     }
     record
 }
 
-fn set_keyring_password(id: &str, password: &str) -> Result<(), CoreError> {
-    keyring::Entry::new(KEYRING_SERVICE, id)
-        .map_err(|error| CoreError::Keyring(error.to_string()))?
-        .set_password(password)
-        .map_err(|error| CoreError::Keyring(error.to_string()))
+fn set_and_verify_keyring_password(id: &str, password: &str) -> bool {
+    let id = id.to_string();
+    let password = password.to_string();
+    run_keyring(move || {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, &id)
+            .map_err(|error| CoreError::Keyring(error.to_string()))?;
+        entry
+            .set_password(&password)
+            .map_err(|error| CoreError::Keyring(error.to_string()))?;
+        let stored = entry
+            .get_password()
+            .map_err(|error| CoreError::Keyring(error.to_string()))?;
+        Ok(stored == password)
+    })
+    .ok()
+    .unwrap_or(false)
+}
+
+fn get_keyring_password(id: &str) -> Option<String> {
+    let id = id.to_string();
+    run_keyring(move || {
+        keyring::Entry::new(KEYRING_SERVICE, &id)
+            .map_err(|error| CoreError::Keyring(error.to_string()))?
+            .get_password()
+            .map_err(|error| CoreError::Keyring(error.to_string()))
+    })
+    .ok()
 }
 
 fn delete_keyring_password(id: &str) -> Result<(), CoreError> {
-    keyring::Entry::new(KEYRING_SERVICE, id)
-        .map_err(|error| CoreError::Keyring(error.to_string()))?
-        .delete_credential()
-        .map_err(|error| CoreError::Keyring(error.to_string()))
+    let id = id.to_string();
+    run_keyring(move || {
+        keyring::Entry::new(KEYRING_SERVICE, &id)
+            .map_err(|error| CoreError::Keyring(error.to_string()))?
+            .delete_credential()
+            .map_err(|error| CoreError::Keyring(error.to_string()))
+    })
+}
+
+fn run_keyring<T, F>(operation: F) -> Result<T, CoreError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, CoreError> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let _ = sender.send(operation());
+    });
+    receiver
+        .recv_timeout(KEYRING_TIMEOUT)
+        .map_err(|_| CoreError::message("keyring timeout"))?
 }
 
 fn bool_to_i64(value: bool) -> i64 {

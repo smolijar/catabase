@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,8 @@ use crate::{ConnectionFields, CoreError, sql::auto_limit_sql};
 
 pub type PgClient = Client;
 pub type PgCancelToken = CancelToken;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -366,7 +371,8 @@ pub async fn connect_client(fields: &ConnectionFields) -> Result<PgClient, CoreE
         .port(fields.port)
         .user(&fields.username)
         .dbname(&fields.database)
-        .application_name("catabase");
+        .application_name("catabase")
+        .connect_timeout(CONNECT_TIMEOUT);
     if let Some(password) = &fields.password {
         config.password(password);
     }
