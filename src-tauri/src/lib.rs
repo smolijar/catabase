@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use catabase_core::{
     AiCompletionRequest, AiHealth, ConnectionFields, ConnectionInput, ConnectionRecord,
     ConnectionStats, CoreError, HistoryPage, HistoryStats, NewHistoryEntry, OpenCodeClient,
-    PgCancelToken, PgClient, PgErrorInfo, QueryResult, SchemaTree, Settings, StatementKind,
-    StatementRange, Storage, build_connection_url as build_url, cancel_query_token,
-    classify_statement, connect_client, connection_stats as load_connection_stats,
-    execute_on_client, get_ddl as load_ddl, introspect_schema as load_schema,
+    PgCancelToken, PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryResult, SchemaTree,
+    Settings, StatementKind, StatementRange, Storage, build_connection_url as build_url,
+    cancel_query_token, checkout_pool_client, classify_statement,
+    connection_stats as load_connection_stats, create_pool, execute_on_client,
+    get_ddl_on_client as load_ddl, introspect_schema_on_client as load_schema,
     parse_connection_url as parse_url, split_statements, test_connection as test_pg_connection,
 };
 use serde::{Deserialize, Serialize};
@@ -16,14 +17,21 @@ use tokio::sync::{Mutex, RwLock};
 struct AppState {
     storage: Storage,
     active: RwLock<Option<ConnectionRecord>>,
+    pool: RwLock<Option<ActivePool>>,
     tx: Mutex<Option<TxSession>>,
     cancels: Mutex<HashMap<String, CancelEntry>>,
     opencode: OpenCodeClient,
 }
 
+struct ActivePool {
+    connection_id: String,
+    pool_size: u32,
+    pool: PgPool,
+}
+
 struct TxSession {
     connection_id: String,
-    client: PgClient,
+    client: PooledPgClient,
     ssl: bool,
     started_at: String,
 }
@@ -35,7 +43,8 @@ struct CancelEntry {
 
 struct QueryRun<'a> {
     active: &'a ConnectionRecord,
-    fields: &'a ConnectionFields,
+    pool: &'a PgPool,
+    ssl: bool,
     sql: &'a str,
     query_token: &'a str,
     offset: usize,
@@ -128,6 +137,7 @@ async fn save_connection(
         .map_err(AppError::from)?;
     refresh_active(&state).await?;
     reset_tx(&app, &state).await;
+    reset_pool(&state).await;
     emit_pool_reset(&app);
     Ok(record)
 }
@@ -144,6 +154,7 @@ async fn delete_connection(
         .map_err(AppError::from)?;
     refresh_active(&state).await?;
     reset_tx(&app, &state).await;
+    reset_pool(&state).await;
     emit_pool_reset(&app);
     Ok(())
 }
@@ -160,6 +171,7 @@ async fn activate_connection(
         .map_err(AppError::from)?;
     *state.active.write().await = Some(record.clone());
     reset_tx(&app, &state).await;
+    reset_pool(&state).await;
     emit_pool_reset(&app);
     Ok(record)
 }
@@ -197,6 +209,7 @@ async fn set_pool_size(
         .set_pool_size(pool_size)
         .map_err(AppError::from)?;
     reset_tx(&app, &state).await;
+    reset_pool(&state).await;
     emit_pool_reset(&app);
     Ok(normalized)
 }
@@ -224,13 +237,14 @@ async fn execute_query(
     page_size: u32,
 ) -> Result<QueryResult, AppError> {
     let active = active_connection(&state).await?;
-    let fields = ConnectionFields::from(&active);
+    let pool = active_pool(&state, &active).await?;
     let result = run_query_with_state(
         &app,
         &state,
         QueryRun {
             active: &active,
-            fields: &fields,
+            pool: &pool,
+            ssl: active.ssl,
             sql: &sql,
             query_token: &query_token,
             offset: offset as usize,
@@ -293,10 +307,8 @@ async fn cancel_query(
 #[tauri::command]
 async fn connection_stats(state: State<'_, AppState>) -> Result<ConnectionStats, AppError> {
     let active = active_connection(&state).await?;
-    let settings = state.storage.get_settings().map_err(AppError::from)?;
-    load_connection_stats(&ConnectionFields::from(&active), settings.pool_size)
-        .await
-        .map_err(Into::into)
+    let pool = active_pool(&state, &active).await?;
+    Ok(load_connection_stats(&pool))
 }
 
 #[tauri::command]
@@ -323,9 +335,9 @@ async fn tx_rollback(app: AppHandle, state: State<'_, AppState>) -> Result<TxSta
 #[tauri::command]
 async fn introspect_schema(state: State<'_, AppState>) -> Result<SchemaTree, AppError> {
     let active = active_connection(&state).await?;
-    load_schema(&ConnectionFields::from(&active))
-        .await
-        .map_err(Into::into)
+    let pool = active_pool(&state, &active).await?;
+    let client = checkout_pool_client(&pool).await.map_err(AppError::from)?;
+    load_schema(&client).await.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -335,9 +347,9 @@ async fn get_ddl(
     name: String,
 ) -> Result<String, AppError> {
     let active = active_connection(&state).await?;
-    load_ddl(&ConnectionFields::from(&active), &schema, &name)
-        .await
-        .map_err(Into::into)
+    let pool = active_pool(&state, &active).await?;
+    let client = checkout_pool_client(&pool).await.map_err(AppError::from)?;
+    load_ddl(&client, &schema, &name).await.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -438,11 +450,11 @@ async fn run_query_with_state(
                 return Err(CoreError::message("Transaction already active"));
             }
 
-            let client = connect_client(run.fields).await?;
+            let client = checkout_pool_client(run.pool).await?;
             let result = execute_with_cancel(
                 state,
                 &client,
-                run.fields.ssl,
+                run.ssl,
                 run.sql,
                 run.query_token,
                 run.offset,
@@ -453,7 +465,7 @@ async fn run_query_with_state(
             *state.tx.lock().await = Some(TxSession {
                 connection_id: run.active.id.clone(),
                 client,
-                ssl: run.fields.ssl,
+                ssl: run.ssl,
                 started_at,
             });
             let _ = app.emit("tx-changed", tx_status_inner(state).await);
@@ -510,11 +522,11 @@ async fn run_query_with_state(
                 reset_tx(app, state).await;
             }
 
-            let client = connect_client(run.fields).await?;
+            let client = checkout_pool_client(run.pool).await?;
             execute_with_cancel(
                 state,
                 &client,
-                run.fields.ssl,
+                run.ssl,
                 run.sql,
                 run.query_token,
                 run.offset,
@@ -613,6 +625,44 @@ async fn active_connection(state: &State<'_, AppState>) -> Result<ConnectionReco
     Ok(active)
 }
 
+async fn active_pool(
+    state: &State<'_, AppState>,
+    active: &ConnectionRecord,
+) -> Result<PgPool, AppError> {
+    let settings = state.storage.get_settings().map_err(AppError::from)?;
+
+    if let Some(pool_state) = state.pool.read().await.as_ref()
+        && pool_state.connection_id == active.id
+        && pool_state.pool_size == settings.pool_size
+    {
+        return Ok(pool_state.pool.clone());
+    }
+
+    let mut pool_state = state.pool.write().await;
+    if let Some(existing) = pool_state.as_ref()
+        && existing.connection_id == active.id
+        && existing.pool_size == settings.pool_size
+    {
+        return Ok(existing.pool.clone());
+    }
+
+    let pool =
+        create_pool(&ConnectionFields::from(active), settings.pool_size).map_err(AppError::from)?;
+    let client = checkout_pool_client(&pool).await.map_err(AppError::from)?;
+    drop(client);
+
+    *pool_state = Some(ActivePool {
+        connection_id: active.id.clone(),
+        pool_size: settings.pool_size,
+        pool: pool.clone(),
+    });
+    Ok(pool)
+}
+
+async fn reset_pool(state: &State<'_, AppState>) {
+    *state.pool.write().await = None;
+}
+
 async fn refresh_active(state: &State<'_, AppState>) -> Result<(), AppError> {
     let active = state.storage.active_connection().map_err(AppError::from)?;
     *state.active.write().await = active;
@@ -645,6 +695,7 @@ pub fn run() {
             app.manage(AppState {
                 storage,
                 active: RwLock::new(active),
+                pool: RwLock::new(None),
                 tx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 opencode: OpenCodeClient::default(),

@@ -73,7 +73,6 @@
   let aiHealth: AiHealth = { state: 'off', message: null };
   let schemaItems: SchemaItem[] = [];
   let schemaContext = '';
-  let schemaSuggestions: string[] = [];
   let schemaLoading = false;
   let schemaError = '';
   let history: HistoryEntry[] = [];
@@ -95,17 +94,6 @@
   $: schemaContext = schemaItems
     .map((item) => `${item.schema}.${item.name}(${item.columns.map((column) => column.name).join(', ')})`)
     .join('\n');
-  $: schemaSuggestions = Array.from(
-    new Set(
-      schemaItems.flatMap((item) => [
-        item.name,
-        `${item.schema}.${item.name}`,
-        ...item.columns.map((column) => column.name),
-        ...item.columns.map((column) => `${item.name}.${column.name}`),
-        ...item.columns.map((column) => `${item.schema}.${item.name}.${column.name}`)
-      ])
-    )
-  );
   $: if (mounted && activeTab === 'playground') scheduleDraftSave();
 
   onMount(() => {
@@ -140,6 +128,7 @@
       checkAiHealth(),
       refreshTxStatus()
     ]);
+    if (connections.some((connection) => connection.isActive)) void refreshSchema();
   }
 
   function emptyConnection(): ConnectionInput {
@@ -394,6 +383,11 @@
       await api.deleteConnection(id);
       await loadConnections();
       void refreshTxStatus();
+      if (connections.some((connection) => connection.isActive)) {
+        void refreshSchema();
+      } else {
+        schemaItems = [];
+      }
       flash('Connection deleted.');
     } catch (error) {
       flash(errorMessage(error));
@@ -963,7 +957,7 @@
             aiEnabled={aiHealth.state === 'on'}
             aiModel={settings.aiModel}
             {schemaContext}
-            {schemaSuggestions}
+            {schemaItems}
             aiComplete={api.aiComplete}
           />
         {:else}

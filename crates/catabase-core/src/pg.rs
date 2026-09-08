@@ -4,17 +4,21 @@ use std::{
 };
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_postgres::{
-    CancelToken, Client, Config, NoTls, Row, SimpleQueryMessage, config::SslMode, types::Type,
+    CancelToken, Client as TokioPgClient, Config as PgConfig, NoTls, Row, SimpleQueryMessage,
+    config::SslMode, types::Type,
 };
 use tokio_postgres_rustls::MakeRustlsConnect;
 use uuid::Uuid;
 
 use crate::{ConnectionFields, CoreError, sql::auto_limit_sql};
 
-pub type PgClient = Client;
+pub type PgClient = TokioPgClient;
+pub type PgPool = Pool;
+pub type PooledPgClient = deadpool_postgres::Client;
 pub type PgCancelToken = CancelToken;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -85,6 +89,45 @@ pub async fn test_connection(fields: &ConnectionFields) -> Result<(), CoreError>
     Ok(())
 }
 
+pub async fn checkout_pool_client(pool: &PgPool) -> Result<PooledPgClient, CoreError> {
+    pool.get().await.map_err(|error| match error {
+        deadpool_postgres::PoolError::Backend(error) => CoreError::Postgres(error),
+        error => CoreError::message(format!("postgres pool error: {error}")),
+    })
+}
+
+pub fn create_pool(fields: &ConnectionFields, pool_size: u32) -> Result<PgPool, CoreError> {
+    let mut config = postgres_config(fields);
+    let max_size = pool_size.clamp(1, 32) as usize;
+    let manager_config = ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    };
+
+    if fields.ssl {
+        config.ssl_mode(SslMode::Require);
+        let manager = Manager::from_config(config, make_tls_connector(), manager_config);
+        Pool::builder(manager)
+            .max_size(max_size)
+            .runtime(Runtime::Tokio1)
+            .wait_timeout(Some(CONNECT_TIMEOUT))
+            .create_timeout(Some(CONNECT_TIMEOUT))
+            .recycle_timeout(Some(CONNECT_TIMEOUT))
+            .build()
+            .map_err(|error| CoreError::message(format!("postgres pool error: {error}")))
+    } else {
+        config.ssl_mode(SslMode::Disable);
+        let manager = Manager::from_config(config, NoTls, manager_config);
+        Pool::builder(manager)
+            .max_size(max_size)
+            .runtime(Runtime::Tokio1)
+            .wait_timeout(Some(CONNECT_TIMEOUT))
+            .create_timeout(Some(CONNECT_TIMEOUT))
+            .recycle_timeout(Some(CONNECT_TIMEOUT))
+            .build()
+            .map_err(|error| CoreError::message(format!("postgres pool error: {error}")))
+    }
+}
+
 pub async fn execute_query(
     fields: &ConnectionFields,
     sql: &str,
@@ -131,30 +174,21 @@ pub async fn execute_on_client(
     })
 }
 
-pub async fn connection_stats(
-    fields: &ConnectionFields,
-    pool_size: u32,
-) -> Result<ConnectionStats, CoreError> {
-    let client = connect_client(fields).await?;
-    let row = client
-        .query_one(
-            "SELECT
-                COUNT(*) FILTER (WHERE state = 'active')::bigint AS active,
-                COUNT(*) FILTER (WHERE state = 'idle')::bigint AS idle
-             FROM pg_stat_activity
-             WHERE datname = current_database()",
-            &[],
-        )
-        .await?;
-    Ok(ConnectionStats {
-        active: row.get::<_, Option<i64>>(0).unwrap_or(0),
-        idle: row.get::<_, Option<i64>>(1).unwrap_or(0),
-        pool_size,
-    })
+pub fn connection_stats(pool: &PgPool) -> ConnectionStats {
+    let status = pool.status();
+    ConnectionStats {
+        active: status.size.saturating_sub(status.available) as i64,
+        idle: status.available as i64,
+        pool_size: status.max_size as u32,
+    }
 }
 
 pub async fn introspect_schema(fields: &ConnectionFields) -> Result<SchemaTree, CoreError> {
     let client = connect_client(fields).await?;
+    introspect_schema_on_client(&client).await
+}
+
+pub async fn introspect_schema_on_client(client: &PgClient) -> Result<SchemaTree, CoreError> {
     let rows = client
         .query(
             "SELECT
@@ -227,6 +261,14 @@ pub async fn get_ddl(
     name: &str,
 ) -> Result<String, CoreError> {
     let client = connect_client(fields).await?;
+    get_ddl_on_client(&client, schema, name).await
+}
+
+pub async fn get_ddl_on_client(
+    client: &PgClient,
+    schema: &str,
+    name: &str,
+) -> Result<String, CoreError> {
     let row = client
         .query_one(
             "SELECT c.oid, c.relkind
@@ -311,7 +353,7 @@ pub async fn get_ddl(
 }
 
 async fn execute_simple(
-    client: &Client,
+    client: &PgClient,
     sql: &str,
     start: Instant,
 ) -> Result<QueryResult, CoreError> {
@@ -366,17 +408,7 @@ async fn execute_simple(
 }
 
 pub async fn connect_client(fields: &ConnectionFields) -> Result<PgClient, CoreError> {
-    let mut config = Config::new();
-    config
-        .host(&fields.host)
-        .port(fields.port)
-        .user(&fields.username)
-        .dbname(&fields.database)
-        .application_name("catabase")
-        .connect_timeout(CONNECT_TIMEOUT);
-    if let Some(password) = &fields.password {
-        config.password(password);
-    }
+    let mut config = postgres_config(fields);
 
     if fields.ssl {
         config.ssl_mode(SslMode::Require);
@@ -393,6 +425,21 @@ pub async fn connect_client(fields: &ConnectionFields) -> Result<PgClient, CoreE
         });
         Ok(client)
     }
+}
+
+fn postgres_config(fields: &ConnectionFields) -> PgConfig {
+    let mut config = PgConfig::new();
+    config
+        .host(&fields.host)
+        .port(fields.port)
+        .user(&fields.username)
+        .dbname(&fields.database)
+        .application_name("catabase")
+        .connect_timeout(CONNECT_TIMEOUT);
+    if let Some(password) = &fields.password {
+        config.password(password);
+    }
+    config
 }
 
 pub async fn cancel_query_token(token: PgCancelToken, ssl: bool) -> Result<(), CoreError> {
@@ -452,7 +499,7 @@ async fn column_metas(
                  WHERE c.oid = $1::oid
                    AND a.attnum = $2
                    AND NOT a.attisdropped",
-                &[&table_oid.to_string(), &column_id],
+                &[&table_oid, &column_id],
             )
             .await?
         {
