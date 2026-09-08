@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+deadpool-postgres.workspace = true
 keyring.workspace = true
 percent-encoding.workspace = true
 reqwest.workspace = true

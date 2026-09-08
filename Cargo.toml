@@ -9,6 +9,7 @@ license = "MIT"
 
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+deadpool-postgres = "0.14"
 keyring = "3"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
