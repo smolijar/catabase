@@ -2,6 +2,7 @@
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import { save } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
+  import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
@@ -43,6 +44,7 @@
     whereColumns: ColumnMeta[];
     warning?: string;
   };
+  type SchemaGroup = { name: string; items: SchemaItem[] };
 
   let sidebar: SidebarTab = 'connections';
   let sidebarOpen = true;
@@ -60,6 +62,8 @@
   let queryError: AppError | null = null;
   let lastExecution: ExecutionTarget | null = null;
   let statusFlash = 'Ready';
+  let toastVisible = false;
+  let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let mounted = false;
   let txStatus: TxStatus = { active: false, startedAt: null };
   let editMode = false;
@@ -73,12 +77,17 @@
   let aiHealth: AiHealth = { state: 'off', message: null };
   let schemaItems: SchemaItem[] = [];
   let schemaContext = '';
+  let schemaSearch = '';
+  let schemaGroups: SchemaGroup[] = [];
   let schemaLoading = false;
   let schemaError = '';
   let history: HistoryEntry[] = [];
   let historyStats: HistoryStats = { total: 0, errors: 0, lastExecutedAt: null };
   let historySearch = '';
   let historyTimer: ReturnType<typeof setTimeout> | null = null;
+  let exportFormat: 'csv' | 'tsv' | 'json' = 'csv';
+  let resultsHeight = 292;
+  let resizingResults = false;
 
   let showConnectionModal = false;
   let connectionForm: ConnectionInput = emptyConnection();
@@ -94,10 +103,13 @@
   $: schemaContext = schemaItems
     .map((item) => `${item.schema}.${item.name}(${item.columns.map((column) => column.name).join(', ')})`)
     .join('\n');
+  $: schemaGroups = groupSchemaItems(schemaItems, schemaSearch);
   $: if (mounted && activeTab === 'playground') scheduleDraftSave();
 
   onMount(() => {
     mounted = true;
+    const savedResultsHeight = Number(localStorage.getItem('catabase.resultsHeight'));
+    if (Number.isFinite(savedResultsHeight) && savedResultsHeight >= 180) resultsHeight = savedResultsHeight;
     void bootstrap();
     window.addEventListener('keydown', handleKeydown);
     window.addEventListener('beforeunload', persistDraftNow);
@@ -116,6 +128,8 @@
       window.clearInterval(statsInterval);
       window.clearInterval(runningInterval);
       window.clearInterval(aiInterval);
+      if (toastTimer) window.clearTimeout(toastTimer);
+      stopResultsResize();
     };
   });
 
@@ -151,6 +165,23 @@
       sidebar = tab;
       sidebarOpen = true;
     }
+  }
+
+  function groupSchemaItems(items: SchemaItem[], search: string): SchemaGroup[] {
+    const term = search.trim().toLowerCase();
+    const filtered = term
+      ? items.filter(
+          (item) =>
+            item.schema.toLowerCase().includes(term) ||
+            item.name.toLowerCase().includes(term) ||
+            item.columns.some(
+              (column) => column.name.toLowerCase().includes(term) || column.typeName.toLowerCase().includes(term)
+            )
+        )
+      : items;
+    const groups = new Map<string, SchemaItem[]>();
+    for (const item of filtered) groups.set(item.schema, [...(groups.get(item.schema) ?? []), item]);
+    return Array.from(groups, ([name, groupItems]) => ({ name, items: groupItems }));
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -287,6 +318,7 @@
       flash('Switch to Playground to clear SQL.');
       return;
     }
+    if (sql.trim() && !confirm('Clear the SQL editor? This cannot be undone.')) return;
     sql = '';
     flash('Editor cleared.');
   }
@@ -542,8 +574,12 @@
       return;
     }
     const text = serializeRows(result, format);
-    await writeText(text).catch(() => navigator.clipboard.writeText(text));
-    flash(`${format.toUpperCase()} copied.`);
+    try {
+      await writeText(text).catch(() => navigator.clipboard.writeText(text));
+      flash(`${format.toUpperCase()} copied to clipboard.`);
+    } catch (error) {
+      flash(`Copy failed: ${errorMessage(error)}`);
+    }
   }
 
   async function downloadResult(format: 'csv' | 'tsv' | 'json', full = false) {
@@ -556,16 +592,21 @@
       return;
     }
 
-    let exportResult = result;
-    if (full && lastExecution) {
-      const token = crypto.randomUUID();
-      exportResult = await api.executeQuery(lastExecution.sql, token, 0, 100_000);
-    }
+    try {
+      let exportResult = result;
+      if (full && lastExecution) {
+        flash('Preparing full export…');
+        const token = crypto.randomUUID();
+        exportResult = await api.executeQuery(lastExecution.sql, token, 0, 100_000);
+      }
 
-    const path = await save({ defaultPath: `catabase-${timestamp()}.${format}` });
-    if (!path) return;
-    await api.exportWriteFile(path, serializeRows(exportResult, format));
-    flash(`${format.toUpperCase()} downloaded.`);
+      const path = await save({ defaultPath: `catabase-${timestamp()}.${format}` });
+      if (!path) return;
+      await api.exportWriteFile(path, serializeRows(exportResult, format));
+      flash(`${format.toUpperCase()} saved.`);
+    } catch (error) {
+      flash(`Export failed: ${errorMessage(error)}`);
+    }
   }
 
   function enableEditMode() {
@@ -760,6 +801,12 @@
 
   function flash(message: string) {
     statusFlash = message;
+    toastVisible = true;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toastVisible = false;
+      toastTimer = null;
+    }, 3600);
   }
 
   function cloneRows(rows: Record<string, unknown>[]): Record<string, unknown>[] {
@@ -802,6 +849,46 @@
     return `${((nowMs - runningStartedAt) / 1000).toFixed(1)}s`;
   }
 
+  function formatHistoryTime(value: string): string {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return new Intl.DateTimeFormat(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    }).format(date);
+  }
+
+  function startResultsResize(event: PointerEvent) {
+    event.preventDefault();
+    resizingResults = true;
+    window.addEventListener('pointermove', resizeResults);
+    window.addEventListener('pointerup', stopResultsResize, { once: true });
+  }
+
+  function resizeResults(event: PointerEvent) {
+    const pane = document.querySelector<HTMLElement>('.main-pane');
+    if (!pane) return;
+    const nextHeight = pane.getBoundingClientRect().bottom - event.clientY;
+    resultsHeight = Math.round(Math.min(Math.max(nextHeight, 180), Math.max(180, pane.clientHeight - 260)));
+  }
+
+  function stopResultsResize() {
+    if (resizingResults) localStorage.setItem('catabase.resultsHeight', String(resultsHeight));
+    resizingResults = false;
+    window.removeEventListener('pointermove', resizeResults);
+    window.removeEventListener('pointerup', stopResultsResize);
+  }
+
+  function resizeResultsWithKeyboard(event: KeyboardEvent) {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    const delta = event.key === 'ArrowUp' ? 24 : -24;
+    resultsHeight = Math.min(Math.max(resultsHeight + delta, 180), Math.max(180, window.innerHeight - 320));
+    localStorage.setItem('catabase.resultsHeight', String(resultsHeight));
+  }
+
   async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -832,104 +919,214 @@
         <small>PostgreSQL query workspace</small>
       </div>
     </div>
-    <button class="primary" on:click={runQuery}>{running ? 'Cancel' : 'Run'}</button>
-    <button on:click={clearEditor}>Clear</button>
-    <button on:click={clearResults}>Clear Results</button>
+    <button
+      class="primary run-button"
+      class:cancel-button={running}
+      on:click={runQuery}
+      disabled={!activeConnection && !running}
+      title={activeConnection ? 'Run current statement (Cmd/Ctrl+Enter)' : 'Add or activate a connection first'}
+    >
+      <Icon name={running ? 'stop' : 'play'} size={16} />
+      <span>{running ? 'Cancel' : 'Run'}</span>
+      <kbd>⌘↵</kbd>
+    </button>
+    <button class="toolbar-action" on:click={clearEditor} title="Clear SQL editor">
+      <Icon name="clear" size={16} /><span>Clear SQL</span>
+    </button>
+    <button class="toolbar-action" on:click={clearResults} title="Clear query results">
+      <Icon name="close" size={16} /><span>Clear results</span>
+    </button>
     <div class="toolbar-spacer"></div>
-    <span class="chip">{activeConnection ? activeConnection.name : 'No connection'}</span>
+    <button
+      class="chip connection-chip"
+      class:connected={Boolean(activeConnection)}
+      on:click={() => selectSidebar('connections')}
+      title="Show connections"
+    >
+      <span class="status-dot"></span>
+      {activeConnection ? activeConnection.name : 'No connection'}
+    </button>
     <span class="chip">{poolStats ? `${poolStats.active} active / ${poolStats.idle} idle` : `Pool ${settings.poolSize}`}</span>
     {#if running}<span class="chip running-chip">Running {runningDuration()}</span>{/if}
-    <span class="chip ai-{aiHealth.state}">AI {aiHealth.state}</span>
+    <button class="chip ai-{aiHealth.state}" on:click={() => selectSidebar('settings')} title={aiHealth.message ?? 'AI status'}>
+      <Icon name="sparkles" size={14} /> AI {aiHealth.state}
+    </button>
   </header>
 
   <section class="workspace">
-    <aside class="icon-strip">
-      <button class:active={sidebar === 'connections'} on:click={() => selectSidebar('connections')}>DB</button>
-      <button class:active={sidebar === 'schema'} on:click={() => selectSidebar('schema')}>SC</button>
-      <button class:active={sidebar === 'history'} on:click={() => selectSidebar('history')}>HI</button>
-      <button class:active={sidebar === 'settings'} on:click={() => selectSidebar('settings')}>SE</button>
+    <aside class="icon-strip" aria-label="Workspace navigation">
+      <button
+        class:active={sidebar === 'connections' && sidebarOpen}
+        aria-label="Connections"
+        aria-pressed={sidebar === 'connections' && sidebarOpen}
+        data-tooltip="Connections"
+        on:click={() => selectSidebar('connections')}
+      ><Icon name="database" /></button>
+      <button
+        class:active={sidebar === 'schema' && sidebarOpen}
+        aria-label="Schema"
+        aria-pressed={sidebar === 'schema' && sidebarOpen}
+        data-tooltip="Schema"
+        on:click={() => selectSidebar('schema')}
+      ><Icon name="schema" /></button>
+      <button
+        class:active={sidebar === 'history' && sidebarOpen}
+        aria-label="History"
+        aria-pressed={sidebar === 'history' && sidebarOpen}
+        data-tooltip="History"
+        on:click={() => selectSidebar('history')}
+      ><Icon name="history" /></button>
+      <button
+        class:active={sidebar === 'settings' && sidebarOpen}
+        aria-label="Settings"
+        aria-pressed={sidebar === 'settings' && sidebarOpen}
+        data-tooltip="Settings"
+        on:click={() => selectSidebar('settings')}
+      ><Icon name="settings" /></button>
     </aside>
 
     {#if sidebarOpen}
       <aside class="sidebar">
         {#if sidebar === 'connections'}
           <div class="panel-head">
-            <h2>Connections</h2>
-            <button on:click={openNewConnection}>Add</button>
+            <div>
+              <h2>Connections</h2>
+              <p>{connections.length} saved</p>
+            </div>
+            <button class="icon-label-button" on:click={openNewConnection}><Icon name="plus" size={15} /> Add</button>
           </div>
           {#if connections.length === 0}
-            <p class="empty">No saved connections.</p>
+            <div class="empty-state">
+              <span class="empty-state-icon"><Icon name="database" size={24} /></span>
+              <strong>No connections yet</strong>
+              <p>Add a PostgreSQL connection to start querying.</p>
+              <button class="primary" on:click={openNewConnection}><Icon name="plus" size={15} /> Add connection</button>
+            </div>
           {/if}
           {#each connections as connection (connection.id)}
             <article class:active-card={connection.isActive} class="connection-card">
-              <strong>{connection.name}</strong>
-              <span>{connection.username}@{connection.host}:{connection.port}/{connection.database}</span>
+              <div class="connection-card-head">
+                <strong>{connection.name}</strong>
+                {#if connection.isActive}<span class="active-badge"><span class="status-dot"></span> Active</span>{/if}
+              </div>
+              <span class="connection-address">{connection.username}@{connection.host}:{connection.port}/{connection.database}</span>
               <div class="row-actions">
-                <button on:click={() => activateConnection(connection.id)}>Use</button>
-                <button on:click={() => editConnection(connection)}>Edit</button>
-                <button on:click={() => deleteConnection(connection.id)}>Delete</button>
+                <button disabled={connection.isActive} on:click={() => activateConnection(connection.id)}>
+                  <Icon name="check" size={14} /> {connection.isActive ? 'In use' : 'Use'}
+                </button>
+                <button on:click={() => editConnection(connection)}><Icon name="edit" size={14} /> Edit</button>
+                <button class="danger-quiet" aria-label={`Delete ${connection.name}`} title={`Delete ${connection.name}`} on:click={() => deleteConnection(connection.id)}>
+                  <Icon name="trash" size={14} />
+                </button>
               </div>
             </article>
           {/each}
         {:else if sidebar === 'schema'}
           <div class="panel-head">
-            <h2>Schema</h2>
-            <button on:click={() => refreshSchema()}>Refresh</button>
+            <div>
+              <h2>Schema</h2>
+              <p>{schemaItems.length} objects</p>
+            </div>
+            <button class="icon-button" aria-label="Refresh schema" title="Refresh schema" on:click={() => refreshSchema()} disabled={schemaLoading}>
+              <Icon name="refresh" size={16} />
+            </button>
           </div>
+          <label class="search-field" aria-label="Search schema">
+            <Icon name="search" size={15} />
+            <input placeholder="Tables, columns, types…" bind:value={schemaSearch} />
+            {#if schemaSearch}<button aria-label="Clear schema search" on:click={() => (schemaSearch = '')}><Icon name="close" size={13} /></button>{/if}
+          </label>
           {#if schemaLoading}<p class="empty">Loading schema...</p>{/if}
           {#if schemaError}<p class="error-text">{schemaError}</p>{/if}
-          {#each schemaItems as item (`${item.schema}.${item.name}`)}
-            <details class="schema-item">
-              <summary on:click|preventDefault={() => openDdl(item)}>{item.schema}.{item.name} <span>{item.kind}</span></summary>
-              {#each item.columns as column (column.name)}
-                <div class="column-row">
-                  <span>{column.name}{column.primaryKey ? ' PK' : ''}{column.generated ? ' GEN' : ''}</span>
-                  <small>{column.typeName}{column.nullable ? '' : ' not null'}</small>
-                </div>
+          {#if !schemaLoading && schemaItems.length > 0 && schemaGroups.length === 0}
+            <div class="empty-state compact"><strong>No schema matches</strong><p>Try another table or column name.</p></div>
+          {/if}
+          {#each schemaGroups as group (group.name)}
+            <section class="schema-group">
+              <div class="schema-group-title"><span>{group.name}</span><small>{group.items.length}</small></div>
+              {#each group.items as item (`${item.schema}.${item.name}`)}
+                <details class="schema-item">
+                  <summary>
+                    <Icon name="chevron" size={14} />
+                    <span class="schema-object-name">{item.name}</span>
+                    <span class="object-kind">{item.kind}</span>
+                  </summary>
+                  <div class="schema-detail">
+                    {#each item.columns as column (column.name)}
+                      <div class="column-row">
+                        <span>{column.name}{column.primaryKey ? ' PK' : ''}{column.generated ? ' GEN' : ''}</span>
+                        <small>{column.typeName}{column.nullable ? '' : ' not null'}</small>
+                      </div>
+                    {/each}
+                    <button class="ddl-button" on:click={() => openDdl(item)}>Open DDL</button>
+                  </div>
+                </details>
               {/each}
-            </details>
+            </section>
           {/each}
         {:else if sidebar === 'history'}
           <div class="panel-head">
-            <h2>History</h2>
-            <button on:click={purgeHistory}>Purge</button>
+            <div>
+              <h2>History</h2>
+              <p>{historyStats.total} queries · {historyStats.errors} errors</p>
+            </div>
+            <button class="danger-quiet icon-label-button" on:click={purgeHistory}><Icon name="trash" size={14} /> Purge</button>
           </div>
-          <input placeholder="Search SQL" bind:value={historySearch} on:input={queueHistorySearch} />
-          <p class="muted">{historyStats.total} queries, {historyStats.errors} errors</p>
+          <label class="search-field" aria-label="Search query history">
+            <Icon name="search" size={15} />
+            <input placeholder="Search query history…" bind:value={historySearch} on:input={queueHistorySearch} />
+            {#if historySearch}<button aria-label="Clear history search" on:click={() => { historySearch = ''; void refreshHistory(); }}><Icon name="close" size={13} /></button>{/if}
+          </label>
+          {#if history.length === 0}
+            <div class="empty-state compact"><strong>No query history</strong><p>Executed queries will appear here.</p></div>
+          {/if}
           {#each history as entry (entry.id)}
             <article class:error-card={entry.isError} class="history-card">
+              <div class="history-meta">
+                <span class:error-status={entry.isError} class="history-status">{entry.isError ? 'Error' : 'Success'}</span>
+                <time title={entry.executedAt}>{formatHistoryTime(entry.executedAt)}</time>
+              </div>
               <code>{entry.query}</code>
-              <small>{entry.executedAt} · {entry.durationMs} ms</small>
-              {#if entry.errorMessage}<small>{entry.errorMessage}</small>{/if}
+              <small>{entry.durationMs} ms{entry.rowCount != null ? ` · ${entry.rowCount} rows` : ''}</small>
+              {#if entry.errorMessage}<small class="history-error">{entry.errorMessage}</small>{/if}
               <div class="row-actions">
-                <button on:click={() => restoreHistory(entry)}>Restore</button>
-                <button disabled={!entry.hasResult} on:click={() => openHistory(entry)}>Open</button>
-                <button on:click={() => deleteHistory(entry.id)}>Delete</button>
+                <button on:click={() => restoreHistory(entry)}><Icon name="refresh" size={14} /> Restore</button>
+                <button disabled={!entry.hasResult} on:click={() => openHistory(entry)}>Open result</button>
+                <button class="danger-quiet" aria-label="Delete history entry" title="Delete history entry" on:click={() => deleteHistory(entry.id)}><Icon name="trash" size={14} /></button>
               </div>
             </article>
           {/each}
         {:else}
-          <div class="panel-head"><h2>Settings</h2></div>
-          <label>
-            Pool size
-            <input type="number" min="1" max="32" bind:value={poolSizeInput} />
-          </label>
-          <button on:click={savePoolSize}>Save pool size</button>
-          <label>
-            AI model
-            <select value={settings.aiModel ?? ''} on:change={(event) => saveAiModel(event.currentTarget.value)}>
-              <option value="">Default</option>
-              {#each aiModels as model (model)}
-                <option value={model}>{model}</option>
-              {/each}
-            </select>
-          </label>
-          <p class="muted">OpenCode: {aiHealth.message ?? aiHealth.state}</p>
+          <div class="panel-head"><div><h2>Settings</h2><p>Workspace preferences</p></div></div>
+          <section class="settings-card">
+            <div class="settings-card-head"><strong>Connection pool</strong><span>{settings.poolSize} connections</span></div>
+            <label>
+              Maximum connections
+              <div class="inline-control">
+                <input type="number" min="1" max="32" bind:value={poolSizeInput} />
+                <button on:click={savePoolSize}>Save</button>
+              </div>
+            </label>
+            <p>Choose between 1 and 32 concurrent PostgreSQL connections.</p>
+          </section>
+          <section class="settings-card">
+            <div class="settings-card-head"><strong>AI completion</strong><span class="ai-{aiHealth.state}">{aiHealth.state}</span></div>
+            <label>
+              OpenCode model
+              <select value={settings.aiModel ?? ''} on:change={(event) => saveAiModel(event.currentTarget.value)}>
+                <option value="">Default</option>
+                {#each aiModels as model (model)}
+                  <option value={model}>{model}</option>
+                {/each}
+              </select>
+            </label>
+            <p>{aiHealth.message ?? 'Connect OpenCode to enable inline SQL suggestions.'}</p>
+          </section>
         {/if}
       </aside>
     {/if}
 
-    <section class="main-pane">
+    <section class="main-pane" class:resizing={resizingResults} style={`--results-height: ${resultsHeight}px`}>
       <nav class="tabs">
         <button class:active={activeTab === 'playground'} on:click={() => (activeTab = 'playground')}>Playground</button>
         {#each readonlyTabs as tab (tab.id)}
@@ -965,24 +1162,48 @@
         {/if}
       </div>
 
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_no_noninteractive_tabindex -->
+      <div
+        class="results-resizer"
+        role="separator"
+        aria-label="Resize results panel"
+        aria-orientation="horizontal"
+        aria-valuemin="180"
+        aria-valuemax={Math.max(180, window.innerHeight - 320)}
+        aria-valuenow={resultsHeight}
+        tabindex="0"
+        on:pointerdown={startResultsResize}
+        on:keydown={resizeResultsWithKeyboard}
+      ><span></span></div>
+
       <section class="results-pane">
         <div class="results-head">
-          <strong>Results</strong>
-          {#if running}<span class="muted">Running {runningDuration()}</span>{/if}
-          <div class="row-actions">
-            <button on:click={() => copyResult('csv')}>Copy CSV</button>
-            <button on:click={() => copyResult('tsv')}>Copy TSV</button>
-            <button on:click={() => copyResult('json')}>Copy JSON</button>
-            <button on:click={() => downloadResult('csv')}>Download CSV</button>
-            <button on:click={() => downloadResult('json')}>Download JSON</button>
-            <button on:click={() => downloadResult('json', true)}>Full JSON</button>
+          <div class="results-title">
+            <strong>Results</strong>
+            {#if running}
+              <span class="running-state"><span class="spinner"></span> Running {runningDuration()}</span>
+            {:else if result}
+              <span>{result.rowCount}{result.hasMore ? '+' : ''} rows · {result.durationMs} ms</span>
+            {:else}
+              <span>No query run</span>
+            {/if}
+          </div>
+          <div class="results-actions">
+            <select class="compact-select" aria-label="Export format" bind:value={exportFormat} disabled={!result?.rows.length}>
+              <option value="csv">CSV</option>
+              <option value="tsv">TSV</option>
+              <option value="json">JSON</option>
+            </select>
+            <button disabled={!result?.rows.length} on:click={() => copyResult(exportFormat)}><Icon name="copy" size={14} /> Copy</button>
+            <button disabled={!result?.rows.length} on:click={() => downloadResult(exportFormat)}><Icon name="download" size={14} /> Save</button>
+            <button disabled={!result?.rows.length || !lastExecution} on:click={() => downloadResult(exportFormat, true)} title="Re-run the query and export up to 10,000 rows">Up to 10k</button>
             {#if editMode}
               <button on:click={previewUpdates}>Preview SQL</button>
               <button disabled={!canApplyUpdates()} on:click={applyUpdates}>Apply</button>
               <button on:click={discardUpdates}>Discard</button>
               <button on:click={disableEditMode}>Stop Edit</button>
             {:else}
-              <button on:click={enableEditMode}>Edit</button>
+              <button disabled={!result?.rows.length} on:click={enableEditMode}><Icon name="edit" size={14} /> Edit</button>
             {/if}
           </div>
         </div>
@@ -1037,20 +1258,32 @@
         {:else if result}
           <p class="empty">Query completed in {result.durationMs} ms with no rows.</p>
         {:else}
-          <p class="empty">Ready. Run a query to see results.</p>
+          <div class="empty-state results-empty">
+            <span class="empty-state-icon"><Icon name="play" size={22} /></span>
+            <strong>Run a query to see results</strong>
+            <p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>
+          </div>
         {/if}
       </section>
     </section>
   </section>
 
   <footer class="status-bar">
-    <span>{activeConnection ? `${activeConnection.host}/${activeConnection.database}` : 'No connection'}</span>
+    <span class="status-connection"><span class:connected={Boolean(activeConnection)} class="status-dot"></span>{activeConnection ? `${activeConnection.host}/${activeConnection.database}` : 'No connection'}</span>
     <span>{poolStats ? `Pool ${settings.poolSize}: ${poolStats.active} active, ${poolStats.idle} idle` : `Pool ${settings.poolSize}`}</span>
     <span>Schema {schemaItems.length ? `${schemaItems.length} objects` : 'not loaded'}</span>
     {#if running}<span>Running {runningDuration()}</span>{/if}
-    <span>{statusFlash}</span>
+    <span class="status-flash">{statusFlash}</span>
   </footer>
 </main>
+
+{#if toastVisible}
+  <div class="toast" role="status">
+    <span class="toast-icon"><Icon name="check" size={15} /></span>
+    <span>{statusFlash}</span>
+    <button aria-label="Dismiss message" on:click={() => (toastVisible = false)}><Icon name="close" size={14} /></button>
+  </div>
+{/if}
 
 {#if showConnectionModal}
   <div class="modal-backdrop">
