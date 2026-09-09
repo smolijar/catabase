@@ -82,6 +82,116 @@ select {
   padding: 0.55rem 0.7rem;
 }
 
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-color: #0b1324;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%2394a3b8' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 8 4 4 4-4'/%3E%3C/svg%3E");
+  background-position: right 0.65rem center;
+  background-repeat: no-repeat;
+  background-size: 1rem;
+  color-scheme: dark;
+  cursor: pointer;
+  padding-right: 2.15rem;
+}
+
+select:hover:not(:disabled) {
+  border-color: #4d6389;
+  background-color: #101b2e;
+}
+
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+select option,
+select optgroup {
+  background: #0b1324;
+  color: #d8e1f2;
+}
+
+.dropdown {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.dropdown-trigger {
+  width: 100%;
+  min-width: 0;
+  justify-content: flex-start;
+  border-color: #33415f;
+  background: #0b1324;
+  color: #d8e1f2;
+  padding: 0.55rem 0.7rem;
+}
+
+.dropdown-trigger:hover:not(:disabled),
+.dropdown.open .dropdown-trigger {
+  border-color: #4d6389;
+  background: #101b2e;
+}
+
+.dropdown-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdown-chevron {
+  margin-left: auto;
+  color: #94a3b8;
+  transform: rotate(90deg);
+  transition: transform 120ms ease, color 120ms ease;
+}
+
+.dropdown.open .dropdown-chevron {
+  color: #bae6fd;
+  transform: rotate(-90deg);
+}
+
+.dropdown-menu {
+  position: fixed;
+  z-index: 80;
+  display: grid;
+  gap: 2px;
+  overflow-y: auto;
+  border: 1px solid #33415f;
+  border-radius: 9px;
+  background: #0a1221;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.48);
+  padding: 4px;
+}
+
+.dropdown-option {
+  width: 100%;
+  min-height: 32px;
+  justify-content: space-between;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #b8c5da;
+  padding: 0.42rem 0.55rem;
+  text-align: left;
+}
+
+.dropdown-option:hover:not(:disabled),
+.dropdown-option.active {
+  background: #17253d;
+  color: #f8fafc;
+}
+
+.dropdown-option[aria-selected="true"] {
+  color: #7dd3fc;
+}
+
+.dropdown-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 kbd {
   border: 1px solid rgba(148, 163, 184, 0.35);
   border-radius: 5px;
@@ -700,8 +810,8 @@ button.chip {
   overflow-x: auto;
 }
 
-.results-actions button,
-.compact-select {
+.results-actions > button,
+.dropdown.compact .dropdown-trigger {
   width: auto;
   height: 32px;
   flex: 0 0 auto;
@@ -709,9 +819,14 @@ button.chip {
   padding: 0.35rem 0.55rem;
 }
 
-.compact-select {
-  min-width: 70px;
-  background: #111b2e;
+.dropdown.compact {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.dropdown.compact .dropdown-trigger {
+  min-width: 76px;
+  background-color: #111b2e;
 }
 
 .running-state {

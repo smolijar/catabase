@@ -2,6 +2,7 @@
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import { save } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
+  import Dropdown from './components/Dropdown.svelte';
   import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
   import { serializeRows } from './lib/export';
@@ -24,6 +25,11 @@
 
   const DEFAULT_SQL = `-- Welcome to Catabase\n-- Add a PostgreSQL connection, then run SQL with Cmd/Ctrl+Enter.\nselect now() as connected_at;`;
   const PAGE_SIZE = 200;
+  const EXPORT_OPTIONS = [
+    { value: 'csv', label: 'CSV' },
+    { value: 'tsv', label: 'TSV' },
+    { value: 'json', label: 'JSON' }
+  ];
 
   type SidebarTab = 'connections' | 'schema' | 'history' | 'settings';
   type ReadonlyTab = { id: string; title: string; content: string };
@@ -104,6 +110,10 @@
     .map((item) => `${item.schema}.${item.name}(${item.columns.map((column) => column.name).join(', ')})`)
     .join('\n');
   $: schemaGroups = groupSchemaItems(schemaItems, schemaSearch);
+  $: aiModelOptions = [
+    { value: '', label: 'Default' },
+    ...aiModels.map((model) => ({ value: model, label: model }))
+  ];
   $: if (mounted && activeTab === 'playground') scheduleDraftSave();
 
   onMount(() => {
@@ -1113,12 +1123,12 @@
             <div class="settings-card-head"><strong>AI completion</strong><span class="ai-{aiHealth.state}">{aiHealth.state}</span></div>
             <label>
               OpenCode model
-              <select value={settings.aiModel ?? ''} on:change={(event) => saveAiModel(event.currentTarget.value)}>
-                <option value="">Default</option>
-                {#each aiModels as model (model)}
-                  <option value={model}>{model}</option>
-                {/each}
-              </select>
+              <Dropdown
+                value={settings.aiModel ?? ''}
+                options={aiModelOptions}
+                ariaLabel="OpenCode model"
+                onSelect={(model) => void saveAiModel(model)}
+              />
             </label>
             <p>{aiHealth.message ?? 'Connect OpenCode to enable inline SQL suggestions.'}</p>
           </section>
@@ -1189,11 +1199,14 @@
             {/if}
           </div>
           <div class="results-actions">
-            <select class="compact-select" aria-label="Export format" bind:value={exportFormat} disabled={!result?.rows.length}>
-              <option value="csv">CSV</option>
-              <option value="tsv">TSV</option>
-              <option value="json">JSON</option>
-            </select>
+            <Dropdown
+              value={exportFormat}
+              options={EXPORT_OPTIONS}
+              ariaLabel="Export format"
+              disabled={!result?.rows.length}
+              compact
+              onSelect={(format) => (exportFormat = format as typeof exportFormat)}
+            />
             <button disabled={!result?.rows.length} on:click={() => copyResult(exportFormat)}><Icon name="copy" size={14} /> Copy</button>
             <button disabled={!result?.rows.length} on:click={() => downloadResult(exportFormat)}><Icon name="download" size={14} /> Save</button>
             <button disabled={!result?.rows.length || !lastExecution} on:click={() => downloadResult(exportFormat, true)} title="Re-run the query and export up to 10,000 rows">Up to 10k</button>
