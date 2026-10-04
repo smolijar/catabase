@@ -54,6 +54,8 @@ export interface QueryResult {
   durationMs: number;
   autoLimited: boolean;
   hasMore: boolean;
+  /** New results preserve JSON/JSONB as raw text; older history contains decoded values. */
+  jsonValuesAsText?: boolean;
 }
 
 export interface RowUpdate {

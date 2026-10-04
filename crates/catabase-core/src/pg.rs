@@ -49,6 +49,8 @@ pub struct QueryResult {
     pub duration_ms: u128,
     pub auto_limited: bool,
     pub has_more: bool,
+    #[serde(default)]
+    pub json_values_as_text: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -172,6 +174,7 @@ pub async fn execute_on_client(
         duration_ms: start.elapsed().as_millis(),
         auto_limited,
         has_more,
+        json_values_as_text: true,
     })
 }
 
@@ -405,6 +408,7 @@ async fn execute_simple(
         duration_ms: start.elapsed().as_millis(),
         auto_limited: false,
         has_more: false,
+        json_values_as_text: false,
     })
 }
 
@@ -797,5 +801,16 @@ mod numeric_tests {
             "null"
         );
         assert!(RawJson::from_sql(&Type::JSONB, b"\x02{}").is_err());
+    }
+
+    #[test]
+    fn legacy_results_default_to_decoded_json_values() {
+        let result: QueryResult = serde_json::from_value(json!({
+            "columns": [], "rows": [{"payload": "null"}], "rowCount": 1,
+            "durationMs": 0, "autoLimited": false, "hasMore": false
+        }))
+        .unwrap();
+        assert!(!result.json_values_as_text);
+        assert_eq!(result.rows[0]["payload"], "null");
     }
 }
