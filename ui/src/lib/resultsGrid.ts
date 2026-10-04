@@ -5,6 +5,13 @@ export type GridSort = { column: string; direction: 'asc' | 'desc' } | null;
 export type IndexedRow = { row: Record<string, unknown>; originalIndex: number };
 export type CellKind = 'boolean' | 'integer' | 'numeric' | 'json' | 'text';
 
+export function visibleRowWindow(total: number, scrollTop: number, viewportHeight: number, rowHeight = 33, headerHeight = 49, overscan = 10) {
+  const visibleStart = Math.floor(Math.max(0, scrollTop - headerHeight) / rowHeight);
+  const first = Math.min(Math.max(0, total - 1), Math.max(0, visibleStart - overscan));
+  const last = Math.min(total, Math.max(first, Math.ceil(Math.max(0, scrollTop + viewportHeight - headerHeight) / rowHeight) + overscan));
+  return { first, last, top: first * rowHeight, bottom: (total - last) * rowHeight };
+}
+
 export function cellKind(column: ColumnMeta): CellKind {
   const type = column.typeName.toLowerCase().replace(/^pg_catalog\./, '');
   if (type === 'bool' || type === 'boolean') return 'boolean';

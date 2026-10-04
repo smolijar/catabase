@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseCellDraft, prettyCell, selectionText, sortedRows } from '../src/lib/resultsGrid.ts';
+import { parseCellDraft, prettyCell, selectionText, sortedRows, visibleRowWindow } from '../src/lib/resultsGrid.ts';
 import type { ColumnMeta, QueryResult } from '../src/lib/types.ts';
 
 const column = (typeName = 'text', more: Partial<ColumnMeta> = {}): ColumnMeta => ({ name: 'value', typeName, typeOid: 0, nullable: true, generated: false, primaryKey: false, ...more });
@@ -51,4 +51,22 @@ test('JSON inspection formats without rounding numeric tokens or altering string
   assert.match(formatted, /"a  b"/);
   assert.match(formatted, /"empty": \[\]/);
   assert.deepEqual(JSON.parse(formatted), JSON.parse(value));
+});
+
+test('10,000 loaded rows render a bounded viewport while spacers retain the full scroll height', () => {
+  for (const scrollTop of [0, 500, 100_000, 329_500]) {
+    const window = visibleRowWindow(10_000, scrollTop, 500);
+    assert.ok(window.last - window.first <= 37);
+    assert.equal(window.top + (window.last - window.first) * 33 + window.bottom, 330_000);
+  }
+  const final = visibleRowWindow(10_000, 329_549, 500);
+  assert.equal(final.last, 10_000);
+  assert.equal(final.bottom, 0);
+  assert.deepEqual(visibleRowWindow(0, 0, 300), { first: 0, last: 0, top: 0, bottom: 0 });
+});
+
+test('reversed rectangular selection copies the visible cells across multiple columns', () => {
+  const columns = [column('text', { name: 'id' }), column('text', { name: 'value' })];
+  const rows = [{ originalIndex: 4, row: { id: '5', value: '' } }, { originalIndex: 0, row: { id: '1', value: 'a\nb' } }];
+  assert.equal(selectionText(rows, columns, { row: 1, column: 1 }, { row: 0, column: 0 }), '5\t\n1\t"a\nb"');
 });

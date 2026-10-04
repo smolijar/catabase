@@ -2,8 +2,8 @@
   import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import { copyText } from '../lib/clipboard';
-  import { cellKind, cellText, parseCellDraft, prettyCell, selectionBounds, selectionText, sortedRows } from '../lib/resultsGrid';
-  import type { CellPosition, GridSort } from '../lib/resultsGrid';
+  import { cellKind, cellText, parseCellDraft, prettyCell, selectionBounds, selectionText, sortedRows, visibleRowWindow } from '../lib/resultsGrid';
+  import type { CellPosition, GridSort, IndexedRow } from '../lib/resultsGrid';
   import type { QueryResult } from '../lib/types';
 
   export let result: QueryResult;
@@ -15,6 +15,12 @@
   export let onMessage: (message: string) => void = () => {};
 
   let root: HTMLDivElement;
+  let scrollElement: HTMLDivElement;
+  let scrollTop = 0;
+  let viewportHeight = 300;
+  const ROW_HEIGHT = 33;
+  const HEADER_HEIGHT = 49;
+  let previousRows: IndexedRow[] = [];
   let sort: GridSort = null;
   let widths: Record<string, number> = {};
   let anchor: CellPosition | null = null;
@@ -26,6 +32,9 @@
   let resize: { column: string; startX: number; startWidth: number } | null = null;
 
   $: rows = sortedRows(result, sort);
+  $: rowWindow = visibleRowWindow(rows.length, scrollTop, viewportHeight, ROW_HEIGHT, HEADER_HEIGHT);
+  $: visibleRows = rows.slice(rowWindow.first, rowWindow.last);
+  $: reconcileSelection(rows);
   $: bounds = anchor && focus ? selectionBounds(anchor, focus) : null;
   $: selectedCount = bounds ? (bounds.lastRow - bounds.firstRow + 1) * (bounds.lastColumn - bounds.firstColumn + 1) : 0;
   $: selectedColumn = inspectorCell ? result.columns[inspectorCell.column] : undefined;
@@ -35,6 +44,28 @@
   $: changed = new Set(changedCells.map((cell) => `${cell.rowIndex}\u001f${cell.column}`));
   $: totalWidth = 48 + result.columns.reduce((total, column) => total + columnWidth(column.name, widths), 0);
   $: resetDraft(result, inspectorCell, editMode);
+
+  function reconcileSelection(nextRows: IndexedRow[]) {
+    if (anchor && focus && previousRows.length) {
+      const anchorOriginal = previousRows[anchor.row]?.originalIndex;
+      const focusOriginal = previousRows[focus.row]?.originalIndex;
+      const anchorRow = nextRows.findIndex((entry) => entry.originalIndex === anchorOriginal);
+      const focusRow = nextRows.findIndex((entry) => entry.originalIndex === focusOriginal);
+      if (anchorRow >= 0 && focusRow >= 0) {
+        anchor = { ...anchor, row: anchorRow };
+        focus = { ...focus, row: focusRow };
+      } else { anchor = null; focus = null; }
+    }
+    previousRows = nextRows;
+  }
+
+  function ensureRowVisible(row: number) {
+    if (!scrollElement) return;
+    const rowTop = HEADER_HEIGHT + row * ROW_HEIGHT;
+    if (rowTop < scrollElement.scrollTop + HEADER_HEIGHT) scrollElement.scrollTop = rowTop - HEADER_HEIGHT;
+    else if (rowTop + ROW_HEIGHT > scrollElement.scrollTop + viewportHeight) scrollElement.scrollTop = rowTop + ROW_HEIGHT - viewportHeight;
+    scrollTop = scrollElement.scrollTop;
+  }
 
   function columnWidth(name: string, currentWidths = widths) {
     return currentWidths[name] ?? Math.min(320, Math.max(160, name.length * 8 + 55));
@@ -170,6 +201,7 @@
     nextRow = Math.max(0, Math.min(rows.length - 1, nextRow));
     nextColumn = Math.max(0, Math.min(result.columns.length - 1, nextColumn));
     selectCell(nextRow, nextColumn, event.shiftKey);
+    ensureRowVisible(nextRow);
     await tick();
     root.querySelector<HTMLButtonElement>(`[data-cell="${nextRow}:${nextColumn}"]`)?.focus();
   }
@@ -190,8 +222,8 @@
     <button disabled={!focus} on:click={inspectSelection}>Cell details</button>
   </div>
   <div class="grid-content">
-    <div class="grid-scroll">
-      <table style:width={`${totalWidth}px`} aria-label="Query result; column sorting applies only to loaded rows">
+    <div class="grid-scroll" bind:this={scrollElement} bind:clientHeight={viewportHeight} on:scroll={() => (scrollTop = scrollElement.scrollTop)}>
+      <table style:width={`${totalWidth}px`} aria-rowcount={rows.length + 1} aria-label="Query result; column sorting applies only to loaded rows">
         <colgroup><col style:width="48px" />{#each result.columns as column}<col style:width={`${columnWidth(column.name, widths)}px`} />{/each}</colgroup>
         <thead>
           <tr>
@@ -209,8 +241,10 @@
           </tr>
         </thead>
         <tbody>
-          {#each rows as entry, rowIndex (entry.originalIndex)}
-            <tr>
+          {#if rowWindow.top}<tr class="spacer-row" aria-hidden="true"><td colspan={result.columns.length + 1} style:height={`${rowWindow.top}px`}></td></tr>{/if}
+          {#each visibleRows as entry, visibleIndex (entry.originalIndex)}
+            {@const rowIndex = rowWindow.first + visibleIndex}
+            <tr class:alternate={rowIndex % 2 === 1} aria-rowindex={rowIndex + 2}>
               <th scope="row" class="row-number">{entry.originalIndex + 1}</th>
               {#each result.columns as column, columnIndex (columnIndex)}
                 <td class:selected={isSelected(rowIndex, columnIndex)} class:changed={changed.has(`${entry.originalIndex}\u001f${column.name}`)}>
@@ -232,6 +266,7 @@
               {/each}
             </tr>
           {/each}
+          {#if rowWindow.bottom}<tr class="spacer-row" aria-hidden="true"><td colspan={result.columns.length + 1} style:height={`${rowWindow.bottom}px`}></td></tr>{/if}
         </tbody>
       </table>
     </div>
@@ -268,8 +303,9 @@
 </div>
 
 <style>
-  .results-grid { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; color: #e0e7f0; background: #151a23; }
-  .grid-tools { display: flex; align-items: center; gap: 8px; min-height: 37px; padding: 5px 12px; flex-shrink: 0; border-bottom: 1px solid #303a48; font-size: 11px; background: #1a202b; }
+  .results-grid { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; color: #e0e7f0; background: #151a23; container-type: inline-size; }
+  .grid-tools { display: flex; align-items: center; gap: 8px; min-height: 37px; padding: 5px 12px; flex-shrink: 0; overflow-x: auto; border-bottom: 1px solid #303a48; font-size: 11px; background: #1a202b; }
+  .grid-tools button { flex-shrink: 0; }
   .selection-label { color: #b9c5d6; white-space: nowrap; }
   .sort-scope { color: #f2ce84; }
   .tools-spacer { flex: 1; }
@@ -278,15 +314,15 @@
   button:focus-visible { outline: 2px solid #90baff; outline-offset: -2px; }
   button:disabled { opacity: .45; }
   .subtle { border: none; background: none; color: #bac9de; }
-  .grid-content { display: flex; flex: 1; min-height: 0; min-width: 0; }
+  .grid-content { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; }
   .grid-scroll { flex: 1; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
   table { table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 12px; }
   thead { position: sticky; top: 0; z-index: 2; }
   th, td { padding: 0; max-width: none; min-width: 0; text-align: left; border: 0; border-right: 1px solid #2d3745; border-bottom: 1px solid #2d3745; white-space: nowrap; overflow: hidden; }
-  th { position: relative; background: #232c39; color: #e8eef8; }
+  th { position: relative; top: auto; z-index: auto; background: #232c39; color: #e8eef8; }
   .row-number { width: 48px; padding: 0 9px; text-align: right; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: #a2b0c3; }
   tbody .row-number { background: #1a212c; }
-  .column-sort { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 14px; width: 100%; min-height: 48px; padding: 7px 16px 6px 10px; border: none; border-radius: 0; text-align: left; background: transparent; }
+  .column-sort { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 14px; width: 100%; height: 48px; min-height: 48px; padding: 7px 16px 6px 10px; border: none; border-radius: 0; text-align: left; background: transparent; }
   .column-sort:hover:not(:disabled) { background: #2b384a; }
   .column-name { overflow: hidden; text-overflow: ellipsis; font-weight: 600; font-size: 12px; }
   .column-direction { color: #a4bad9; }
@@ -295,10 +331,11 @@
   .column-resize span { width: 1px; height: 22px; background: #667990; }
   .column-resize:hover:not(:disabled) { background: #5275a3; }
   td { background: #151b25; }
-  tr:nth-child(even) td { background: #19202b; }
-  td.selected, tr:nth-child(even) td.selected { background: #2a4264; }
+  tr.alternate td { background: #19202b; }
+  td.selected, tr.alternate td.selected { background: #2a4264; }
   td.changed { box-shadow: inset 3px 0 #f0c56b; }
-  .cell { display: block; width: 100%; min-height: 32px; padding: 7px 10px; overflow: hidden; text-overflow: ellipsis; border: 0; border-radius: 0; background: transparent; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; line-height: 17px; white-space: pre; user-select: none; }
+  .cell { display: block; width: 100%; height: 32px; min-height: 32px; padding: 7px 10px; overflow: hidden; text-overflow: ellipsis; border: 0; border-radius: 0; background: transparent; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; line-height: 17px; white-space: nowrap; user-select: none; }
+  .spacer-row td { padding: 0; border: 0; background: #151b25; }
   .cell:hover:not(:disabled) { background: #26364b; }
   .cell:active:not(:disabled) { transform: none; }
   .cell.null-value, .cell.empty-value { font-style: italic; color: #a1b0c4; }
@@ -311,7 +348,7 @@
   .cell-meta { margin: 3px 0 13px; font-size: 11px; color: #adbed3; }
   .cell-value { margin: 0 0 10px; padding: 10px; min-height: 65px; max-height: 320px; overflow: auto; background: #131a23; border: 1px solid #36445a; border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
   .value-mode { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 11px; }
-  .value-mode label { display: flex; align-items: center; gap: 6px; color: #dae6f6; }
+  .value-mode label { display: flex; align-items: center; gap: 6px; color: #dae6f6; font-size: 11px; }
   input[type='checkbox'], input[type='radio'] { appearance: auto; width: 14px; height: 14px; min-height: 0; padding: 0; margin: 0; accent-color: #8ab9fc; }
   textarea { display: block; width: 100%; min-height: 100px; resize: vertical; padding: 9px; border: 1px solid #596d87; border-radius: 5px; background: #111a26; color: #eef4ff; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; box-sizing: border-box; }
   textarea:focus { outline: 2px solid #86b1f1; outline-offset: 1px; }
@@ -327,4 +364,5 @@
   .stage-button { background: #345684; border-color: #6c95cb; }
   .stage-button:hover:not(:disabled) { background: #436a9e; }
   @media (max-width: 1000px) { .selection-label { max-width: 170px; overflow: hidden; text-overflow: ellipsis; } .grid-tools { gap: 5px; } .cell-inspector { flex-basis: 280px; } }
+  @container (max-width: 640px) { .cell-inspector { position: absolute; z-index: 3; top: 0; bottom: 0; right: 0; width: min(330px, 100%); max-width: 100%; } .selection-label { max-width: 110px; } .sort-scope { display: none; } }
 </style>
