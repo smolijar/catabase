@@ -104,12 +104,14 @@
   let modalFeedback = '';
   let testingConnection = false;
   let savingConnection = false;
+  let connectionMutation: string | null = null;
+  let txStatusRequest = 0;
   let draftTimer: ReturnType<typeof setTimeout> | null = null;
   let urlTimer: ReturnType<typeof setTimeout> | null = null;
 
   $: activeConnection = connections.find((connection) => connection.id === tabConnectionId) ?? null;
   $: running = operation !== null;
-  $: resultUsable = canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
+  $: resultUsable = Boolean(activeConnection) && canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
   $: schemaContext = schemaItems
     .map((item) => `${item.schema}.${item.name}(${item.columns.map((column) => column.name).join(', ')})`)
     .join('\n');
@@ -127,8 +129,8 @@
     { id: 'save-csv', label: 'Save CSV…' },
     { id: 'save-tsv', label: 'Save TSV…' },
     { id: 'save-json', label: 'Save JSON…' },
-    { id: 'more-csv', label: 'Re-run & save up to 10k (CSV)…', disabled: !resultUsable || !result?.autoLimited || running },
-    { id: 'more-json', label: 'Re-run & save up to 10k (JSON)…', disabled: !resultUsable || !result?.autoLimited || running }
+    { id: 'more-csv', label: 'Re-run & save up to 10k (CSV)…', disabled: !resultUsable || !result?.autoLimited || running || Boolean(connectionMutation) },
+    { id: 'more-json', label: 'Re-run & save up to 10k (JSON)…', disabled: !resultUsable || !result?.autoLimited || running || Boolean(connectionMutation) }
   ];
 
   onMount(() => {
@@ -386,6 +388,7 @@
   }
 
   async function runQuery() {
+    if (connectionMutation) { flash(connectionMutation); return; }
     if (operation) {
       await cancelQuery();
       return;
@@ -439,7 +442,7 @@
   }
 
   async function loadMoreRows() {
-    if (!result || !resultSession || !resultUsable || operation || !tabConnectionId) return;
+    if (!result || !resultSession || !resultUsable || operation || connectionMutation || !tabConnectionId) return;
     if (pendingChanges.length) { flash('Apply or discard staged edits before loading more rows.'); return; }
     const session = { ...resultSession, data: result };
     const op = beginOperation('load', tabConnectionId);
@@ -471,7 +474,7 @@
   }
 
   function clearResults() {
-    if (operation?.tabId === activeTab) return;
+    if (operation?.tabId === activeTab || connectionMutation) return;
     if (pendingChanges.length && !confirm('Discard staged cell edits and clear results?')) return;
     setResult(null);
     queryError = null;
@@ -480,6 +483,7 @@
   }
 
   function openNewConnection() {
+    if (operation || connectionMutation) return;
     connectionForm = emptyConnection();
     connectionUrl = '';
     modalFeedback = '';
@@ -487,6 +491,7 @@
   }
 
   function editConnection(connection: ConnectionRecord) {
+    if (operation || connectionMutation) return;
     connectionForm = { ...connection };
     modalFeedback = '';
     showConnectionModal = true;
@@ -531,13 +536,15 @@
   }
 
   async function saveConnection() {
-    if (operation) return;
+    if (operation || connectionMutation) return;
     const initiatingTab = activeTab;
     const previousId = connectionForm.id;
+    connectionMutation = 'Saving connection…';
     savingConnection = true;
     try {
-      const saved = await withTimeout(api.saveConnection(connectionForm), 12000, 'Saving connection timed out.');
-      showConnectionModal = false;
+      // Keep the lock until the actual write finishes; timing out an IPC promise
+      // would leave its uncancelled write racing a subsequent query.
+      const saved = await api.saveConnection(connectionForm);
       await loadConnections();
       // A reused ID may now point at a different database. Never apply or replay
       // results obtained using its previous configuration.
@@ -548,6 +555,7 @@
         }
       }
       patchTab(initiatingTab, { connectionId: saved.id });
+      showConnectionModal = false;
       flash(`${saved.name} saved and ready.`);
       void refreshTxStatus();
       void refreshSchema();
@@ -555,15 +563,17 @@
       modalFeedback = errorMessage(error);
     } finally {
       savingConnection = false;
+      connectionMutation = null;
     }
   }
 
   async function activateConnection(id: string) {
-    if (operation) { flash('Finish or cancel the running operation before switching connections.'); return; }
+    if (operation || connectionMutation) { flash('Wait for the current operation before switching connections.'); return; }
     if (pendingChanges.length && !confirm('Discard staged edits before changing this tab’s connection?')) return;
     const initiatingTab = activeTab;
     const current = snapshotActive();
     captureActive();
+    connectionMutation = 'Switching connection…';
     try {
       const active = await api.activateConnection(id);
       await loadConnections();
@@ -579,12 +589,15 @@
       void loadConnectionStats();
     } catch (error) {
       flash(errorMessage(error), true);
+    } finally {
+      connectionMutation = null;
     }
   }
 
   async function deleteConnection(id: string) {
-    if (operation) return;
+    if (operation || connectionMutation) return;
     if (!confirm('Delete this connection?')) return;
+    connectionMutation = 'Deleting connection…';
     try {
       await api.deleteConnection(id);
       await loadConnections();
@@ -598,10 +611,14 @@
       flash('Connection deleted.');
     } catch (error) {
       flash(errorMessage(error));
+    } finally {
+      connectionMutation = null;
     }
   }
 
   async function savePoolSize() {
+    if (operation || connectionMutation) return;
+    connectionMutation = 'Updating connection pool…';
     try {
       const normalized = await api.setPoolSize(poolSizeInput);
       settings = { ...settings, poolSize: normalized };
@@ -609,6 +626,8 @@
       flash(`Pool size saved: ${normalized}.`);
     } catch (error) {
       flash(errorMessage(error));
+    } finally {
+      connectionMutation = null;
     }
   }
 
@@ -631,29 +650,45 @@
   }
 
   async function loadConnectionStats() {
-    if (!connections.some((connection) => connection.id === tabConnectionId && connection.isActive)) { poolStats = null; return; }
-    poolStats = await api.connectionStats().catch(() => poolStats);
+    const connectionId = tabConnectionId;
+    if (!connections.some((connection) => connection.id === connectionId && connection.isActive)) { poolStats = null; return; }
+    const next = await api.connectionStats().catch(() => null);
+    if (connectionId === tabConnectionId && connections.some((connection) => connection.id === connectionId && connection.isActive)) poolStats = next;
   }
 
   async function refreshTxStatus() {
-    txStatus = await api.txStatus().catch(() => ({ active: false, startedAt: null }));
+    const request = ++txStatusRequest;
+    const next = await api.txStatus().catch(() => ({ active: false, startedAt: null }));
+    if (request === txStatusRequest) txStatus = next;
   }
 
   async function commitTransaction() {
+    if (operation || connectionMutation) return;
+    connectionMutation = 'Committing transaction…';
+    const request = ++txStatusRequest;
     try {
-      txStatus = await api.txCommit();
+      const next = await api.txCommit();
+      if (request === txStatusRequest) txStatus = next;
       flash('Transaction committed.');
     } catch (error) {
       flash(errorMessage(error));
+    } finally {
+      connectionMutation = null;
     }
   }
 
   async function rollbackTransaction() {
+    if (operation || connectionMutation) return;
+    connectionMutation = 'Rolling back transaction…';
+    const request = ++txStatusRequest;
     try {
-      txStatus = await api.txRollback();
+      const next = await api.txRollback();
+      if (request === txStatusRequest) txStatus = next;
       flash('Transaction rolled back.');
     } catch (error) {
       flash(errorMessage(error));
+    } finally {
+      connectionMutation = null;
     }
   }
 
@@ -772,7 +807,7 @@
       flash('No exportable data.');
       return;
     }
-    if (full && (!resultUsable || !resultSession || operation || !result.autoLimited)) {
+    if (full && (!resultUsable || !resultSession || operation || connectionMutation || !result.autoLimited)) {
       flash('Re-run this query on its original connection before requesting a larger export.');
       return;
     }
@@ -785,7 +820,12 @@
       if (!path) return;
       let exportResult = source;
       if (full && session?.connectionId) {
-        if (operation) { flash('Wait for the running operation before exporting.'); return; }
+        if (operation || connectionMutation) { flash('Wait for the current operation before exporting.'); return; }
+        const sourceTab = sourceTabId === activeTab ? snapshotActive() : tabs.find((tab) => tab.id === sourceTabId);
+        if (!canUseResult(sourceTab?.session ?? null, sourceTab?.connectionId ?? null) || sourceTab?.session?.executedAt !== session.executedAt) {
+          flash('The source results changed. Choose Export again.');
+          return;
+        }
         op = beginOperation('export', session.connectionId);
         op.tabId = sourceTabId;
         flash('Preparing export…');
@@ -816,7 +856,7 @@
   }
 
   function enableEditMode() {
-    if (!result || !result.rows.length || !resultUsable || operation) {
+    if (!result || !result.rows.length || !resultUsable || operation || connectionMutation) {
       flash('No result set to edit. Run a query first.');
       return;
     }
@@ -838,7 +878,7 @@
   }
 
   function updateCell(rowIndex: number, column: string, newValue: unknown) {
-    if (!result || !resultUsable || operation) return;
+    if (!result || !resultUsable || operation || connectionMutation) return;
     const oldValue = originalRows[rowIndex]?.[column];
     result = {
       ...result,
@@ -859,7 +899,7 @@
   }
 
   async function applyUpdates() {
-    if (!pendingChanges.length || operation || !resultUsable || !tabConnectionId) {
+    if (!pendingChanges.length || operation || connectionMutation || !resultUsable || !tabConnectionId) {
       flash('No pending changes.');
       return;
     }
@@ -971,7 +1011,7 @@
   }
 
   function canApplyUpdates(): boolean {
-    return !operation && resultUsable && pendingChanges.length > 0 && detectEditTarget() !== null;
+    return !operation && !connectionMutation && resultUsable && pendingChanges.length > 0 && detectEditTarget() !== null;
   }
 
   function normalizeAppError(error: unknown): AppError {
@@ -1090,11 +1130,11 @@
       class="primary run-button"
       class:cancel-button={running}
       on:click={runQuery}
-      disabled={operation?.cancelling || (!running && (!activeConnection || tabKind !== 'query'))}
+      disabled={Boolean(connectionMutation) || operation?.cancelling || (!running && (!activeConnection || tabKind !== 'query'))}
       title={activeConnection ? 'Run current statement (Cmd/Ctrl+Enter)' : 'Add or activate a connection first'}
     >
       <Icon name={running ? 'stop' : 'play'} size={16} />
-      <span>{operation?.cancelling ? 'Cancelling…' : running ? 'Cancel' : 'Run'}</span>
+      <span>{connectionMutation ? 'Please wait…' : operation?.cancelling ? 'Cancelling…' : running ? 'Cancel' : 'Run'}</span>
       <kbd>⌘↵</kbd>
     </button>
     <button
@@ -1107,12 +1147,13 @@
       {activeConnection ? activeConnection.name : 'Choose connection'}
     </button>
     {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : 'Exporting'} · {runningDuration()} · {tabs.find((tab) => tab.id === operation?.tabId)?.title}</button>{/if}
+    {#if connectionMutation}<span class="operation-status" role="status">{connectionMutation}</span>{/if}
     <div class="toolbar-spacer"></div>
     <ActionMenu label="More" ariaLabel="Workspace actions" items={[
       { id: 'duplicate', label: 'Duplicate in new query tab' },
       { id: 'rename', label: 'Rename tab' },
       { id: 'clear-sql', label: 'Clear SQL', disabled: tabKind !== 'query' || operation?.tabId === activeTab },
-      { id: 'clear-results', label: 'Clear results', disabled: !result || operation?.tabId === activeTab },
+      { id: 'clear-results', label: 'Clear results', disabled: !result || operation?.tabId === activeTab || Boolean(connectionMutation) },
       { id: 'settings', label: 'Settings' }
     ]} onSelect={handleWorkspaceAction} />
   </header>
@@ -1157,14 +1198,14 @@
               <h2>Connections</h2>
               <p>{connections.length} saved</p>
             </div>
-            <button class="icon-label-button" on:click={openNewConnection}><Icon name="plus" size={15} /> Add</button>
+            <button class="icon-label-button" disabled={running || Boolean(connectionMutation)} on:click={openNewConnection}><Icon name="plus" size={15} /> Add</button>
           </div>
           {#if connections.length === 0}
             <div class="empty-state">
               <span class="empty-state-icon"><Icon name="database" size={24} /></span>
               <strong>No connections yet</strong>
               <p>Add a PostgreSQL connection to start querying.</p>
-              <button class="primary" on:click={openNewConnection}><Icon name="plus" size={15} /> Add connection</button>
+              <button class="primary" disabled={running || Boolean(connectionMutation)} on:click={openNewConnection}><Icon name="plus" size={15} /> Add connection</button>
             </div>
           {/if}
           {#each connections as connection (connection.id)}
@@ -1175,11 +1216,11 @@
               </div>
               <span class="connection-address">{connection.username}@{connection.host}:{connection.port}/{connection.database}</span>
               <div class="row-actions">
-                <button disabled={connection.id === tabConnectionId || running} on:click={() => activateConnection(connection.id)}>
+                <button disabled={connection.id === tabConnectionId || running || Boolean(connectionMutation)} on:click={() => activateConnection(connection.id)}>
                   <Icon name="check" size={14} /> {connection.id === tabConnectionId ? 'In use' : 'Use in tab'}
                 </button>
-                <button disabled={running} on:click={() => editConnection(connection)}><Icon name="edit" size={14} /> Edit</button>
-                <button disabled={running} class="danger-quiet" aria-label={`Delete ${connection.name}`} title={`Delete ${connection.name}`} on:click={() => deleteConnection(connection.id)}>
+                <button disabled={running || Boolean(connectionMutation)} on:click={() => editConnection(connection)}><Icon name="edit" size={14} /> Edit</button>
+                <button disabled={running || Boolean(connectionMutation)} class="danger-quiet" aria-label={`Delete ${connection.name}`} title={`Delete ${connection.name}`} on:click={() => deleteConnection(connection.id)}>
                   <Icon name="trash" size={14} />
                 </button>
               </div>
@@ -1270,7 +1311,7 @@
               Maximum connections
               <div class="inline-control">
                 <input type="number" min="1" max="32" bind:value={poolSizeInput} />
-                <button on:click={savePoolSize}>Save</button>
+                <button disabled={running || Boolean(connectionMutation)} on:click={savePoolSize}>Save</button>
               </div>
             </label>
             <p>Choose between 1 and 32 concurrent PostgreSQL connections.</p>
@@ -1318,8 +1359,8 @@
           <div class="tx-banner">
             <strong>Transaction active</strong>
             <span>{txStatus.startedAt}</span>
-            <button on:click={commitTransaction}>Commit</button>
-            <button on:click={rollbackTransaction}>Rollback</button>
+            <button disabled={running || Boolean(connectionMutation)} on:click={commitTransaction}>Commit</button>
+            <button disabled={running || Boolean(connectionMutation)} on:click={rollbackTransaction}>Rollback</button>
           </div>
         {/if}
         {#if workspaceLoaded}
@@ -1368,11 +1409,11 @@
           <div class="results-actions">
             <ActionMenu label="Export" ariaLabel="Export results" disabled={!result?.rows.length} items={exportItems} onSelect={handleExport} />
             {#if editMode}
-              <button disabled={!pendingChanges.length || running} on:click={previewUpdates}>Review {pendingChanges.length} edits</button>
-              <button disabled={running} on:click={discardUpdates}>Discard</button>
-              <button disabled={running} on:click={disableEditMode}>Done</button>
+              <button disabled={!pendingChanges.length || running || Boolean(connectionMutation)} on:click={previewUpdates}>Review {pendingChanges.length} {pendingChanges.length === 1 ? 'edit' : 'edits'}</button>
+              <button disabled={running || Boolean(connectionMutation)} on:click={discardUpdates}>Discard</button>
+              <button disabled={running || Boolean(connectionMutation)} on:click={disableEditMode}>Done</button>
             {:else}
-              <button disabled={!result?.rows.length || !resultUsable || running} on:click={enableEditMode}><Icon name="edit" size={14} /> Edit cells</button>
+              <button disabled={!result?.rows.length || !resultUsable || running || Boolean(connectionMutation)} on:click={enableEditMode}><Icon name="edit" size={14} /> Edit cells</button>
             {/if}
           </div>
         </div>
@@ -1387,7 +1428,7 @@
         {/if}
         {#if editMode}
           <div class="edit-bar">
-            {pendingChanges.length} pending changes.
+            {pendingChanges.length} pending {pendingChanges.length === 1 ? 'change' : 'changes'}.
             {#if detectEditTarget()}
               Apply will update {detectEditTarget()?.schema}.{detectEditTarget()?.table}.
             {:else}
@@ -1406,11 +1447,11 @@
         {/if}
         {#if result && result.rows.length}
           {#key `${activeTab}:${resultSession?.executedAt}`}
-            <ResultsGrid {result} {editMode} readOnly={!resultUsable} disabled={running} changedCells={pendingChanges} onEdit={updateCell} onMessage={flash} />
+            <ResultsGrid {result} {editMode} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onMessage={flash} />
           {/key}
           <footer class="results-foot">
             <span>{result.rows.length} loaded {result.hasMore ? '· more available' : ''}</span>
-            {#if result.hasMore && !resultSession?.snapshot}<button disabled={!resultUsable || running || pendingChanges.length > 0} on:click={loadMoreRows}>Load next {PAGE_SIZE} rows</button>{/if}
+            {#if result.hasMore && !resultSession?.snapshot}<button disabled={!resultUsable || running || Boolean(connectionMutation) || pendingChanges.length > 0} on:click={loadMoreRows}>Load next {PAGE_SIZE} rows</button>{/if}
           </footer>
         {:else if result}
           <p class="empty">Query completed in {result.durationMs} ms with no rows.</p>
@@ -1446,7 +1487,7 @@
   <Modal label="Review cell edits" locked={running} onClose={() => (showUpdatePreview = false)}>
     <div class="modal update-review">
       <div class="panel-head"><h2>Review cell edits</h2><button disabled={running} on:click={() => (showUpdatePreview = false)}>Close</button></div>
-      <p>{pendingChanges.length} staged changes on {resultSession?.connectionName}. Each updated row must match its original values.</p>
+      <p>{pendingChanges.length} staged {pendingChanges.length === 1 ? 'change' : 'changes'} on {resultSession?.connectionName}. Each updated row must match its original values.</p>
       <pre>{generateUpdateSql()}</pre>
       {#if !detectEditTarget()}<p class="context-warning">Apply is unavailable without an unambiguous source table and primary key.</p>{/if}
       <div class="row-actions"><button disabled={running} on:click={() => (showUpdatePreview = false)}>Back to results</button><button class="primary" disabled={!canApplyUpdates()} on:click={applyUpdates}>{running ? 'Applying…' : 'Apply changes'}</button></div>
@@ -1459,21 +1500,21 @@
     <form class="modal" on:submit|preventDefault={saveConnection}>
       <div class="panel-head">
         <h2>{connectionForm.id ? 'Edit connection' : 'New connection'}</h2>
-        <button type="button" on:click={() => (showConnectionModal = false)}>Close</button>
+        <button type="button" disabled={savingConnection} on:click={() => (showConnectionModal = false)}>Close</button>
       </div>
-      <label>Name <input bind:value={connectionForm.name} on:input={queueConnectionUrlSync} required /></label>
-      <label>Host <input bind:value={connectionForm.host} on:input={queueConnectionUrlSync} required /></label>
+      <label>Name <input disabled={savingConnection} bind:value={connectionForm.name} on:input={queueConnectionUrlSync} required /></label>
+      <label>Host <input disabled={savingConnection} bind:value={connectionForm.host} on:input={queueConnectionUrlSync} required /></label>
       <div class="form-grid">
-        <label>Port <input type="number" bind:value={connectionForm.port} on:input={queueConnectionUrlSync} required /></label>
-        <label>Database <input bind:value={connectionForm.database} on:input={queueConnectionUrlSync} required /></label>
+        <label>Port <input disabled={savingConnection} type="number" bind:value={connectionForm.port} on:input={queueConnectionUrlSync} required /></label>
+        <label>Database <input disabled={savingConnection} bind:value={connectionForm.database} on:input={queueConnectionUrlSync} required /></label>
       </div>
-      <label>Username <input bind:value={connectionForm.username} on:input={queueConnectionUrlSync} required /></label>
-      <label>Password <input type="password" bind:value={connectionForm.password} on:input={queueConnectionUrlSync} /></label>
-      <label class="checkbox"><input type="checkbox" bind:checked={connectionForm.ssl} on:change={queueConnectionUrlSync} /> Use SSL</label>
-      <label>Connection URL <input bind:value={connectionUrl} /></label>
+      <label>Username <input disabled={savingConnection} bind:value={connectionForm.username} on:input={queueConnectionUrlSync} required /></label>
+      <label>Password <input disabled={savingConnection} type="password" bind:value={connectionForm.password} on:input={queueConnectionUrlSync} /></label>
+      <label class="checkbox"><input disabled={savingConnection} type="checkbox" bind:checked={connectionForm.ssl} on:change={queueConnectionUrlSync} /> Use SSL</label>
+      <label>Connection URL <input disabled={savingConnection} bind:value={connectionUrl} /></label>
       <div class="row-actions">
-        <button type="button" on:click={importConnectionUrl}>Import URL</button>
-        <button type="button" on:click={testConnection} disabled={testingConnection}>{testingConnection ? 'Testing...' : 'Test'}</button>
+        <button type="button" disabled={savingConnection} on:click={importConnectionUrl}>Import URL</button>
+        <button type="button" on:click={testConnection} disabled={testingConnection || savingConnection}>{testingConnection ? 'Testing...' : 'Test'}</button>
         <button class="primary" disabled={savingConnection}>{savingConnection ? 'Saving...' : 'Save'}</button>
       </div>
       {#if modalFeedback}<p class="muted">{modalFeedback}</p>{/if}
