@@ -1,7 +1,10 @@
 <script lang="ts">
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import { save } from '@tauri-apps/plugin-dialog';
-  import { onMount } from 'svelte';
+  import { isTauri } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { onMount, tick } from 'svelte';
   import Dropdown from './components/Dropdown.svelte';
   import ActionMenu from './components/ActionMenu.svelte';
   import ResultsGrid from './components/ResultsGrid.svelte';
@@ -10,7 +13,7 @@
   import SqlEditor from './components/SqlEditor.svelte';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
-  import { canUseResult, createQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
+  import { canUseResult, createDraftWriter, createQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
   import type { PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
   import type {
     AiHealth,
@@ -57,6 +60,8 @@
   let editorViewState: WorkspaceTab['viewState'] = null;
   let renamingTab = '';
   let renameValue = '';
+  let renameInput: HTMLInputElement | undefined;
+  let tabBar: HTMLElement;
   let workspaceLoaded = false;
   let editorRef: EditorHandle | undefined;
   let running = false;
@@ -108,6 +113,12 @@
   let txStatusRequest = 0;
   let draftTimer: ReturnType<typeof setTimeout> | null = null;
   let urlTimer: ReturnType<typeof setTimeout> | null = null;
+  let bootstrapTask = Promise.resolve();
+  let closingWorkspace = false;
+  let draftStatus: 'pending' | 'saving' | 'saved' | 'error' = 'saved';
+  let draftRevision = 0;
+  const writeWorkspaceDraft = createDraftWriter((content) => api.saveDraft('workspace.v1', content));
+  const nativeCleanup: Array<() => void> = [];
 
   $: activeConnection = connections.find((connection) => connection.id === tabConnectionId) ?? null;
   $: running = operation !== null;
@@ -137,9 +148,10 @@
     mounted = true;
     const savedResultsHeight = Number(localStorage.getItem('catabase.resultsHeight'));
     if (Number.isFinite(savedResultsHeight) && savedResultsHeight >= 180) resultsHeight = savedResultsHeight;
-    void bootstrap();
+    bootstrapTask = bootstrap();
+    void registerNativeLifecycle();
     window.addEventListener('keydown', handleKeydown);
-    window.addEventListener('beforeunload', persistDraftNow);
+    window.addEventListener('beforeunload', flushDraftOnUnload);
     const statsInterval = window.setInterval(() => {
       if (activeConnection) void loadConnectionStats();
     }, 5000);
@@ -150,8 +162,11 @@
     const aiInterval = window.setInterval(checkAiHealth, 30000);
 
     return () => {
+      flushDraftOnUnload();
+      mounted = false;
+      for (const cleanup of nativeCleanup) cleanup();
       window.removeEventListener('keydown', handleKeydown);
-      window.removeEventListener('beforeunload', persistDraftNow);
+      window.removeEventListener('beforeunload', flushDraftOnUnload);
       window.clearInterval(statsInterval);
       window.clearInterval(runningInterval);
       window.clearInterval(aiInterval);
@@ -172,6 +187,53 @@
     ]);
     await loadDraft();
     workspaceLoaded = true;
+  }
+
+  async function registerNativeLifecycle() {
+    if (!isTauri()) return;
+    try {
+      const unlistenClose = await getCurrentWindow().onCloseRequested(async (event) => {
+        if (closingWorkspace) { event.preventDefault(); return; }
+        closingWorkspace = true;
+        try {
+          await flushWorkspaceForClose();
+          // Tauri waits for this callback before destroying the window.
+        } catch (error) {
+          event.preventDefault();
+          closingWorkspace = false;
+          flash(`Could not save drafts. The app is still open: ${errorMessage(error)}`, true);
+        }
+      });
+      if (!mounted) { unlistenClose(); return; }
+      nativeCleanup.push(unlistenClose);
+      const unlistenExit = await listen('catabase:request-exit', async () => {
+        if (closingWorkspace) return;
+        closingWorkspace = true;
+        try {
+          await flushWorkspaceForClose();
+          await api.finishExit();
+        } catch (error) {
+          closingWorkspace = false;
+          flash(`Could not save drafts. The app is still open: ${errorMessage(error)}`, true);
+        }
+      });
+      if (!mounted) { unlistenExit(); return; }
+      nativeCleanup.push(unlistenExit);
+      await api.enableExitGuard();
+    } catch (error) {
+      flash(`Draft protection on close is unavailable: ${errorMessage(error)}`, true);
+    }
+  }
+
+  async function flushWorkspaceForClose() {
+    await bootstrapTask;
+    if (renamingTab) finishRename();
+    await tick();
+    await persistDraftNow();
+  }
+
+  function flushDraftOnUnload() {
+    if (!closingWorkspace) void persistDraftNow().catch(() => {});
   }
 
   function snapshotActive(): WorkspaceTab {
@@ -243,14 +305,37 @@
     if (activeTab === id) displayTab(tabs[Math.min(index, tabs.length - 1)]);
   }
 
-  function startRename(id = activeTab) {
+  async function startRename(id = activeTab) {
     renamingTab = id;
     renameValue = tabs.find((tab) => tab.id === id)?.title ?? '';
+    await tick();
+    if (renamingTab === id) {
+      renameInput?.focus();
+      renameInput?.select();
+    }
   }
 
   function finishRename() {
+    const id = renamingTab;
     if (renameValue.trim()) tabs = tabs.map((tab) => tab.id === renamingTab ? { ...tab, title: renameValue.trim() } : tab);
     renamingTab = '';
+    focusTabLabel(id);
+  }
+
+  function handleRenameKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Enter' && event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === 'Enter') finishRename();
+    else {
+      const id = renamingTab;
+      renamingTab = '';
+      focusTabLabel(id);
+    }
+  }
+
+  function focusTabLabel(id: string) {
+    void tick().then(() => tabBar?.querySelector<HTMLButtonElement>(`[data-tab-id="${CSS.escape(id)}"]`)?.focus());
   }
 
   function emptyConnection(): ConnectionInput {
@@ -293,10 +378,12 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.defaultPrevented || showConnectionModal || showUpdatePreview) return;
+    if (event.defaultPrevented || closingWorkspace || showConnectionModal || showUpdatePreview) return;
     const command = event.metaKey || event.ctrlKey;
     if (!command) return;
     if (event.key === 'Enter') {
+      const target = event.target;
+      if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') && !target.closest('.monaco-editor')) return;
       event.preventDefault();
       void runQuery();
     } else if (event.key.toLowerCase() === 'b') {
@@ -350,14 +437,26 @@
 
   function scheduleDraftSave(_sql: string, _activeId: string, _connectionId: string | null, _tabs: WorkspaceTab[]) {
     if (draftTimer) clearTimeout(draftTimer);
-    draftTimer = setTimeout(() => void persistDraftNow(), 1200);
+    draftRevision++;
+    draftStatus = 'pending';
+    draftTimer = setTimeout(() => void persistDraftNow().catch(() => {}), 1200);
   }
 
-  function persistDraftNow() {
+  async function persistDraftNow() {
     if (!mounted || !workspaceLoaded) return;
+    if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+    const revision = ++draftRevision;
+    draftStatus = 'saving';
     const captured = snapshotActive();
     const workspace = tabs.map((tab) => tab.id === activeTab ? captured : tab);
-    void api.saveDraft('workspace.v1', serializeWorkspace(workspace, activeTab)).catch((error) => flash(`Draft save failed: ${errorMessage(error)}`, true));
+    try {
+      await writeWorkspaceDraft(serializeWorkspace(workspace, activeTab));
+      if (revision === draftRevision) draftStatus = 'saved';
+    } catch (error) {
+      if (revision === draftRevision) draftStatus = 'error';
+      flash(`Draft save failed: ${errorMessage(error)}`, true);
+      throw error;
+    }
   }
 
   function beginOperation(kind: Operation['kind'], connectionId: string): Operation {
@@ -1118,7 +1217,7 @@
 
 </script>
 
-<main class="app-shell">
+<main class="app-shell" inert={closingWorkspace}>
   <header class="toolbar">
     <div class="brand">
       <span class="brand-mark">C</span>
@@ -1336,13 +1435,13 @@
     {/if}
 
     <section class="main-pane" class:resizing={resizingResults} style={`--results-height: ${resultsHeight}px`}>
-      <nav class="tabs" aria-label="Query tabs">
+      <nav bind:this={tabBar} class="tabs" aria-label="Query tabs">
         {#each tabs as tab (tab.id)}
           <div class:active={activeTab === tab.id} class="tab-chip">
             {#if renamingTab === tab.id}
-              <form class="tab-rename" on:submit|preventDefault={finishRename}><input aria-label="Tab name" bind:value={renameValue} on:keydown={(event) => { if (event.key === 'Escape') renamingTab = ''; }} /><button type="submit" aria-label="Save tab name"><Icon name="check" size={13} /></button></form>
+              <form class="tab-rename" on:submit|preventDefault={finishRename}><input bind:this={renameInput} aria-label="Tab name" bind:value={renameValue} on:keydown={handleRenameKeydown} /><button type="submit" aria-label="Save tab name"><Icon name="check" size={13} /></button></form>
             {:else}
-              <button class="tab-label" title={`${tab.title} · ${connections.find((connection) => connection.id === (tab.id === activeTab ? tabConnectionId : tab.connectionId))?.name ?? 'No connection'}`} on:click={() => switchTab(tab.id)} on:dblclick={() => startRename(tab.id)}>
+              <button data-tab-id={tab.id} class="tab-label" title={`${tab.title} · ${connections.find((connection) => connection.id === (tab.id === activeTab ? tabConnectionId : tab.connectionId))?.name ?? 'No connection'}`} on:click={() => switchTab(tab.id)} on:dblclick={() => startRename(tab.id)}>
                 {#if operation?.tabId === tab.id}<span class="spinner"></span>{/if}
                 {tab.title}{#if (tab.id === activeTab ? pendingChanges : tab.pendingChanges).length}<span class="pending-dot" title="Staged edits">•</span>{/if}
                 {#if tab.kind === 'reference'}<small>read only</small>{/if}
@@ -1397,7 +1496,7 @@
       <section class="results-pane">
         <div class="results-head">
           <div class="results-title">
-            <strong>Results</strong>
+            <strong>{queryError && result ? 'Previous results' : 'Results'}</strong>
             {#if operation?.tabId === activeTab}
               <span class="running-state"><span class="spinner"></span> {operation.cancelling ? 'Cancelling…' : 'Running'} {runningDuration()}</span>
             {:else if result}
@@ -1469,7 +1568,7 @@
   <footer class="status-bar">
     <span class="status-connection"><span class:connected={Boolean(activeConnection)} class="status-dot"></span>{activeConnection ? `${activeConnection.host}/${activeConnection.database}` : 'No connection'}</span>
     <span>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : ''}</span>
-    <span>{workspaceLoaded ? 'Drafts saved automatically' : 'Restoring workspace…'}</span>
+    <span>{!workspaceLoaded ? 'Restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'Saving drafts…' : draftStatus === 'pending' ? 'Unsaved draft changes' : draftStatus === 'error' ? 'Draft save failed' : 'Drafts saved'}</span>
     {#if running}<span>Running {runningDuration()}</span>{/if}
     <span class="status-flash">{statusFlash}</span>
   </footer>

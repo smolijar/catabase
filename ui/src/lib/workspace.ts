@@ -45,10 +45,28 @@ export function serializeWorkspace(tabs: WorkspaceTab[], activeId: string): stri
   return JSON.stringify({ version: 1, activeId, tabs: queries.map(({ id, title, sql, connectionId, viewState }) => ({ id, title, sql, connectionId, viewState })) });
 }
 
+// IPC saves can finish in a different order from the snapshots they contain.
+// Keep the latest save behind every earlier one, while letting a later retry
+// recover from an earlier failure.
+export function createDraftWriter(write: (content: string) => Promise<void>): (content: string) => Promise<void> {
+  let pending = Promise.resolve();
+  return (content) => {
+    const next = pending.catch(() => {}).then(() => write(content));
+    pending = next;
+    return next;
+  };
+}
+
 export function restoreWorkspace(serialized: string): { tabs: WorkspaceTab[]; activeId: string } | null {
   try {
     const stored = JSON.parse(serialized);
     if (stored?.version !== 1 || !Array.isArray(stored.tabs)) return null;
+    // A valid workspace with only reference tabs deliberately has no saved SQL.
+    // Do not treat it as missing data and resurrect the legacy Playground draft.
+    if (stored.tabs.length === 0) {
+      const tab = createQueryTab('playground', 'Query 1');
+      return { tabs: [tab], activeId: tab.id };
+    }
     const ids = new Set<string>();
     const tabs: WorkspaceTab[] = [];
     for (const item of stored.tabs) {
