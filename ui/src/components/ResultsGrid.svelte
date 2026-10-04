@@ -231,8 +231,8 @@
     root.querySelector<HTMLButtonElement>(`[data-cell="${nextRow}:${nextColumn}"]`)?.focus();
   }
 
-  function isSelected(row: number, column: number) {
-    return bounds && row >= bounds.firstRow && row <= bounds.lastRow && column >= bounds.firstColumn && column <= bounds.lastColumn;
+  function isSelected(row: number, column: number, selection: ReturnType<typeof selectionBounds> | null) {
+    return selection && row >= selection.firstRow && row <= selection.lastRow && column >= selection.firstColumn && column <= selection.lastColumn;
   }
 </script>
 
@@ -272,7 +272,7 @@
             <tr class:alternate={rowIndex % 2 === 1} aria-rowindex={rowIndex + 2}>
               <th scope="row" class="row-number">{entry.originalIndex + 1}</th>
               {#each result.columns as column, columnIndex (columnIndex)}
-                <td class:selected={isSelected(rowIndex, columnIndex)} class:changed={changed.has(`${entry.originalIndex}\u001f${column.name}`)}>
+                <td class:selected={isSelected(rowIndex, columnIndex, bounds)} class:changed={changed.has(`${entry.originalIndex}\u001f${column.name}`)}>
                   <button
                     class="cell"
                     class:null-value={entry.row[column.name] == null}
@@ -280,7 +280,7 @@
                     data-cell={`${rowIndex}:${columnIndex}`}
                     tabindex={focus && focus.row >= rowWindow.first && focus.row < rowWindow.last ? focus.row === rowIndex && focus.column === columnIndex ? 0 : -1 : visibleIndex === 0 && columnIndex === 0 ? 0 : -1}
                     aria-label={`Row ${entry.originalIndex + 1}, ${column.name}: ${entry.row[column.name] === '' && cellKind(column) !== 'json' ? 'empty string' : cellText(entry.row[column.name], column, result.jsonValuesAsText).slice(0, 200)}`}
-                    aria-pressed={Boolean(isSelected(rowIndex, columnIndex))}
+                    aria-pressed={Boolean(isSelected(rowIndex, columnIndex, bounds))}
                     title="Click to select, Shift-click for a range, double-click or Enter for details"
                     on:click={(event) => selectCell(rowIndex, columnIndex, event.shiftKey)}
                     on:focus={(event) => { if (!focus || ((focus.row < rowWindow.first || focus.row >= rowWindow.last) && event.currentTarget.matches(':focus-visible'))) selectCell(rowIndex, columnIndex); }}
