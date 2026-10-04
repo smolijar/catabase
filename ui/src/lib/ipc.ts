@@ -31,8 +31,8 @@ export const api = {
   setPoolSize: (poolSize: number) => invoke<number>('set_pool_size', { poolSize }),
   setAiModel: (model: string | null) => invoke<string | null>('set_ai_model', { model }),
   splitSql: (sql: string) => invoke<StatementRange[]>('split_sql', { sql }),
-  executeQuery: (sql: string, queryToken: string, offset = 0, pageSize = 200, connectionId?: string) =>
-    invoke<QueryResult>('execute_query', { sql, queryToken, offset, pageSize, connectionId }),
+  executeQuery: (sql: string, queryToken: string, offset = 0, pageSize = 200, connectionId?: string, readOnlyReplay = false) =>
+    invoke<QueryResult>('execute_query', { sql, queryToken, offset, pageSize, connectionId, readOnlyReplay }),
   applyRowUpdates: (connectionId: string, queryToken: string, updates: RowUpdate[]) =>
     invoke<ApplyUpdatesResult>('apply_row_updates', { connectionId, queryToken, updates }),
   cancelQuery: (queryToken: string) => invoke<CancelResult>('cancel_query', { queryToken }),

@@ -70,6 +70,7 @@ struct QueryRun<'a> {
     query_token: &'a str,
     offset: usize,
     page_size: usize,
+    read_only_replay: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -249,6 +250,7 @@ async fn split_sql(sql: String) -> Result<Vec<StatementRange>, AppError> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri command arguments are the public IPC shape.
 async fn execute_query(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -257,6 +259,7 @@ async fn execute_query(
     offset: u32,
     page_size: u32,
     connection_id: Option<String>,
+    read_only_replay: Option<bool>,
 ) -> Result<QueryResult, AppError> {
     begin_operation(&state, &query_token).await;
     let outcome = async {
@@ -274,6 +277,7 @@ async fn execute_query(
                 query_token: &query_token,
                 offset: offset as usize,
                 page_size: page_size as usize,
+                read_only_replay: read_only_replay.unwrap_or(false),
             },
         )
         .await;
@@ -520,6 +524,9 @@ async fn run_query_with_state(
     state: &State<'_, AppState>,
     run: QueryRun<'_>,
 ) -> Result<QueryResult, CoreError> {
+    if run.read_only_replay {
+        return execute_read_only_replay(state, &run).await;
+    }
     match classify_statement(run.sql) {
         StatementKind::TxBegin => {
             let mut tx = state.tx.lock().await;
@@ -606,6 +613,49 @@ async fn run_query_with_state(
             .await
         }
     }
+}
+
+fn validate_replay_sql(sql: &str) -> Result<(), CoreError> {
+    if split_statements(sql).len() != 1 || classify_statement(sql) != StatementKind::SelectLike {
+        return Err(CoreError::message(
+            "Automatic paging and export can only replay one read-only query. Run this SQL explicitly instead.",
+        ));
+    }
+    Ok(())
+}
+
+async fn execute_read_only_replay(
+    state: &State<'_, AppState>,
+    run: &QueryRun<'_>,
+) -> Result<QueryResult, CoreError> {
+    validate_replay_sql(run.sql)?;
+    let tx = state.tx.lock().await;
+    if tx.is_some() {
+        return Err(CoreError::message(
+            "Commit or roll back the open transaction before loading more rows or re-running an export. You can still save the loaded rows.",
+        ));
+    }
+    let client = checkout_pool_client(run.pool).await?;
+    let cancelled = register_cancel(state, run.query_token, &client, run.ssl).await?;
+    // Enforce read-only in PostgreSQL itself: a SELECT-like WITH statement may
+    // contain INSERT/UPDATE/DELETE, which a lexical prefix check cannot detect.
+    let begin = client.batch_execute("BEGIN READ ONLY").await;
+    let result = match begin {
+        Ok(()) if cancelled.load(Ordering::Acquire) => Err(CoreError::Cancelled(
+            "Replay cancelled before execution.".into(),
+        )),
+        Ok(()) => execute_on_client(&client, run.sql, run.offset, run.page_size).await,
+        Err(error) => Err(error.into()),
+    };
+    // Detach cancellation before cleanup so a late Cancel cannot interrupt the
+    // ROLLBACK or hit a subsequent borrower of this pooled connection.
+    state.cancels.lock().await.remove(run.query_token);
+    if let Err(error) = client.batch_execute("ROLLBACK").await {
+        drop(PooledPgClient::take(client));
+        return Err(error.into());
+    }
+    drop(tx);
+    result
 }
 
 async fn execute_with_cancel(
@@ -877,4 +927,31 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Catabase");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_rejects_transaction_escape_and_explicit_mutations() {
+        assert!(validate_replay_sql("select 1").is_ok());
+        assert!(validate_replay_sql("select 1; COMMIT; DELETE FROM accounts").is_err());
+        assert!(validate_replay_sql("UPDATE accounts SET name = 'changed' RETURNING *").is_err());
+        assert!(validate_replay_sql("BEGIN").is_err());
+        // This syntactically select-like form is deliberately delegated to the
+        // server's READ ONLY transaction enforcement, not trusted by its prefix.
+        assert!(
+            validate_replay_sql(
+                "WITH changed AS (DELETE FROM accounts RETURNING *) SELECT * FROM changed"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn transaction_connection_must_match_exactly() {
+        assert!(check_transaction_connection("source", "source").is_ok());
+        assert!(check_transaction_connection("source", "other").is_err());
+    }
 }
