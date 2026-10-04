@@ -592,9 +592,10 @@ fn cell_to_json(row: &Row, index: usize, ty: &Type) -> Value {
             .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
         Type::JSON | Type::JSONB => row
-            .try_get::<usize, Option<Value>>(index)
+            .try_get::<usize, Option<RawJson>>(index)
             .ok()
             .flatten()
+            .map(|value| Value::String(value.0))
             .unwrap_or(Value::Null),
         Type::DATE => row
             .try_get::<usize, Option<NaiveDate>>(index)
@@ -630,6 +631,33 @@ fn quote_ident(input: &str) -> String {
 /// PostgreSQL NUMERIC uses base-10,000 digits. Decode directly into text to avoid
 /// passing exact decimals or large integers through JavaScript's IEEE-754 Number.
 struct ExactNumeric(String);
+
+struct RawJson(String);
+
+impl<'a> FromSql<'a> for RawJson {
+    fn from_sql(
+        ty: &Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        let text = if *ty == Type::JSONB {
+            if raw.first() != Some(&1) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Unsupported JSONB format",
+                )
+                .into());
+            }
+            &raw[1..]
+        } else {
+            raw
+        };
+        Ok(Self(std::str::from_utf8(text)?.to_string()))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::JSON || *ty == Type::JSONB
+    }
+}
 
 impl<'a> FromSql<'a> for ExactNumeric {
     fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
@@ -755,5 +783,19 @@ mod numeric_tests {
         );
         assert!(decode_numeric(&[0, 0]).is_err());
         assert!(decode_numeric(&numeric(0, 0, 0, &[10000])).is_err());
+    }
+
+    #[test]
+    fn json_keeps_exact_number_literals_and_literal_null() {
+        let raw = br#"{"number":9223372036854775807,"decimal":0.123456789012345678901}"#;
+        assert_eq!(
+            RawJson::from_sql(&Type::JSON, raw).unwrap().0.as_bytes(),
+            raw
+        );
+        assert_eq!(
+            RawJson::from_sql(&Type::JSONB, b"\x01null").unwrap().0,
+            "null"
+        );
+        assert!(RawJson::from_sql(&Type::JSONB, b"\x02{}").is_err());
     }
 }
