@@ -134,8 +134,14 @@
 
   function focusActiveOption() {
     const option = menu?.querySelector<HTMLButtonElement>(`[data-dropdown-index="${activeIndex}"]`);
-    option?.focus({ preventScroll: true });
-    option?.scrollIntoView({ block: 'nearest' });
+    if (!menu || !option) return;
+    option.focus({ preventScroll: true });
+    const optionBounds = option.getBoundingClientRect();
+    const menuTop = menu.getBoundingClientRect().top + menu.clientTop;
+    const menuBottom = menuTop + menu.clientHeight;
+    // Scroll only this fixed menu; scrollIntoView can also move its sidebar.
+    if (optionBounds.top < menuTop) menu.scrollTop += optionBounds.top - menuTop;
+    else if (optionBounds.bottom > menuBottom) menu.scrollTop += optionBounds.bottom - menuBottom;
   }
 
   function enabledIndexes() {
@@ -143,13 +149,23 @@
   }
 
   async function reconcileOptions(nextOptions: DropdownOption[]) {
-    if (!nextOptions[activeIndex] || nextOptions[activeIndex].disabled) {
+    const focusedOption = menu?.contains(document.activeElement)
+      ? document.activeElement as HTMLButtonElement
+      : undefined;
+    const focusedIndex = focusedOption
+      ? nextOptions.findIndex((option) => option.value === focusedOption.dataset.dropdownValue && !option.disabled)
+      : -1;
+    if (focusedIndex >= 0) {
+      activeIndex = focusedIndex;
+    } else if (focusedOption || !nextOptions[activeIndex] || nextOptions[activeIndex].disabled) {
       activeIndex = nextOptions.findIndex((option) => !option.disabled);
-      await tick();
-      if (open) focusActiveOption();
     }
     await tick();
-    if (open) updateMenuPosition();
+    if (open) {
+      updateMenuPosition();
+      // Async model discovery may replace/remove the button that had focus.
+      if (focusedOption) focusActiveOption();
+    }
   }
 
   function moveActive(delta: number) {
@@ -262,6 +278,7 @@
           disabled={option.disabled}
           tabindex="-1"
           data-dropdown-index={index}
+          data-dropdown-value={option.value}
           on:focus={() => (activeIndex = index)}
           on:click={() => choose(option.value)}
         >
