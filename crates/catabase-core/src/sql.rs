@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::CoreError;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatementRange {
@@ -55,7 +57,16 @@ pub fn split_statements(sql: &str) -> Vec<StatementRange> {
         let statement_start = *start.get_or_insert(index);
 
         if byte == b'\'' {
-            index = find_single_quote_end(bytes, index + 1);
+            let escape_backslash = index > 0
+                && matches!(bytes[index - 1], b'e' | b'E')
+                && (index == 1
+                    || !(bytes[index - 2].is_ascii_alphanumeric() || bytes[index - 2] == b'_'));
+            index = find_single_quote_end(bytes, index + 1, escape_backslash);
+            continue;
+        }
+
+        if byte == b'"' {
+            index = find_double_quote_end(bytes, index + 1);
             continue;
         }
 
@@ -88,24 +99,74 @@ pub fn split_statements(sql: &str) -> Vec<StatementRange> {
 }
 
 pub fn classify_statement(sql: &str) -> StatementKind {
-    let normalized = strip_leading_comments(sql).to_ascii_lowercase();
-    let trimmed = normalized.trim_start();
-
-    if trimmed.starts_with("begin") || trimmed.starts_with("start transaction") {
+    let words = leading_keywords(sql, 4);
+    let words = words.iter().map(String::as_str).collect::<Vec<_>>();
+    if words.first() == Some(&"begin") || words.starts_with(&["start", "transaction"]) {
         StatementKind::TxBegin
-    } else if trimmed.starts_with("commit") || trimmed.starts_with("end") {
+    } else if matches!(words.first(), Some(&"commit" | &"end")) {
         StatementKind::TxCommit
-    } else if trimmed.starts_with("rollback") || trimmed.starts_with("abort") {
-        StatementKind::TxRollback
-    } else if trimmed.starts_with("select")
-        || trimmed.starts_with("with")
-        || trimmed.starts_with("values")
-        || trimmed.starts_with("table")
+    } else if words.starts_with(&["rollback", "to"])
+        || words.starts_with(&["rollback", "work", "to"])
+        || words.starts_with(&["rollback", "transaction", "to"])
     {
+        // A savepoint rollback leaves the surrounding transaction active.
+        StatementKind::Other
+    } else if matches!(words.first(), Some(&"rollback" | &"abort")) {
+        StatementKind::TxRollback
+    } else if matches!(
+        words.first(),
+        Some(&"select" | &"with" | &"values" | &"table")
+    ) {
         StatementKind::SelectLike
     } else {
         StatementKind::Other
     }
+}
+
+/// The UI tracks one explicit transaction on a checked-out connection. Refuse
+/// compound transaction boundaries before running any part of a selected batch.
+pub fn validate_transaction_sql(sql: &str) -> Result<(), CoreError> {
+    let statements = split_statements(sql);
+    for statement in &statements {
+        let kind = classify_statement(&statement.text);
+        if matches!(
+            kind,
+            StatementKind::TxBegin | StatementKind::TxCommit | StatementKind::TxRollback
+        ) {
+            if statements.len() > 1 {
+                return Err(CoreError::message(
+                    "Run BEGIN, COMMIT, and ROLLBACK separately from other statements so the transaction stays tracked.",
+                ));
+            }
+            let words = leading_keywords(&statement.text, 6);
+            if words
+                .windows(2)
+                .any(|pair| pair[0] == "and" && pair[1] == "chain")
+            {
+                return Err(CoreError::message(
+                    "AND CHAIN is not supported. Finish this transaction, then run BEGIN separately.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn leading_keywords(mut sql: &str, limit: usize) -> Vec<String> {
+    let mut words = Vec::new();
+    for _ in 0..limit {
+        sql = strip_leading_comments(sql);
+        let end = sql
+            .bytes()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            .count();
+        if end == 0 {
+            break;
+        }
+        words.push(sql[..end].to_ascii_lowercase());
+        sql = &sql[end..];
+    }
+    words
 }
 
 pub fn auto_limit_sql(sql: &str, offset: usize, page_size: usize) -> Option<String> {
@@ -145,12 +206,9 @@ fn strip_leading_comments(mut sql: &str) -> &str {
             }
             return "";
         }
-        if let Some(rest) = trimmed.strip_prefix("/*") {
-            if let Some(offset) = rest.find("*/") {
-                sql = &rest[offset + 2..];
-                continue;
-            }
-            return "";
+        if trimmed.starts_with("/*") {
+            sql = &trimmed[find_block_comment_end(trimmed.as_bytes(), 2)..];
+            continue;
         }
         return trimmed;
     }
@@ -171,19 +229,48 @@ fn find_line_end(bytes: &[u8], mut index: usize) -> usize {
 }
 
 fn find_block_comment_end(bytes: &[u8], mut index: usize) -> usize {
+    let mut depth = 1;
     while index + 1 < bytes.len() {
+        if bytes[index] == b'/' && bytes[index + 1] == b'*' {
+            depth += 1;
+            index += 2;
+            continue;
+        }
         if bytes[index] == b'*' && bytes[index + 1] == b'/' {
-            return index + 2;
+            depth -= 1;
+            index += 2;
+            if depth == 0 {
+                return index;
+            }
+            continue;
         }
         index += 1;
     }
     bytes.len()
 }
 
-fn find_single_quote_end(bytes: &[u8], mut index: usize) -> usize {
+fn find_single_quote_end(bytes: &[u8], mut index: usize, escape_backslash: bool) -> usize {
     while index < bytes.len() {
+        if escape_backslash && bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
         if bytes[index] == b'\'' {
             if bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn find_double_quote_end(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            if bytes.get(index + 1) == Some(&b'"') {
                 index += 2;
                 continue;
             }
@@ -246,5 +333,55 @@ mod tests {
             "select * from cats LIMIT 101 OFFSET 200"
         );
         assert!(auto_limit_sql("select * from cats limit 10", 0, 100).is_none());
+    }
+
+    #[test]
+    fn savepoint_rollback_does_not_end_transaction() {
+        for sql in [
+            "ROLLBACK TO SAVEPOINT checkpoint",
+            "rollback work to checkpoint",
+            "rollback transaction /* nested /* comment */ ok */ to checkpoint",
+        ] {
+            assert_eq!(classify_statement(sql), StatementKind::Other);
+            assert!(validate_transaction_sql(sql).is_ok());
+        }
+        assert_eq!(
+            classify_statement("ROLLBACK WORK"),
+            StatementKind::TxRollback
+        );
+        assert_eq!(
+            classify_statement("START\n/* explanation */ TRANSACTION"),
+            StatementKind::TxBegin
+        );
+    }
+
+    #[test]
+    fn rejects_untracked_transaction_boundaries_before_running_batches() {
+        for sql in [
+            "BEGIN; SELECT 1 / 0;",
+            "SELECT 1; BEGIN;",
+            "COMMIT; BEGIN;",
+            "COMMIT AND CHAIN",
+            "ROLLBACK WORK AND /* comment */ CHAIN",
+        ] {
+            assert!(validate_transaction_sql(sql).is_err(), "{sql}");
+        }
+        assert!(validate_transaction_sql("COMMIT AND NO CHAIN").is_ok());
+        assert!(validate_transaction_sql("select 1; select 2;").is_ok());
+        assert!(validate_transaction_sql("SAVEPOINT a; ROLLBACK TO a;").is_ok());
+    }
+
+    #[test]
+    fn transaction_validation_ignores_boundaries_in_quoted_content() {
+        for sql in [
+            r#"SELECT 'x; COMMIT' AS "alias; BEGIN";"#,
+            "SELECT E'quoted\\'; COMMIT'",
+            "SELECT $$begin; commit$$",
+            "/* outer /* nested */ BEGIN */ SELECT 1",
+        ] {
+            assert_eq!(split_statements(sql).len(), 1, "{sql}");
+            assert!(validate_transaction_sql(sql).is_ok(), "{sql}");
+        }
+        assert_eq!(classify_statement("beginning"), StatementKind::Other);
     }
 }

@@ -14,9 +14,9 @@ use catabase_core::{
     RowUpdate, SchemaTree, Settings, StatementKind, StatementRange, Storage,
     apply_row_updates as apply_rows, build_connection_url as build_url, cancel_query_token,
     checkout_pool_client, classify_statement, connection_stats as load_connection_stats,
-    create_pool, execute_on_client, get_ddl_on_client as load_ddl,
+    create_pool, execute_on_client, execute_on_client_cancellable, get_ddl_on_client as load_ddl,
     introspect_schema_on_client as load_schema, parse_connection_url as parse_url,
-    split_statements, test_connection as test_pg_connection,
+    split_statements, test_connection as test_pg_connection, validate_transaction_sql,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -537,6 +537,7 @@ async fn run_query_with_state(
     state: &State<'_, AppState>,
     run: QueryRun<'_>,
 ) -> Result<QueryResult, CoreError> {
+    validate_transaction_sql(run.sql)?;
     if run.read_only_replay {
         return execute_read_only_replay(state, &run).await;
     }
@@ -657,7 +658,16 @@ async fn execute_read_only_replay(
         Ok(()) if cancelled.load(Ordering::Acquire) => Err(CoreError::Cancelled(
             "Replay cancelled before execution.".into(),
         )),
-        Ok(()) => execute_on_client(&client, run.sql, run.offset, run.page_size).await,
+        Ok(()) => {
+            execute_on_client_cancellable(
+                &client,
+                run.sql,
+                run.offset,
+                run.page_size,
+                Some(&cancelled),
+            )
+            .await
+        }
         Err(error) => Err(error.into()),
     };
     // Detach cancellation before cleanup so a late Cancel cannot interrupt the
@@ -680,8 +690,9 @@ async fn execute_with_cancel(
     offset: usize,
     page_size: usize,
 ) -> Result<QueryResult, CoreError> {
-    register_cancel(state, query_token, client, ssl).await?;
-    let result = execute_on_client(client, sql, offset, page_size).await;
+    let cancelled = register_cancel(state, query_token, client, ssl).await?;
+    let result =
+        execute_on_client_cancellable(client, sql, offset, page_size, Some(&cancelled)).await;
     state.cancels.lock().await.remove(query_token);
     result
 }
