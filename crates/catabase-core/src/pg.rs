@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -103,7 +104,9 @@ pub fn create_pool(fields: &ConnectionFields, pool_size: u32) -> Result<PgPool, 
     let mut config = postgres_config(fields);
     let max_size = pool_size.clamp(1, 32) as usize;
     let manager_config = ManagerConfig {
-        recycling_method: RecyclingMethod::Fast,
+        // A held manual transaction is never returned to the pool. Any client
+        // that is returned must shed an abandoned/failed transaction before reuse.
+        recycling_method: RecyclingMethod::Custom("ROLLBACK".to_string()),
     };
 
     if fields.ssl {
@@ -147,6 +150,17 @@ pub async fn execute_on_client(
     offset: usize,
     page_size: usize,
 ) -> Result<QueryResult, CoreError> {
+    execute_on_client_cancellable(client, sql, offset, page_size, None).await
+}
+
+pub async fn execute_on_client_cancellable(
+    client: &PgClient,
+    sql: &str,
+    offset: usize,
+    page_size: usize,
+    cancelled: Option<&AtomicBool>,
+) -> Result<QueryResult, CoreError> {
+    check_query_cancelled(cancelled)?;
     let requested_page = page_size.clamp(1, 10_000);
     let limited_sql = auto_limit_sql(sql, offset, requested_page);
     let auto_limited = limited_sql.is_some();
@@ -158,7 +172,9 @@ pub async fn execute_on_client(
     }
 
     let statement = client.prepare(exec_sql).await?;
-    let columns = column_metas(client, statement.columns()).await?;
+    check_query_cancelled(cancelled)?;
+    let columns = column_metas(client, statement.columns(), cancelled).await?;
+    check_query_cancelled(cancelled)?;
     let mut rows = client.query(&statement, &[]).await?;
     let mut has_more = false;
     if auto_limited && rows.len() > requested_page {
@@ -176,6 +192,15 @@ pub async fn execute_on_client(
         has_more,
         json_values_as_text: true,
     })
+}
+
+fn check_query_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), CoreError> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(CoreError::Cancelled(
+            "Query cancelled before execution.".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn connection_stats(pool: &PgPool) -> ConnectionStats {
@@ -469,9 +494,11 @@ fn make_tls_connector() -> MakeRustlsConnect {
 async fn column_metas(
     client: &PgClient,
     columns: &[tokio_postgres::Column],
+    cancelled: Option<&AtomicBool>,
 ) -> Result<Vec<ColumnMeta>, CoreError> {
     let mut catalog = HashMap::new();
     for column in columns {
+        check_query_cancelled(cancelled)?;
         let Some(table_oid) = column.table_oid() else {
             continue;
         };
@@ -812,5 +839,15 @@ mod numeric_tests {
         .unwrap();
         assert!(!result.json_values_as_text);
         assert_eq!(result.rows[0]["payload"], "null");
+    }
+
+    #[test]
+    fn cancellation_remains_effective_after_preparation_or_metadata_work() {
+        let flag = AtomicBool::new(false);
+        assert!(check_query_cancelled(Some(&flag)).is_ok());
+        flag.store(true, Ordering::Release);
+        let error = check_query_cancelled(Some(&flag)).unwrap_err();
+        assert_eq!(error.pg_info().unwrap().code.as_deref(), Some("57014"));
+        assert!(check_query_cancelled(None).is_ok());
     }
 }
