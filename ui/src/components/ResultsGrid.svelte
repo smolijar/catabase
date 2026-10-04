@@ -123,7 +123,7 @@
     const column = data.columns[cell.column];
     const value = data.rows[cell.originalIndex]?.[column.name];
     draftNull = value == null;
-    draft = value == null ? (cellKind(column) === 'boolean' ? 'false' : '') : prettyCell(value, column);
+    draft = value == null ? (cellKind(column) === 'boolean' ? 'false' : '') : prettyCell(value, column, data.jsonValuesAsText);
     draftError = '';
   }
 
@@ -131,7 +131,7 @@
     if (!canEdit || disabled || !inspectorCell || !selectedColumn) return;
     try {
       const next = parseCellDraft(selectedColumn, draft, draftNull);
-      if ((next == null && selectedValue == null) || (next != null && selectedValue != null && cellText(next) === cellText(selectedValue))) {
+      if ((next == null && selectedValue == null) || (next != null && selectedValue != null && cellText(next, selectedColumn, true) === cellText(selectedValue, selectedColumn, result.jsonValuesAsText))) {
         draftError = '';
         onMessage('The value is unchanged.');
         return;
@@ -147,7 +147,7 @@
   async function copySelection() {
     if (!anchor || !focus) return;
     try {
-      await copyText(selectionText(rows, result.columns, anchor, focus));
+      await copyText(selectionText(rows, result.columns, anchor, focus, result.jsonValuesAsText));
       onMessage(`${selectedCount === 1 ? 'Cell' : `${selectedCount} cells`} copied.`);
     } catch (error) {
       onMessage(`Copy failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -157,7 +157,7 @@
   async function copyValue() {
     if (!selectedColumn) return;
     try {
-      await copyText(prettyCell(selectedValue, selectedColumn));
+      await copyText(prettyCell(selectedValue, selectedColumn, result.jsonValuesAsText));
       onMessage('Cell value copied.');
     } catch (error) {
       onMessage(`Copy failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -251,17 +251,17 @@
                   <button
                     class="cell"
                     class:null-value={entry.row[column.name] == null}
-                    class:empty-value={entry.row[column.name] === ''}
+                    class:empty-value={entry.row[column.name] === '' && cellKind(column) !== 'json'}
                     data-cell={`${rowIndex}:${columnIndex}`}
-                    tabindex={focus ? focus.row === rowIndex && focus.column === columnIndex ? 0 : -1 : rowIndex === 0 && columnIndex === 0 ? 0 : -1}
-                    aria-label={`Row ${entry.originalIndex + 1}, ${column.name}: ${entry.row[column.name] === '' ? 'empty string' : cellText(entry.row[column.name]).slice(0, 200)}`}
+                    tabindex={focus && focus.row >= rowWindow.first && focus.row < rowWindow.last ? focus.row === rowIndex && focus.column === columnIndex ? 0 : -1 : visibleIndex === 0 && columnIndex === 0 ? 0 : -1}
+                    aria-label={`Row ${entry.originalIndex + 1}, ${column.name}: ${entry.row[column.name] === '' && cellKind(column) !== 'json' ? 'empty string' : cellText(entry.row[column.name], column, result.jsonValuesAsText).slice(0, 200)}`}
                     aria-pressed={Boolean(isSelected(rowIndex, columnIndex))}
                     title="Click to select, Shift-click for a range, double-click or Enter for details"
                     on:click={(event) => selectCell(rowIndex, columnIndex, event.shiftKey)}
-                    on:focus={() => { if (!focus) selectCell(rowIndex, columnIndex); }}
+                    on:focus={(event) => { if (!focus || ((focus.row < rowWindow.first || focus.row >= rowWindow.last) && event.currentTarget.matches(':focus-visible'))) selectCell(rowIndex, columnIndex); }}
                     on:dblclick={() => inspectCell(rowIndex, columnIndex)}
                     on:keydown={(event) => cellKey(event, rowIndex, columnIndex)}
-                  >{entry.row[column.name] === '' ? 'empty string' : cellText(entry.row[column.name])}</button>
+                  >{entry.row[column.name] === '' && cellKind(column) !== 'json' ? 'empty string' : cellText(entry.row[column.name], column, result.jsonValuesAsText)}</button>
                 </td>
               {/each}
             </tr>
@@ -285,17 +285,17 @@
                 <label class:chosen={draft === 'false'}><input type="radio" bind:group={draft} value="false" {disabled} /> false</label>
               </div>
             {:else}
-              <textarea aria-label={`New value for ${selectedColumn.name}`} aria-invalid={Boolean(draftError)} bind:value={draft} {disabled} spellcheck="false" inputmode={kind === 'integer' || kind === 'numeric' ? 'decimal' : 'text'} on:input={() => (draftError = '')} on:keydown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); stageEdit(); } }}></textarea>
+              <textarea aria-label={`New value for ${selectedColumn.name}`} aria-invalid={Boolean(draftError)} bind:value={draft} {disabled} spellcheck="false" inputmode={kind === 'integer' || kind === 'numeric' ? 'decimal' : 'text'} on:input={() => (draftError = '')} on:keydown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); stageEdit(); } }}></textarea>
             {/if}
             {#if draftError}<p class="draft-error" role="alert">{draftError}</p>{/if}
             <p class="edit-hint">{kind === 'text' ? 'An empty value is an empty string. Select Set NULL to remove the value.' : kind === 'json' ? 'JSON is validated before staging. JSON null and SQL NULL are distinct.' : kind === 'numeric' || kind === 'integer' ? 'Numbers retain their full precision.' : 'Choose a value, then stage the change.'}</p>
             <div class="inspector-actions"><button class="stage-button" type="submit" {disabled}>Stage change</button><button type="button" {disabled} on:click={() => resetDraft(result, inspectorCell, editMode)}>Reset</button></div>
           </form>
         {:else}
-          <pre class:null-preview={selectedValue == null} class="cell-value">{prettyCell(selectedValue, selectedColumn)}</pre>
-          {#if selectedValue === ''}<p class="edit-hint">Empty string (0 characters)</p>{/if}
+          <pre class:null-preview={selectedValue == null} class="cell-value">{prettyCell(selectedValue, selectedColumn, result.jsonValuesAsText)}</pre>
+          {#if selectedValue === '' && kind !== 'json'}<p class="edit-hint">Empty string (0 characters)</p>{/if}
           <button on:click={copyValue}><Icon name="copy" size={13} /> Copy full value</button>
-          <p class="edit-hint">{selectedColumn.generated ? 'This value is generated by the database and cannot be edited.' : readOnly ? 'This result is read-only.' : 'Enable Edit rows to change this value.'}</p>
+          <p class="edit-hint">{selectedColumn.generated ? 'This value is generated by the database and cannot be edited.' : readOnly ? 'This result is read-only.' : 'Enable Edit cells to change this value.'}</p>
         {/if}
       </aside>
     {/if}

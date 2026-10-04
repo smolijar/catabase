@@ -21,15 +21,16 @@ export function cellKind(column: ColumnMeta): CellKind {
   return 'text';
 }
 
-export function cellText(value: unknown): string {
+export function cellText(value: unknown, column?: ColumnMeta, jsonValuesAsText = false): string {
   if (value == null) return 'NULL';
+  if (column && cellKind(column) === 'json' && !jsonValuesAsText) return JSON.stringify(value);
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
 
 // Format JSON tokens without parsing their numbers into JavaScript doubles.
-export function prettyCell(value: unknown, column: ColumnMeta): string {
-  const text = cellText(value);
+export function prettyCell(value: unknown, column: ColumnMeta, jsonValuesAsText = false): string {
+  const text = cellText(value, column, jsonValuesAsText);
   if (value == null || (cellKind(column) !== 'json' && typeof value !== 'object')) return text;
   try {
     JSON.parse(text);
@@ -109,7 +110,7 @@ export function sortedRows(result: QueryResult, sort: GridSort): IndexedRow[] {
     const rightDecimal = numeric ? decimal(right) : null;
     const comparison = leftDecimal && rightDecimal
       ? compareDecimals(leftDecimal, rightDecimal)
-      : cellText(left).localeCompare(cellText(right), undefined, { numeric: true });
+      : cellText(left, column, result.jsonValuesAsText).localeCompare(cellText(right, column, result.jsonValuesAsText), undefined, { numeric: true });
     return (sort.direction === 'asc' ? comparison : -comparison) || a.originalIndex - b.originalIndex;
   });
 }
@@ -121,18 +122,19 @@ export function selectionBounds(anchor: CellPosition, focus: CellPosition) {
   };
 }
 
-export function selectionText(rows: IndexedRow[], columns: ColumnMeta[], anchor: CellPosition, focus: CellPosition): string {
+export function selectionText(rows: IndexedRow[], columns: ColumnMeta[], anchor: CellPosition, focus: CellPosition, jsonValuesAsText = false): string {
   const bounds = selectionBounds(anchor, focus);
-  const quote = (value: unknown) => {
-    const text = cellText(value);
+  const quote = (value: unknown, column: ColumnMeta) => {
+    const text = cellText(value, column, jsonValuesAsText);
     return /[\t\n\r"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
   // A single cell copies its complete raw content, including tabs/newlines.
   if (bounds.firstRow === bounds.lastRow && bounds.firstColumn === bounds.lastColumn) {
-    return cellText(rows[bounds.firstRow]?.row[columns[bounds.firstColumn]?.name]);
+    const column = columns[bounds.firstColumn];
+    return cellText(rows[bounds.firstRow]?.row[column?.name], column, jsonValuesAsText);
   }
   return rows.slice(bounds.firstRow, bounds.lastRow + 1)
-    .map(({ row }) => columns.slice(bounds.firstColumn, bounds.lastColumn + 1).map((column) => quote(row[column.name])).join('\t'))
+    .map(({ row }) => columns.slice(bounds.firstColumn, bounds.lastColumn + 1).map((column) => quote(row[column.name], column)).join('\t'))
     .join('\n');
 }
 

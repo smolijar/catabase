@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseCellDraft, prettyCell, selectionText, sortedRows, visibleRowWindow } from '../src/lib/resultsGrid.ts';
+import { cellText, parseCellDraft, prettyCell, selectionText, sortedRows, visibleRowWindow } from '../src/lib/resultsGrid.ts';
 import type { ColumnMeta, QueryResult } from '../src/lib/types.ts';
 
 const column = (typeName = 'text', more: Partial<ColumnMeta> = {}): ColumnMeta => ({ name: 'value', typeName, typeOid: 0, nullable: true, generated: false, primaryKey: false, ...more });
@@ -46,7 +46,7 @@ test('range copy uses visible sorted order, preserves null and escapes TSV conte
 
 test('JSON inspection formats without rounding numeric tokens or altering string whitespace', () => {
   const value = '{"n": 9007199254740993, "text": "a  b", "empty": [], "nested": {"x":true}}';
-  const formatted = prettyCell(value, column('jsonb'));
+  const formatted = prettyCell(value, column('jsonb'), true);
   assert.match(formatted, /9007199254740993/);
   assert.match(formatted, /"a  b"/);
   assert.match(formatted, /"empty": \[\]/);
@@ -69,4 +69,17 @@ test('reversed rectangular selection copies the visible cells across multiple co
   const columns = [column('text', { name: 'id' }), column('text', { name: 'value' })];
   const rows = [{ originalIndex: 4, row: { id: '5', value: '' } }, { originalIndex: 0, row: { id: '1', value: 'a\nb' } }];
   assert.equal(selectionText(rows, columns, { row: 1, column: 1 }, { row: 0, column: 0 }), '5\t\n1\t"a\nb"');
+});
+
+test('legacy JSON string scalars stay distinct from current raw JSON literals in display and copy', () => {
+  for (const value of ['null', '123', '[1]', 'plain string', '']) {
+    assert.equal(cellText(value, column('jsonb')), JSON.stringify(value));
+    assert.equal(prettyCell(value, column('jsonb')), JSON.stringify(value));
+    const data = result([value], 'jsonb');
+    assert.equal(selectionText(sortedRows(data, null), data.columns, { row: 0, column: 0 }, { row: 0, column: 0 }), JSON.stringify(value));
+  }
+  assert.equal(prettyCell('null', column('jsonb'), true), 'null');
+  assert.equal(prettyCell('123', column('jsonb'), true), '123');
+  assert.equal(prettyCell('[1]', column('jsonb'), true), '[\n  1\n]');
+  assert.equal(prettyCell(null, column('jsonb'), true), 'NULL');
 });
