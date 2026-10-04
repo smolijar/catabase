@@ -212,6 +212,7 @@ label {
 
 .app-shell {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 58px 1fr 28px;
   height: 100vh;
   background: #0b1220;
@@ -337,7 +338,8 @@ button.chip {
 
 .workspace {
   display: grid;
-  grid-template-columns: 58px auto 1fr;
+  grid-template-columns: 58px auto minmax(0, 1fr);
+  min-width: 0;
   min-height: 0;
 }
 
@@ -658,6 +660,7 @@ button.chip {
 .main-pane {
   grid-column: 3;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 40px minmax(180px, 1fr) 7px minmax(220px, min(var(--results-height, 360px), calc(100vh - 310px)));
   min-width: 0;
   min-height: 0;
@@ -737,8 +740,10 @@ button.chip {
 
 .editor-pane,
 .editor-host {
+  min-width: 0;
   min-height: 0;
   height: 100%;
+  overflow: hidden;
 }
 
 .editor-pane {
@@ -804,6 +809,7 @@ button.chip {
 .results-pane {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
   background: #0a111e;
@@ -811,6 +817,7 @@ button.chip {
 
 .results-head {
   flex: 0 0 auto;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 1rem;
   border-bottom: 1px solid #1e2b44;
@@ -1047,7 +1054,7 @@ th small {
   position: fixed;
   z-index: 30;
   right: 18px;
-  bottom: 42px;
+  bottom: 80px;
   display: flex;
   align-items: center;
   gap: 0.55rem;
@@ -1167,7 +1174,7 @@ th small {
   }
 
   .workspace {
-    grid-template-columns: 58px 1fr;
+    grid-template-columns: 58px minmax(0, 1fr);
   }
 
   .sidebar {
