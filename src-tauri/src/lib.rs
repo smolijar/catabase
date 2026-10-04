@@ -1,14 +1,22 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use catabase_core::{
-    AiCompletionRequest, AiHealth, ConnectionFields, ConnectionInput, ConnectionRecord,
-    ConnectionStats, CoreError, HistoryPage, HistoryStats, NewHistoryEntry, OpenCodeClient,
-    PgCancelToken, PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryResult, SchemaTree,
-    Settings, StatementKind, StatementRange, Storage, build_connection_url as build_url,
-    cancel_query_token, checkout_pool_client, classify_statement,
-    connection_stats as load_connection_stats, create_pool, execute_on_client,
-    get_ddl_on_client as load_ddl, introspect_schema_on_client as load_schema,
-    parse_connection_url as parse_url, split_statements, test_connection as test_pg_connection,
+    AiCompletionRequest, AiHealth, ApplyUpdatesResult, ConnectionFields, ConnectionInput,
+    ConnectionRecord, ConnectionStats, CoreError, HistoryPage, HistoryStats, NewHistoryEntry,
+    OpenCodeClient, PgCancelToken, PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryResult,
+    RowUpdate, SchemaTree, Settings, StatementKind, StatementRange, Storage,
+    apply_row_updates as apply_rows, build_connection_url as build_url, cancel_query_token,
+    checkout_pool_client, classify_statement, connection_stats as load_connection_stats,
+    create_pool, execute_on_client, get_ddl_on_client as load_ddl,
+    introspect_schema_on_client as load_schema, parse_connection_url as parse_url,
+    split_statements, test_connection as test_pg_connection,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -37,8 +45,21 @@ struct TxSession {
 }
 
 struct CancelEntry {
-    token: PgCancelToken,
+    token: Option<PgCancelToken>,
     ssl: bool,
+    cancelled: Arc<AtomicBool>,
+    created_at: Instant,
+}
+
+impl CancelEntry {
+    fn pending() -> Self {
+        Self {
+            token: None,
+            ssl: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            created_at: Instant::now(),
+        }
+    }
 }
 
 struct QueryRun<'a> {
@@ -131,12 +152,12 @@ async fn save_connection(
     state: State<'_, AppState>,
     input: ConnectionInput,
 ) -> Result<ConnectionRecord, AppError> {
+    let _tx_guard = ensure_no_transaction(&state).await?;
     let record = state
         .storage
         .save_connection(input)
         .map_err(AppError::from)?;
     refresh_active(&state).await?;
-    reset_tx(&app, &state).await;
     reset_pool(&state).await;
     emit_pool_reset(&app);
     Ok(record)
@@ -148,12 +169,12 @@ async fn delete_connection(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), AppError> {
+    let _tx_guard = ensure_no_transaction(&state).await?;
     state
         .storage
         .delete_connection(&id)
         .map_err(AppError::from)?;
     refresh_active(&state).await?;
-    reset_tx(&app, &state).await;
     reset_pool(&state).await;
     emit_pool_reset(&app);
     Ok(())
@@ -165,12 +186,12 @@ async fn activate_connection(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<ConnectionRecord, AppError> {
+    let _tx_guard = ensure_no_transaction(&state).await?;
     let record = state
         .storage
         .activate_connection(&id)
         .map_err(AppError::from)?;
     *state.active.write().await = Some(record.clone());
-    reset_tx(&app, &state).await;
     reset_pool(&state).await;
     emit_pool_reset(&app);
     Ok(record)
@@ -204,11 +225,11 @@ async fn set_pool_size(
     state: State<'_, AppState>,
     pool_size: u32,
 ) -> Result<u32, AppError> {
+    let _tx_guard = ensure_no_transaction(&state).await?;
     let normalized = state
         .storage
         .set_pool_size(pool_size)
         .map_err(AppError::from)?;
-    reset_tx(&app, &state).await;
     reset_pool(&state).await;
     emit_pool_reset(&app);
     Ok(normalized)
@@ -235,51 +256,97 @@ async fn execute_query(
     query_token: String,
     offset: u32,
     page_size: u32,
+    connection_id: Option<String>,
 ) -> Result<QueryResult, AppError> {
-    let active = active_connection(&state).await?;
-    let pool = active_pool(&state, &active).await?;
-    let result = run_query_with_state(
-        &app,
-        &state,
-        QueryRun {
-            active: &active,
-            pool: &pool,
-            ssl: active.ssl,
-            sql: &sql,
-            query_token: &query_token,
-            offset: offset as usize,
-            page_size: page_size as usize,
-        },
-    )
-    .await;
+    begin_operation(&state, &query_token).await;
+    let outcome = async {
+        let active = requested_connection(&state, connection_id.as_deref()).await?;
+        ensure_transaction_connection(&state, &active.id).await?;
+        let pool = active_pool(&state, &active).await?;
+        let result = run_query_with_state(
+            &app,
+            &state,
+            QueryRun {
+                active: &active,
+                pool: &pool,
+                ssl: active.ssl,
+                sql: &sql,
+                query_token: &query_token,
+                offset: offset as usize,
+                page_size: page_size as usize,
+            },
+        )
+        .await;
 
-    match result {
-        Ok(result) => {
-            let _ = state.storage.insert_history(NewHistoryEntry {
-                connection_id: Some(active.id),
-                query: sql,
-                duration_ms: result.duration_ms,
-                row_count: Some(result.row_count),
-                is_error: false,
-                error_message: None,
-                result_json: serde_json::to_value(&result).ok(),
-            });
-            Ok(result)
-        }
-        Err(error) => {
-            let app_error = AppError::from(error);
-            let _ = state.storage.insert_history(NewHistoryEntry {
-                connection_id: Some(active.id),
-                query: sql,
-                duration_ms: 0,
-                row_count: None,
-                is_error: true,
-                error_message: Some(app_error.message.clone()),
-                result_json: None,
-            });
-            Err(app_error)
+        match result {
+            Ok(result) => {
+                let _ = state.storage.insert_history(NewHistoryEntry {
+                    connection_id: Some(active.id),
+                    query: sql,
+                    duration_ms: result.duration_ms,
+                    row_count: Some(result.row_count),
+                    is_error: false,
+                    error_message: None,
+                    result_json: serde_json::to_value(&result).ok(),
+                });
+                Ok(result)
+            }
+            Err(error) => {
+                let app_error = AppError::from(error);
+                let _ = state.storage.insert_history(NewHistoryEntry {
+                    connection_id: Some(active.id),
+                    query: sql,
+                    duration_ms: 0,
+                    row_count: None,
+                    is_error: true,
+                    error_message: Some(app_error.message.clone()),
+                    result_json: None,
+                });
+                Err(app_error)
+            }
         }
     }
+    .await;
+    state.cancels.lock().await.remove(&query_token);
+    outcome
+}
+
+#[tauri::command]
+async fn apply_row_updates(
+    state: State<'_, AppState>,
+    connection_id: String,
+    query_token: String,
+    updates: Vec<RowUpdate>,
+) -> Result<ApplyUpdatesResult, AppError> {
+    begin_operation(&state, &query_token).await;
+    let outcome = async {
+        let active = requested_connection(&state, Some(&connection_id)).await?;
+        let tx = state.tx.lock().await;
+        if let Some(session) = tx.as_ref() {
+            check_transaction_connection(&session.connection_id, &active.id)?;
+            let cancelled =
+                register_cancel(&state, &query_token, &session.client, session.ssl).await?;
+            let result = apply_rows(&session.client, &updates, true, &cancelled)
+                .await
+                .map_err(AppError::from);
+            state.cancels.lock().await.remove(&query_token);
+            result
+        } else {
+            // Hold the transaction-state lock so another request cannot begin a
+            // manual transaction halfway through an independently committed batch.
+            let pool = active_pool(&state, &active).await?;
+            let client = checkout_pool_client(&pool).await.map_err(AppError::from)?;
+            let cancelled = register_cancel(&state, &query_token, &client, active.ssl).await?;
+            let result = apply_rows(&client, &updates, false, &cancelled)
+                .await
+                .map_err(AppError::from);
+            state.cancels.lock().await.remove(&query_token);
+            result
+        }
+    }
+    .await;
+    state.cancels.lock().await.remove(&query_token);
+    outcome
 }
 
 #[tauri::command]
@@ -287,9 +354,14 @@ async fn cancel_query(
     state: State<'_, AppState>,
     query_token: String,
 ) -> Result<CancelResult, AppError> {
-    let entry = state.cancels.lock().await.remove(&query_token);
-    if let Some(entry) = entry {
-        cancel_query_token(entry.token, entry.ssl)
+    let mut cancels = state.cancels.lock().await;
+    prune_pending_cancels(&mut cancels);
+    let entry = cancels
+        .entry(query_token)
+        .or_insert_with(CancelEntry::pending);
+    entry.cancelled.store(true, Ordering::Release);
+    if let Some(token) = entry.token.clone() {
+        cancel_query_token(token, entry.ssl)
             .await
             .map_err(AppError::from)?;
         return Ok(CancelResult {
@@ -299,8 +371,8 @@ async fn cancel_query(
     }
 
     Ok(CancelResult {
-        cancelled: false,
-        message: "Query already finished or was not registered.".to_string(),
+        cancelled: true,
+        message: "Cancellation requested before query execution.".to_string(),
     })
 }
 
@@ -333,8 +405,11 @@ async fn tx_rollback(app: AppHandle, state: State<'_, AppState>) -> Result<TxSta
 }
 
 #[tauri::command]
-async fn introspect_schema(state: State<'_, AppState>) -> Result<SchemaTree, AppError> {
-    let active = active_connection(&state).await?;
+async fn introspect_schema(
+    state: State<'_, AppState>,
+    connection_id: Option<String>,
+) -> Result<SchemaTree, AppError> {
+    let active = requested_connection(&state, connection_id.as_deref()).await?;
     let pool = active_pool(&state, &active).await?;
     let client = checkout_pool_client(&pool).await.map_err(AppError::from)?;
     load_schema(&client).await.map_err(Into::into)
@@ -345,8 +420,9 @@ async fn get_ddl(
     state: State<'_, AppState>,
     schema: String,
     name: String,
+    connection_id: Option<String>,
 ) -> Result<String, AppError> {
-    let active = active_connection(&state).await?;
+    let active = requested_connection(&state, connection_id.as_deref()).await?;
     let pool = active_pool(&state, &active).await?;
     let client = checkout_pool_client(&pool).await.map_err(AppError::from)?;
     load_ddl(&client, &schema, &name).await.map_err(Into::into)
@@ -446,7 +522,8 @@ async fn run_query_with_state(
 ) -> Result<QueryResult, CoreError> {
     match classify_statement(run.sql) {
         StatementKind::TxBegin => {
-            if state.tx.lock().await.is_some() {
+            let mut tx = state.tx.lock().await;
+            if tx.is_some() {
                 return Err(CoreError::message("Transaction already active"));
             }
 
@@ -462,12 +539,13 @@ async fn run_query_with_state(
             )
             .await?;
             let started_at = chrono::Utc::now().to_rfc3339();
-            *state.tx.lock().await = Some(TxSession {
+            *tx = Some(TxSession {
                 connection_id: run.active.id.clone(),
                 client,
                 ssl: run.ssl,
                 started_at,
             });
+            drop(tx);
             let _ = app.emit("tx-changed", tx_status_inner(state).await);
             Ok(result)
         }
@@ -479,6 +557,7 @@ async fn run_query_with_state(
                 run.query_token,
                 run.offset,
                 run.page_size,
+                &run.active.id,
             )
             .await?;
             Ok(result)
@@ -491,35 +570,27 @@ async fn run_query_with_state(
                 run.query_token,
                 run.offset,
                 run.page_size,
+                &run.active.id,
             )
             .await?;
             Ok(result)
         }
         _ => {
-            let needs_reset = {
-                let mut tx = state.tx.lock().await;
-                if let Some(session) = tx.as_mut() {
-                    if session.connection_id != run.active.id {
-                        true
-                    } else {
-                        return execute_with_cancel(
-                            state,
-                            &session.client,
-                            session.ssl,
-                            run.sql,
-                            run.query_token,
-                            run.offset,
-                            run.page_size,
-                        )
-                        .await;
-                    }
-                } else {
-                    false
+            {
+                let tx = state.tx.lock().await;
+                if let Some(session) = tx.as_ref() {
+                    check_transaction_connection(&session.connection_id, &run.active.id)?;
+                    return execute_with_cancel(
+                        state,
+                        &session.client,
+                        session.ssl,
+                        run.sql,
+                        run.query_token,
+                        run.offset,
+                        run.page_size,
+                    )
+                    .await;
                 }
-            };
-
-            if needs_reset {
-                reset_tx(app, state).await;
             }
 
             let client = checkout_pool_client(run.pool).await?;
@@ -546,13 +617,7 @@ async fn execute_with_cancel(
     offset: usize,
     page_size: usize,
 ) -> Result<QueryResult, CoreError> {
-    state.cancels.lock().await.insert(
-        query_token.to_string(),
-        CancelEntry {
-            token: client.cancel_token(),
-            ssl,
-        },
-    );
+    register_cancel(state, query_token, client, ssl).await?;
     let result = execute_on_client(client, sql, offset, page_size).await;
     state.cancels.lock().await.remove(query_token);
     result
@@ -565,12 +630,14 @@ async fn finish_tx_with_sql(
     query_token: &str,
     offset: usize,
     page_size: usize,
+    connection_id: &str,
 ) -> Result<QueryResult, CoreError> {
-    let session = state
-        .tx
-        .lock()
-        .await
-        .take()
+    let mut tx = state.tx.lock().await;
+    if let Some(session) = tx.as_ref() {
+        check_transaction_connection(&session.connection_id, connection_id)?;
+    }
+    let session = tx
+        .as_ref()
         .ok_or_else(|| CoreError::message("No active transaction"))?;
     let result = execute_with_cancel(
         state,
@@ -582,6 +649,10 @@ async fn finish_tx_with_sql(
         page_size,
     )
     .await;
+    if result.is_ok() {
+        *tx = None;
+    }
+    drop(tx);
     let _ = app.emit("tx-changed", tx_status_inner(state).await);
     result
 }
@@ -591,25 +662,17 @@ async fn finish_tx(
     state: &State<'_, AppState>,
     sql: &str,
 ) -> Result<(), AppError> {
-    let session = state
-        .tx
-        .lock()
-        .await
-        .take()
+    let mut tx = state.tx.lock().await;
+    let session = tx
+        .as_ref()
         .ok_or_else(|| CoreError::message("No active transaction"))?;
     execute_on_client(&session.client, sql, 0, 1)
         .await
         .map_err(AppError::from)?;
+    *tx = None;
+    drop(tx);
     let _ = app.emit("tx-changed", tx_status_inner(state).await);
     Ok(())
-}
-
-async fn reset_tx(app: &AppHandle, state: &State<'_, AppState>) {
-    let session = state.tx.lock().await.take();
-    if let Some(session) = session {
-        let _ = execute_on_client(&session.client, "ROLLBACK", 0, 1).await;
-    }
-    let _ = app.emit("tx-changed", tx_status_inner(state).await);
 }
 
 async fn active_connection(state: &State<'_, AppState>) -> Result<ConnectionRecord, AppError> {
@@ -623,6 +686,83 @@ async fn active_connection(state: &State<'_, AppState>) -> Result<ConnectionReco
         .ok_or_else(|| CoreError::message("No active connection"))?;
     *state.active.write().await = Some(active.clone());
     Ok(active)
+}
+
+async fn requested_connection(
+    state: &State<'_, AppState>,
+    id: Option<&str>,
+) -> Result<ConnectionRecord, AppError> {
+    match id {
+        Some(id) => state.storage.get_connection(id).map_err(AppError::from)?
+            .ok_or_else(|| CoreError::message("The connection for this query no longer exists. Select a connection and run it again.").into()),
+        None => active_connection(state).await,
+    }
+}
+
+fn check_transaction_connection(transaction_id: &str, requested_id: &str) -> Result<(), CoreError> {
+    if transaction_id != requested_id {
+        return Err(CoreError::message(
+            "A transaction is open on another connection. Commit or roll it back before querying this connection.",
+        ));
+    }
+    Ok(())
+}
+
+async fn ensure_transaction_connection(
+    state: &State<'_, AppState>,
+    id: &str,
+) -> Result<(), AppError> {
+    if let Some(session) = state.tx.lock().await.as_ref() {
+        check_transaction_connection(&session.connection_id, id)?;
+    }
+    Ok(())
+}
+
+async fn ensure_no_transaction<'a>(
+    state: &'a State<'_, AppState>,
+) -> Result<tokio::sync::MutexGuard<'a, Option<TxSession>>, AppError> {
+    let guard = state.tx.lock().await;
+    if guard.is_some() {
+        return Err(CoreError::message(
+            "Commit or roll back the open transaction before changing connections.",
+        )
+        .into());
+    }
+    Ok(guard)
+}
+
+fn prune_pending_cancels(cancels: &mut HashMap<String, CancelEntry>) {
+    cancels.retain(|_, entry| {
+        entry.token.is_some() || entry.created_at.elapsed() < Duration::from_secs(60)
+    });
+}
+
+async fn begin_operation(state: &State<'_, AppState>, query_token: &str) {
+    let mut cancels = state.cancels.lock().await;
+    prune_pending_cancels(&mut cancels);
+    cancels
+        .entry(query_token.to_string())
+        .or_insert_with(CancelEntry::pending);
+}
+
+async fn register_cancel(
+    state: &State<'_, AppState>,
+    query_token: &str,
+    client: &PgClient,
+    ssl: bool,
+) -> Result<Arc<AtomicBool>, CoreError> {
+    let mut cancels = state.cancels.lock().await;
+    let entry = cancels
+        .entry(query_token.to_string())
+        .or_insert_with(CancelEntry::pending);
+    if entry.cancelled.load(Ordering::Acquire) {
+        return Err(CoreError::Cancelled(
+            "Query cancelled before execution.".into(),
+        ));
+    }
+    entry.token = Some(client.cancel_token());
+    entry.ssl = ssl;
+    Ok(Arc::clone(&entry.cancelled))
 }
 
 async fn active_pool(
@@ -704,6 +844,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             activate_connection,
+            apply_row_updates,
             ai_complete,
             ai_health,
             ai_models,

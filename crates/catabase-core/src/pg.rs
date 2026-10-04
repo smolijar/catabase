@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_postgres::{
     CancelToken, Client as TokioPgClient, Config as PgConfig, NoTls, Row, SimpleQueryMessage,
-    config::SslMode, types::Type,
+    config::SslMode,
+    types::{FromSql, Type},
 };
 use tokio_postgres_rustls::MakeRustlsConnect;
 use uuid::Uuid;
@@ -569,7 +570,18 @@ fn cell_to_json(row: &Row, index: usize, ty: &Type) -> Value {
         Type::BOOL => get_optional!(bool),
         Type::INT2 => get_optional!(i16),
         Type::INT4 => get_optional!(i32),
-        Type::INT8 => get_optional!(i64),
+        Type::INT8 => row
+            .try_get::<_, Option<i64>>(index)
+            .ok()
+            .flatten()
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
+        Type::NUMERIC => row
+            .try_get::<_, Option<ExactNumeric>>(index)
+            .ok()
+            .flatten()
+            .map(|value| Value::String(value.0))
+            .unwrap_or(Value::Null),
         Type::FLOAT4 => get_optional!(f32),
         Type::FLOAT8 => get_optional!(f64),
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => get_optional!(String),
@@ -613,4 +625,135 @@ fn cell_to_json(row: &Row, index: usize, ty: &Type) -> Value {
 
 fn quote_ident(input: &str) -> String {
     format!("\"{}\"", input.replace('"', "\"\""))
+}
+
+/// PostgreSQL NUMERIC uses base-10,000 digits. Decode directly into text to avoid
+/// passing exact decimals or large integers through JavaScript's IEEE-754 Number.
+struct ExactNumeric(String);
+
+impl<'a> FromSql<'a> for ExactNumeric {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        decode_numeric(raw).map(Self).map_err(Into::into)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::NUMERIC
+    }
+}
+
+fn decode_numeric(raw: &[u8]) -> Result<String, std::io::Error> {
+    let invalid = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Invalid PostgreSQL numeric value",
+        )
+    };
+    if raw.len() < 8 {
+        return Err(invalid());
+    }
+    let count = u16::from_be_bytes([raw[0], raw[1]]) as usize;
+    let weight = i16::from_be_bytes([raw[2], raw[3]]) as i32;
+    let sign = u16::from_be_bytes([raw[4], raw[5]]);
+    let scale = u16::from_be_bytes([raw[6], raw[7]]) as usize;
+    match sign {
+        0xc000 => return Ok("NaN".into()),
+        0xd000 => return Ok("Infinity".into()),
+        0xf000 => return Ok("-Infinity".into()),
+        0 | 0x4000 => {}
+        _ => return Err(invalid()),
+    }
+    if raw.len() != 8 + count * 2 {
+        return Err(invalid());
+    }
+    let digits = raw[8..]
+        .chunks_exact(2)
+        .map(|part| u16::from_be_bytes([part[0], part[1]]))
+        .collect::<Vec<_>>();
+    if digits.iter().any(|digit| *digit > 9999) {
+        return Err(invalid());
+    }
+    let digit_at = |power: i32| -> u16 {
+        let index = weight - power;
+        if index < 0 {
+            0
+        } else {
+            digits.get(index as usize).copied().unwrap_or(0)
+        }
+    };
+    let mut integer = String::new();
+    if weight < 0 {
+        integer.push('0');
+    } else {
+        for power in (0..=weight).rev() {
+            integer.push_str(&format!("{:04}", digit_at(power)));
+        }
+        let trimmed = integer.trim_start_matches('0');
+        integer = if trimmed.is_empty() {
+            "0".into()
+        } else {
+            trimmed.to_string()
+        };
+    }
+    if scale > 0 {
+        let mut fraction = String::new();
+        for index in 1..=scale.div_ceil(4) {
+            fraction.push_str(&format!("{:04}", digit_at(-(index as i32))));
+        }
+        fraction.truncate(scale);
+        integer.push('.');
+        integer.push_str(&fraction);
+    }
+    if sign == 0x4000 {
+        integer.insert(0, '-');
+    }
+    Ok(integer)
+}
+
+#[cfg(test)]
+mod numeric_tests {
+    use super::*;
+
+    fn numeric(weight: i16, sign: u16, scale: u16, digits: &[u16]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(digits.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&weight.to_be_bytes());
+        bytes.extend_from_slice(&sign.to_be_bytes());
+        bytes.extend_from_slice(&scale.to_be_bytes());
+        for digit in digits {
+            bytes.extend_from_slice(&digit.to_be_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn numeric_preserves_large_values_scale_and_fractional_zero_groups() {
+        assert_eq!(
+            decode_numeric(&numeric(4, 0, 0, &[922, 3372, 368, 5477, 5807])).unwrap(),
+            "9223372036854775807"
+        );
+        assert_eq!(
+            decode_numeric(&numeric(0, 0x4000, 8, &[12, 3456, 7890])).unwrap(),
+            "-12.34567890"
+        );
+        assert_eq!(
+            decode_numeric(&numeric(-2, 0, 8, &[1])).unwrap(),
+            "0.00000001"
+        );
+        assert_eq!(
+            decode_numeric(&numeric(2, 0, 2, &[12])).unwrap(),
+            "1200000000.00"
+        );
+        assert_eq!(decode_numeric(&numeric(0, 0, 3, &[])).unwrap(), "0.000");
+    }
+
+    #[test]
+    fn numeric_handles_special_values_and_rejects_malformed_input() {
+        assert_eq!(decode_numeric(&numeric(0, 0xc000, 0, &[])).unwrap(), "NaN");
+        assert_eq!(
+            decode_numeric(&numeric(0, 0xf000, 0, &[])).unwrap(),
+            "-Infinity"
+        );
+        assert!(decode_numeric(&[0, 0]).is_err());
+        assert!(decode_numeric(&numeric(0, 0, 0, &[10000])).is_err());
+    }
 }

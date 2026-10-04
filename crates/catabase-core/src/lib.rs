@@ -2,6 +2,7 @@ pub mod conn_url;
 pub mod error;
 pub mod opencode;
 pub mod pg;
+pub mod row_updates;
 pub mod sql;
 pub mod storage;
 
@@ -14,6 +15,7 @@ pub use pg::{
     connection_stats, create_pool, execute_on_client, execute_query, get_ddl, get_ddl_on_client,
     introspect_schema, introspect_schema_on_client, test_connection,
 };
+pub use row_updates::{ApplyUpdatesResult, RowUpdate, apply_row_updates};
 pub use sql::{StatementKind, StatementRange, classify_statement, split_statements};
 pub use storage::{
     ConnectionInput, ConnectionRecord, HistoryEntry, HistoryPage, HistoryStats, NewHistoryEntry,

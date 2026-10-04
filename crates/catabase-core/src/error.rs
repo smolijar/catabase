@@ -22,6 +22,8 @@ pub enum CoreError {
     Serde(#[from] serde_json::Error),
     #[error("{0}")]
     Message(String),
+    #[error("{0}")]
+    Cancelled(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,6 +43,16 @@ impl CoreError {
     }
 
     pub fn pg_info(&self) -> Option<PgErrorInfo> {
+        if let Self::Cancelled(message) = self {
+            return Some(PgErrorInfo {
+                message: message.clone(),
+                severity: None,
+                detail: None,
+                hint: None,
+                code: Some("57014".into()),
+                position: None,
+            });
+        }
         let Self::Postgres(error) = self else {
             return None;
         };
