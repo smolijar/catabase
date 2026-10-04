@@ -3,10 +3,15 @@
   import { save } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
   import Dropdown from './components/Dropdown.svelte';
+  import ActionMenu from './components/ActionMenu.svelte';
+  import ResultsGrid from './components/ResultsGrid.svelte';
+  import Modal from './components/Modal.svelte';
   import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
+  import { canUseResult, createQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
+  import type { PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
   import type {
     AiHealth,
     AppError,
@@ -25,24 +30,13 @@
 
   const DEFAULT_SQL = `-- Welcome to Catabase\n-- Add a PostgreSQL connection, then run SQL with Cmd/Ctrl+Enter.\nselect now() as connected_at;`;
   const PAGE_SIZE = 200;
-  const EXPORT_OPTIONS = [
-    { value: 'csv', label: 'CSV' },
-    { value: 'tsv', label: 'TSV' },
-    { value: 'json', label: 'JSON' }
-  ];
 
   type SidebarTab = 'connections' | 'schema' | 'history' | 'settings';
-  type ReadonlyTab = { id: string; title: string; content: string };
   type EditorHandle = {
     getExecutionTarget: (splitSql: typeof api.splitSql) => Promise<ExecutionTarget>;
     clearHighlights: () => void;
     markError: (offset: number, message: string) => void;
-  };
-  type PendingChange = {
-    rowIndex: number;
-    column: string;
-    oldValue: unknown;
-    newValue: unknown;
+    getViewState: () => WorkspaceTab['viewState'];
   };
   type EditTarget = {
     schema: string;
@@ -51,25 +45,31 @@
     warning?: string;
   };
   type SchemaGroup = { name: string; items: SchemaItem[] };
+  type Operation = { token: string; tabId: string; connectionId: string; kind: 'query' | 'load' | 'export' | 'apply'; startedAt: number; cancelling: boolean };
 
   let sidebar: SidebarTab = 'connections';
   let sidebarOpen = true;
   let sql = DEFAULT_SQL;
   let activeTab = 'playground';
-  let readonlyTabs: ReadonlyTab[] = [];
-  let readonlyContent = '';
+  let tabs: WorkspaceTab[] = [createQueryTab('playground', 'Query 1', DEFAULT_SQL)];
+  let tabKind: WorkspaceTab['kind'] = 'query';
+  let tabConnectionId: string | null = null;
+  let editorViewState: WorkspaceTab['viewState'] = null;
+  let renamingTab = '';
+  let renameValue = '';
+  let workspaceLoaded = false;
   let editorRef: EditorHandle | undefined;
   let running = false;
-  let runningStartedAt = 0;
   let nowMs = Date.now();
-  let queryToken: string | null = null;
+  let operation: Operation | null = null;
+  let resultSession: ResultSession | null = null;
   let result: QueryResult | null = null;
   let originalRows: Record<string, unknown>[] = [];
   let queryError: AppError | null = null;
-  let lastExecution: ExecutionTarget | null = null;
   let statusFlash = 'Ready';
   let toastVisible = false;
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  let toastError = false;
   let mounted = false;
   let txStatus: TxStatus = { active: false, startedAt: null };
   let editMode = false;
@@ -90,10 +90,13 @@
   let history: HistoryEntry[] = [];
   let historyStats: HistoryStats = { total: 0, errors: 0, lastExecutedAt: null };
   let historySearch = '';
+  let historyTotal = 0;
+  let historyLoading = false;
   let historyTimer: ReturnType<typeof setTimeout> | null = null;
-  let exportFormat: 'csv' | 'tsv' | 'json' = 'csv';
-  let resultsHeight = 292;
+  let resultsHeight = 360;
   let resizingResults = false;
+  let showUpdatePreview = false;
+  let schemaRequest = 0;
 
   let showConnectionModal = false;
   let connectionForm: ConnectionInput = emptyConnection();
@@ -104,17 +107,29 @@
   let draftTimer: ReturnType<typeof setTimeout> | null = null;
   let urlTimer: ReturnType<typeof setTimeout> | null = null;
 
-  $: activeConnection = connections.find((connection) => connection.isActive) ?? null;
-  $: readonlyContent = readonlyTabs.find((tab) => tab.id === activeTab)?.content ?? '';
+  $: activeConnection = connections.find((connection) => connection.id === tabConnectionId) ?? null;
+  $: running = operation !== null;
+  $: resultUsable = canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
   $: schemaContext = schemaItems
     .map((item) => `${item.schema}.${item.name}(${item.columns.map((column) => column.name).join(', ')})`)
     .join('\n');
   $: schemaGroups = groupSchemaItems(schemaItems, schemaSearch);
   $: aiModelOptions = [
     { value: '', label: 'Default' },
-    ...aiModels.map((model) => ({ value: model, label: model }))
+    ...Array.from(new Set([...(settings.aiModel ? [settings.aiModel] : []), ...aiModels])).map((model) => ({ value: model, label: aiModels.includes(model) ? model : `${model} (unavailable)` }))
   ];
-  $: if (mounted && activeTab === 'playground') scheduleDraftSave();
+  $: if (workspaceLoaded) scheduleDraftSave(sql, activeTab, tabConnectionId, tabs);
+  $: if (workspaceLoaded) void refreshSchemaForConnection(tabConnectionId);
+  $: exportItems = [
+    { id: 'copy-csv', label: 'Copy as CSV' },
+    { id: 'copy-tsv', label: 'Copy as TSV' },
+    { id: 'copy-json', label: 'Copy as JSON' },
+    { id: 'save-csv', label: 'Save CSV…' },
+    { id: 'save-tsv', label: 'Save TSV…' },
+    { id: 'save-json', label: 'Save JSON…' },
+    { id: 'more-csv', label: 'Re-run & save up to 10k (CSV)…', disabled: !resultUsable || !result?.autoLimited || running },
+    { id: 'more-json', label: 'Re-run & save up to 10k (JSON)…', disabled: !resultUsable || !result?.autoLimited || running }
+  ];
 
   onMount(() => {
     mounted = true;
@@ -139,6 +154,8 @@
       window.clearInterval(runningInterval);
       window.clearInterval(aiInterval);
       if (toastTimer) window.clearTimeout(toastTimer);
+      if (draftTimer) window.clearTimeout(draftTimer);
+      if (historyTimer) window.clearTimeout(historyTimer);
       stopResultsResize();
     };
   });
@@ -147,12 +164,91 @@
     await Promise.allSettled([
       loadSettings(),
       loadConnections(),
-      loadDraft(),
       refreshHistory(),
       checkAiHealth(),
       refreshTxStatus()
     ]);
-    if (connections.some((connection) => connection.isActive)) void refreshSchema();
+    await loadDraft();
+    workspaceLoaded = true;
+  }
+
+  function snapshotActive(): WorkspaceTab {
+    const tab = tabs.find((candidate) => candidate.id === activeTab)!;
+    return { ...tab, sql, connectionId: tabConnectionId, viewState: editorRef?.getViewState() ?? editorViewState,
+      session: resultSession ? { ...resultSession, data: result! } : null, error: queryError,
+      originalRows, pendingChanges, editMode };
+  }
+
+  function captureActive() {
+    const captured = snapshotActive();
+    tabs = tabs.map((tab) => tab.id === activeTab ? captured : tab);
+  }
+
+  function displayTab(tab: WorkspaceTab) {
+    activeTab = tab.id;
+    sql = tab.sql;
+    tabKind = tab.kind;
+    tabConnectionId = tab.connectionId;
+    editorViewState = tab.viewState;
+    resultSession = tab.session;
+    result = tab.session?.data ?? null;
+    queryError = tab.error;
+    originalRows = tab.originalRows;
+    pendingChanges = tab.pendingChanges;
+    editMode = tab.editMode;
+    showUpdatePreview = false;
+  }
+
+  function switchTab(id: string) {
+    if (id === activeTab) return;
+    captureActive();
+    const next = tabs.find((tab) => tab.id === id);
+    if (next) displayTab(next);
+  }
+
+  function patchTab(id: string, patch: Partial<WorkspaceTab>) {
+    if (id === activeTab) captureActive();
+    tabs = tabs.map((tab) => tab.id === id ? { ...tab, ...patch } : tab);
+    if (id === activeTab) {
+      const tab = tabs.find((tab) => tab.id === id)!;
+      // Keep the live editor/cursor untouched when an async result arrives.
+      tabConnectionId = tab.connectionId;
+      resultSession = tab.session;
+      result = tab.session?.data ?? null;
+      queryError = tab.error;
+      originalRows = tab.originalRows;
+      pendingChanges = tab.pendingChanges;
+      editMode = tab.editMode;
+    }
+  }
+
+  function newQuery(content = '', connectionId = tabConnectionId, title?: string) {
+    captureActive();
+    const tab = createQueryTab(crypto.randomUUID(), title ?? `Query ${tabs.filter((tab) => tab.kind === 'query').length + 1}`, content, connectionId);
+    tabs = [...tabs, tab];
+    displayTab(tab);
+  }
+
+  function closeTab(id: string) {
+    if (operation?.tabId === id) { flash('Cancel or wait for this query before closing its tab.'); return; }
+    captureActive();
+    const tab = tabs.find((item) => item.id === id);
+    if (tab?.pendingChanges.length && !confirm('Discard the staged cell edits and close this tab?')) return;
+    if (tab?.kind === 'query' && tab.sql.trim() && !confirm(`Close “${tab.title}”? Its draft will be removed from the workspace.`)) return;
+    const index = tabs.findIndex((item) => item.id === id);
+    tabs = tabs.filter((item) => item.id !== id);
+    if (!tabs.length) tabs = [createQueryTab(crypto.randomUUID(), 'Query 1', '', tabConnectionId)];
+    if (activeTab === id) displayTab(tabs[Math.min(index, tabs.length - 1)]);
+  }
+
+  function startRename(id = activeTab) {
+    renamingTab = id;
+    renameValue = tabs.find((tab) => tab.id === id)?.title ?? '';
+  }
+
+  function finishRename() {
+    if (renameValue.trim()) tabs = tabs.map((tab) => tab.id === renamingTab ? { ...tab, title: renameValue.trim() } : tab);
+    renamingTab = '';
   }
 
   function emptyConnection(): ConnectionInput {
@@ -195,6 +291,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
+    if (event.defaultPrevented || showConnectionModal || showUpdatePreview) return;
     const command = event.metaKey || event.ctrlKey;
     if (!command) return;
     if (event.key === 'Enter') {
@@ -206,6 +303,12 @@
     } else if (event.key.toLowerCase() === 'l' && event.shiftKey) {
       event.preventDefault();
       clearResults();
+    } else if (event.key.toLowerCase() === 't') {
+      event.preventDefault();
+      newQuery();
+    } else if (event.key.toLowerCase() === 'w') {
+      event.preventDefault();
+      closeTab(activeTab);
     }
   }
 
@@ -228,104 +331,138 @@
 
   async function loadDraft() {
     try {
+      const restored = restoreWorkspace(await api.loadDraft('workspace.v1') ?? '');
+      if (restored) {
+        tabs = restored.tabs;
+        displayTab(tabs.find((tab) => tab.id === restored.activeId)!);
+        return;
+      }
       const draft = await api.loadDraft('playground');
-      if (draft && (!sql.trim() || sql === DEFAULT_SQL)) sql = draft;
+      if (draft !== null) sql = draft;
     } catch {
       // Browser-only dev mode has no Tauri IPC; keep seeded SQL.
     }
+    tabConnectionId = connections.find((connection) => connection.isActive)?.id ?? null;
+    captureActive();
   }
 
-  function scheduleDraftSave() {
+  function scheduleDraftSave(_sql: string, _activeId: string, _connectionId: string | null, _tabs: WorkspaceTab[]) {
     if (draftTimer) clearTimeout(draftTimer);
     draftTimer = setTimeout(() => void persistDraftNow(), 1200);
   }
 
   function persistDraftNow() {
-    if (!mounted) return;
-    void api.saveDraft('playground', sql).catch(() => undefined);
+    if (!mounted || !workspaceLoaded) return;
+    const captured = snapshotActive();
+    const workspace = tabs.map((tab) => tab.id === activeTab ? captured : tab);
+    void api.saveDraft('workspace.v1', serializeWorkspace(workspace, activeTab)).catch((error) => flash(`Draft save failed: ${errorMessage(error)}`, true));
+  }
+
+  function beginOperation(kind: Operation['kind'], connectionId: string): Operation {
+    const next = { token: crypto.randomUUID(), tabId: activeTab, connectionId, kind, startedAt: Date.now(), cancelling: false };
+    operation = next;
+    nowMs = next.startedAt;
+    return next;
+  }
+
+  function finishOperation(op: Operation) {
+    if (operation?.token !== op.token) return;
+    operation = null;
+    void refreshHistory();
+    void loadConnectionStats();
+    void refreshTxStatus();
+  }
+
+  function isCurrentOperation(op: Operation) {
+    return operation?.token === op.token;
+  }
+
+  function makeSession(data: QueryResult, execution: ExecutionTarget, connectionId: string, snapshot = false): ResultSession {
+    return { data, execution, connectionId, connectionName: connections.find((connection) => connection.id === connectionId)?.name ?? 'Unavailable connection', executedAt: new Date().toISOString(), snapshot };
+  }
+
+  function resultPatch(session: ResultSession): Partial<WorkspaceTab> {
+    return { session, originalRows: cloneRows(session.data.rows), pendingChanges: [], editMode: false, error: null };
   }
 
   async function runQuery() {
-    if (running) {
+    if (operation) {
       await cancelQuery();
       return;
     }
-    if (activeTab !== 'playground') {
-      flash('Switch to Playground to run SQL.');
+    if (tabKind !== 'query') {
+      flash('Open this SQL in a query tab to run it.');
       return;
     }
-    const target = editorRef ? await editorRef.getExecutionTarget(api.splitSql) : { sql: sql.trim(), start: 0, end: sql.length };
-    if (!target.sql.trim()) {
-      queryError = { message: 'No query to execute.' };
-      result = null;
-      return;
-    }
-
-    running = true;
-    runningStartedAt = Date.now();
-    nowMs = runningStartedAt;
-    queryError = null;
-    queryToken = crypto.randomUUID();
+    if (!activeConnection) { sidebar = 'connections'; sidebarOpen = true; flash('Choose a connection for this query.'); return; }
+    if (pendingChanges.length && !confirm('Discard staged cell edits and run this query?')) return;
+    const op = beginOperation('query', activeConnection.id);
+    const editor = editorRef;
+    let target: ExecutionTarget = { sql: sql.trim(), start: 0, end: sql.length };
     statusFlash = 'Running query...';
-    lastExecution = target;
-
     try {
+      target = editor ? await editor.getExecutionTarget(api.splitSql) : target;
+      if (!target.sql.trim()) throw new Error('No query to execute.');
+      if (op.cancelling) { flash('Query cancelled before execution.'); return; }
+      patchTab(op.tabId, { error: null });
       void loadConnectionStats();
-      const next = await api.executeQuery(target.sql, queryToken, 0, PAGE_SIZE);
-      setResult(next);
-      flash(`Loaded ${next.rowCount}${next.hasMore ? '+' : ''} rows in ${next.durationMs} ms.`);
-      void refreshHistory();
+      const next = await api.executeQuery(target.sql, op.token, 0, PAGE_SIZE, op.connectionId);
+      if (!isCurrentOperation(op)) return;
+      patchTab(op.tabId, resultPatch(makeSession(next, target, op.connectionId)));
+      flash(`${op.cancelling ? 'Query completed before cancellation. ' : ''}Loaded ${next.rowCount}${next.hasMore ? '+' : ''} ${next.rowCount === 1 ? 'row' : 'rows'} in ${next.durationMs} ms.`);
     } catch (error) {
-      queryError = normalizeAppError(error);
-      setResult(null);
-      if (queryError.position && editorRef) {
-        editorRef.markError(target.start + queryError.position - 1, queryError.message);
+      if (!isCurrentOperation(op)) return;
+      const normalized = normalizeAppError(error);
+      if (normalized.code === '57014') {
+        flash('Query cancelled.');
+      } else {
+        patchTab(op.tabId, { error: normalized });
+        if (normalized.position && activeTab === op.tabId) editorRef?.markError(target.start + normalized.position - 1, normalized.message);
+        flash(normalized.message, true);
       }
-      flash(queryError.message);
-      void refreshHistory();
     } finally {
-      running = false;
-      queryToken = null;
-      void loadConnectionStats();
-      void refreshTxStatus();
+      finishOperation(op);
     }
   }
 
   async function cancelQuery() {
-    const token = queryToken;
-    running = false;
-    queryToken = null;
-    if (token) await api.cancelQuery(token).catch(() => undefined);
-    void loadConnectionStats();
-    editorRef?.clearHighlights();
-    flash('Cancelled locally. Server query may still finish in background.');
+    const op = operation;
+    if (!op || op.cancelling) return;
+    op.cancelling = true;
+    operation = op;
+    statusFlash = 'Cancelling…';
+    try {
+      await api.cancelQuery(op.token);
+    } catch (error) {
+      if (isCurrentOperation(op)) { op.cancelling = false; operation = op; flash(`Cancellation failed: ${errorMessage(error)}`, true); }
+    }
   }
 
   async function loadMoreRows() {
-    if (!result || !lastExecution || running) return;
-    running = true;
-    runningStartedAt = Date.now();
-    nowMs = runningStartedAt;
-    const token = crypto.randomUUID();
+    if (!result || !resultSession || !resultUsable || operation || !tabConnectionId) return;
+    if (pendingChanges.length) { flash('Apply or discard staged edits before loading more rows.'); return; }
+    const session = { ...resultSession, data: result };
+    const op = beginOperation('load', tabConnectionId);
     try {
-      const next = await api.executeQuery(lastExecution.sql, token, result.rows.length, PAGE_SIZE);
-      result = {
+      const next = await api.executeQuery(session.execution.sql, op.token, session.data.rows.length, PAGE_SIZE, session.connectionId!, true);
+      if (!isCurrentOperation(op)) return;
+      const merged = {
         ...next,
-        rows: [...result.rows, ...next.rows],
-        rowCount: result.rows.length + next.rows.length
+        rows: [...session.data.rows, ...next.rows],
+        rowCount: session.data.rows.length + next.rows.length
       };
-      flash(`Loaded ${result.rowCount}${next.hasMore ? '+' : ''} rows.`);
+      patchTab(op.tabId, resultPatch({ ...session, data: merged }));
+      flash(`Loaded ${merged.rowCount}${next.hasMore ? '+' : ''} rows.`);
     } catch (error) {
-      flash(`Load more failed: ${errorMessage(error)}`);
+      if (isCurrentOperation(op)) flash(normalizeAppError(error).code === '57014' ? 'Loading cancelled.' : `Load more failed: ${errorMessage(error)}`, normalizeAppError(error).code !== '57014');
     } finally {
-      running = false;
-      void loadConnectionStats();
+      finishOperation(op);
     }
   }
 
   function clearEditor() {
-    if (activeTab !== 'playground') {
-      flash('Switch to Playground to clear SQL.');
+    if (tabKind !== 'query' || operation?.tabId === activeTab) {
+      flash('Open an idle query tab to clear SQL.');
       return;
     }
     if (sql.trim() && !confirm('Clear the SQL editor? This cannot be undone.')) return;
@@ -334,6 +471,8 @@
   }
 
   function clearResults() {
+    if (operation?.tabId === activeTab) return;
+    if (pendingChanges.length && !confirm('Discard staged cell edits and clear results?')) return;
     setResult(null);
     queryError = null;
     editorRef?.clearHighlights();
@@ -392,11 +531,23 @@
   }
 
   async function saveConnection() {
+    if (operation) return;
+    const initiatingTab = activeTab;
+    const previousId = connectionForm.id;
     savingConnection = true;
     try {
       const saved = await withTimeout(api.saveConnection(connectionForm), 12000, 'Saving connection timed out.');
       showConnectionModal = false;
       await loadConnections();
+      // A reused ID may now point at a different database. Never apply or replay
+      // results obtained using its previous configuration.
+      if (previousId) {
+        captureActive();
+        for (const tab of tabs.filter((item) => item.connectionId === previousId)) {
+          patchTab(tab.id, { session: null, originalRows: [], pendingChanges: [], editMode: false, error: null });
+        }
+      }
+      patchTab(initiatingTab, { connectionId: saved.id });
       flash(`${saved.name} saved and ready.`);
       void refreshTxStatus();
       void refreshSchema();
@@ -408,22 +559,36 @@
   }
 
   async function activateConnection(id: string) {
+    if (operation) { flash('Finish or cancel the running operation before switching connections.'); return; }
+    if (pendingChanges.length && !confirm('Discard staged edits before changing this tab’s connection?')) return;
+    const initiatingTab = activeTab;
+    const current = snapshotActive();
+    captureActive();
     try {
       const active = await api.activateConnection(id);
       await loadConnections();
+      patchTab(initiatingTab, {
+        connectionId: id,
+        pendingChanges: [],
+        editMode: false,
+        session: current.session ? { ...current.session, data: { ...current.session.data, rows: cloneRows(current.originalRows) } } : null
+      });
+      poolStats = null;
       flash(`Using ${active.name}.`);
       void refreshTxStatus();
-      void refreshSchema();
+      void loadConnectionStats();
     } catch (error) {
-      flash(errorMessage(error));
+      flash(errorMessage(error), true);
     }
   }
 
   async function deleteConnection(id: string) {
+    if (operation) return;
     if (!confirm('Delete this connection?')) return;
     try {
       await api.deleteConnection(id);
       await loadConnections();
+      if (tabConnectionId === id) { tabConnectionId = null; poolStats = null; }
       void refreshTxStatus();
       if (connections.some((connection) => connection.isActive)) {
         void refreshSchema();
@@ -466,6 +631,7 @@
   }
 
   async function loadConnectionStats() {
+    if (!connections.some((connection) => connection.id === tabConnectionId && connection.isActive)) { poolStats = null; return; }
     poolStats = await api.connectionStats().catch(() => poolStats);
   }
 
@@ -491,48 +657,53 @@
     }
   }
 
-  async function refreshSchema(retries = 0) {
+  async function refreshSchemaForConnection(connectionId: string | null) {
+    schemaItems = [];
+    schemaError = '';
+    if (!connectionId) { schemaRequest++; schemaLoading = false; return; }
+    await refreshSchema();
+  }
+
+  async function refreshSchema() {
+    const connectionId = tabConnectionId;
+    if (!connectionId) return;
+    const request = ++schemaRequest;
     schemaLoading = true;
     schemaError = '';
     try {
-      const tree = await api.introspectSchema();
-      schemaItems = tree.schemas;
-      if (!schemaItems.length && retries < 3) {
-        setTimeout(() => void refreshSchema(retries + 1), 3000);
-      }
+      const tree = await api.introspectSchema(connectionId);
+      if (request === schemaRequest && connectionId === tabConnectionId) schemaItems = tree.schemas;
     } catch (error) {
-      schemaError = errorMessage(error);
-      if (retries < 3) setTimeout(() => void refreshSchema(retries + 1), 3000);
+      if (request === schemaRequest) schemaError = errorMessage(error);
     } finally {
-      schemaLoading = false;
+      if (request === schemaRequest) schemaLoading = false;
     }
   }
 
   async function openDdl(item: SchemaItem) {
+    const connectionId = tabConnectionId;
+    if (!connectionId) return;
     try {
-      const ddl = await api.getDdl(item.schema, item.name);
-      openReadonlyTab(`ddl:${item.schema}.${item.name}`, `${item.schema}.${item.name}`, ddl);
+      const ddl = await api.getDdl(item.schema, item.name, connectionId);
+      openReadonlyTab(`ddl:${connectionId}:${item.schema}.${item.name}`, `${item.schema}.${item.name}`, ddl, connectionId);
     } catch (error) {
       flash(errorMessage(error));
     }
   }
 
-  function openReadonlyTab(id: string, title: string, content: string) {
-    const existing = readonlyTabs.find((tab) => tab.id === id);
-    if (existing) existing.content = content;
-    else readonlyTabs = [...readonlyTabs, { id, title, content }];
-    activeTab = id;
+  function openReadonlyTab(id: string, title: string, content: string, connectionId = tabConnectionId, session: ResultSession | null = null) {
+    captureActive();
+    const tab = { ...createQueryTab(id, title, content, connectionId), kind: 'reference' as const, session };
+    tabs = tabs.some((item) => item.id === id) ? tabs.map((item) => item.id === id ? tab : item) : [...tabs, tab];
+    displayTab(tab);
   }
 
-  function closeReadonlyTab(id: string) {
-    readonlyTabs = readonlyTabs.filter((tab) => tab.id !== id);
-    if (activeTab === id) activeTab = 'playground';
+  function browseTable(item: SchemaItem) {
+    newQuery(`select *\nfrom ${quoteIdent(item.schema)}.${quoteIdent(item.name)};`, tabConnectionId, item.name);
   }
 
   function restoreHistory(entry: HistoryEntry) {
-    sql = entry.query;
-    activeTab = 'playground';
-    flash('History query restored.');
+    newQuery(entry.query, entry.connectionId ?? null, `History #${entry.id}`);
   }
 
   async function openHistory(entry: HistoryEntry) {
@@ -542,11 +713,9 @@
         flash('No stored result for this entry.');
         return;
       }
-      result = payload.result;
-      originalRows = cloneRows(result.rows);
-      pendingChanges = [];
-      editMode = false;
-      openReadonlyTab(`history:${entry.id}`, `History #${entry.id}`, entry.query);
+      const session: ResultSession = { data: payload.result, execution: { sql: entry.query, start: 0, end: entry.query.length }, connectionId: entry.connectionId ?? null,
+        connectionName: connections.find((connection) => connection.id === entry.connectionId)?.name ?? 'Unavailable connection', executedAt: entry.executedAt, snapshot: true };
+      openReadonlyTab(`history:${entry.id}`, `History #${entry.id}`, entry.query, entry.connectionId ?? null, session);
     } catch (error) {
       flash(errorMessage(error));
     }
@@ -557,13 +726,19 @@
     historyTimer = setTimeout(() => void refreshHistory(), 300);
   }
 
-  async function refreshHistory() {
+  async function refreshHistory(append = false) {
+    const search = historySearch;
+    historyLoading = true;
     try {
-      const page = await api.historyPage(historySearch || null, 0, 50);
-      history = page.entries;
+      const page = await api.historyPage(search || null, append ? history.length : 0, 50);
+      if (search !== historySearch) return;
+      history = append ? [...history, ...page.entries] : page.entries;
+      historyTotal = page.total;
       historyStats = await api.historyStats();
     } catch {
-      history = [];
+      if (!append) history = [];
+    } finally {
+      historyLoading = false;
     }
   }
 
@@ -597,30 +772,51 @@
       flash('No exportable data.');
       return;
     }
-    if (full && !lastExecution) {
-      flash('No query context for full export.');
+    if (full && (!resultUsable || !resultSession || operation || !result.autoLimited)) {
+      flash('Re-run this query on its original connection before requesting a larger export.');
       return;
     }
-
+    const source = result;
+    const session = resultSession;
+    const sourceTabId = activeTab;
+    let op: Operation | null = null;
     try {
-      let exportResult = result;
-      if (full && lastExecution) {
-        flash('Preparing full export…');
-        const token = crypto.randomUUID();
-        exportResult = await api.executeQuery(lastExecution.sql, token, 0, 100_000);
-      }
-
       const path = await save({ defaultPath: `catabase-${timestamp()}.${format}` });
       if (!path) return;
+      let exportResult = source;
+      if (full && session?.connectionId) {
+        if (operation) { flash('Wait for the running operation before exporting.'); return; }
+        op = beginOperation('export', session.connectionId);
+        op.tabId = sourceTabId;
+        flash('Preparing export…');
+        exportResult = await api.executeQuery(session.execution.sql, op.token, 0, 10_000, session.connectionId, true);
+        if (!isCurrentOperation(op)) return;
+      }
       await api.exportWriteFile(path, serializeRows(exportResult, format));
-      flash(`${format.toUpperCase()} saved.`);
+      flash(`${format.toUpperCase()} saved (${exportResult.rows.length} rows${exportResult.hasMore ? ', more rows available' : ''}).`);
     } catch (error) {
-      flash(`Export failed: ${errorMessage(error)}`);
+      flash(normalizeAppError(error).code === '57014' ? 'Export cancelled.' : `Export failed: ${errorMessage(error)}`, normalizeAppError(error).code !== '57014');
+    } finally {
+      if (op) finishOperation(op);
     }
   }
 
+  function handleExport(action: string) {
+    const [kind, format] = action.split('-') as [string, 'csv' | 'tsv' | 'json'];
+    if (kind === 'copy') void copyResult(format);
+    else void downloadResult(format, kind === 'more');
+  }
+
+  function handleWorkspaceAction(action: string) {
+    if (action === 'clear-sql') clearEditor();
+    else if (action === 'clear-results') clearResults();
+    else if (action === 'rename') startRename();
+    else if (action === 'duplicate') newQuery(sql, tabConnectionId, `${tabs.find((tab) => tab.id === activeTab)?.title ?? 'Query'} copy`);
+    else if (action === 'settings') { sidebar = 'settings'; sidebarOpen = true; }
+  }
+
   function enableEditMode() {
-    if (!result || !result.rows.length) {
+    if (!result || !result.rows.length || !resultUsable || operation) {
       flash('No result set to edit. Run a query first.');
       return;
     }
@@ -641,33 +837,8 @@
     editMode = false;
   }
 
-  function editCell(rowIndex: number, columnName: string) {
-    if (!editMode || !result) return;
-    const column = result.columns.find((candidate) => candidate.name === columnName);
-    if (!column) return;
-    if (column.generated) {
-      flash('Generated columns cannot be edited.');
-      return;
-    }
-
-    const current = result.rows[rowIndex][columnName];
-    if (column.typeName === 'bool') {
-      const next = current === true ? false : current === false && column.nullable ? null : true;
-      updateCell(rowIndex, columnName, next);
-      return;
-    }
-
-    const next = prompt(`New value for ${columnName}`, current == null ? '' : String(current));
-    if (next === null) return;
-    if (isNumericColumn(column.typeName) && next !== '' && Number.isNaN(Number(next))) {
-      flash('Invalid numeric value.');
-      return;
-    }
-    updateCell(rowIndex, columnName, next === '' ? null : coerceValue(next, column.typeName));
-  }
-
   function updateCell(rowIndex: number, column: string, newValue: unknown) {
-    if (!result) return;
+    if (!result || !resultUsable || operation) return;
     const oldValue = originalRows[rowIndex]?.[column];
     result = {
       ...result,
@@ -684,11 +855,11 @@
       flash('No pending changes.');
       return;
     }
-    openReadonlyTab('update-preview', 'Update preview', generateUpdateSql());
+    showUpdatePreview = true;
   }
 
   async function applyUpdates() {
-    if (!pendingChanges.length) {
+    if (!pendingChanges.length || operation || !resultUsable || !tabConnectionId) {
       flash('No pending changes.');
       return;
     }
@@ -698,20 +869,28 @@
       return;
     }
 
-    const token = crypto.randomUUID();
+    const op = beginOperation('apply', tabConnectionId);
+    const editedRows = cloneRows(result!.rows);
+    const updates = buildRowUpdates(target);
     try {
-      running = true;
-      await api.executeQuery(generateUpdateSql(), token, 0, 1);
-      originalRows = result ? cloneRows(result.rows) : [];
-      pendingChanges = [];
-      editMode = false;
-      flash(`Applied updates to ${target.schema}.${target.table}.`);
-      void refreshHistory();
+      const applied = await api.applyRowUpdates(op.connectionId, op.token, updates);
+      if (!isCurrentOperation(op)) return;
+      patchTab(op.tabId, { originalRows: editedRows, pendingChanges: [], editMode: false });
+      showUpdatePreview = false;
+      flash(`${applied.updatedRows} ${applied.updatedRows === 1 ? 'row' : 'rows'} updated${applied.inTransaction ? ' in the open transaction. Commit to save.' : '.'}`);
     } catch (error) {
-      flash(`Apply failed: ${errorMessage(error)}`);
+      flash(normalizeAppError(error).code === '57014' ? 'Update cancelled; staged edits retained.' : `Apply failed: ${errorMessage(error)}`, normalizeAppError(error).code !== '57014');
     } finally {
-      running = false;
+      finishOperation(op);
     }
+  }
+
+  function buildRowUpdates(target: EditTarget) {
+    const indices = [...new Set(pendingChanges.map((change) => change.rowIndex))];
+    const sourceColumns = result!.columns.filter((column) => column.tableSchema === target.schema && column.tableName === target.table && column.sourceName);
+    return indices.map((rowIndex) => ({ schema: target.schema, table: target.table,
+      values: Object.fromEntries(pendingChanges.filter((change) => change.rowIndex === rowIndex).map((change) => [sourceColumnName(columnByName(change.column)), change.newValue])),
+      original: Object.fromEntries(sourceColumns.map((column) => [sourceColumnName(column), originalRows[rowIndex]?.[column.name]])) }));
   }
 
   function discardUpdates() {
@@ -761,7 +940,7 @@
   }
 
   function detectEditTarget(): EditTarget | null {
-    if (!result || !result.columns.length) return null;
+    if (!result || !result.columns.length || !resultUsable) return null;
     const changedColumns = pendingChanges.map((change) => columnByName(change.column)).filter(Boolean) as ColumnMeta[];
     const relevantColumns = changedColumns.length ? changedColumns : result.columns;
     const identities = new Set(
@@ -779,29 +958,20 @@
     if (!tableColumns.length) return null;
 
     const primaryKeyColumns = tableColumns.filter((column) => column.primaryKey);
-    if (primaryKeyColumns.length) return { schema, table, whereColumns: primaryKeyColumns };
-
-    return {
-      schema,
-      table,
-      whereColumns: tableColumns.filter((column) => !column.generated),
-      warning: 'No primary key returned; WHERE uses all original result columns.'
-    };
+    if (primaryKeyColumns.length) return { schema, table, whereColumns: tableColumns.filter((column) => !column.generated) };
+    return null;
   }
 
   function setResult(next: QueryResult | null) {
     result = next;
+    if (!next) resultSession = null;
     originalRows = next ? cloneRows(next.rows) : [];
     pendingChanges = [];
     editMode = false;
   }
 
-  function isChanged(rowIndex: number, column: string): boolean {
-    return pendingChanges.some((change) => change.rowIndex === rowIndex && change.column === column);
-  }
-
   function canApplyUpdates(): boolean {
-    return pendingChanges.length > 0 && detectEditTarget() !== null;
+    return !operation && resultUsable && pendingChanges.length > 0 && detectEditTarget() !== null;
   }
 
   function normalizeAppError(error: unknown): AppError {
@@ -809,8 +979,9 @@
     return { ...appError, message: appError?.message ?? errorMessage(error) };
   }
 
-  function flash(message: string) {
+  function flash(message: string, isError = false) {
     statusFlash = message;
+    toastError = isError;
     toastVisible = true;
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
@@ -823,10 +994,6 @@
     return rows.map((row) => ({ ...row }));
   }
 
-  function isNumericColumn(typeName: string): boolean {
-    return ['int2', 'int4', 'int8', 'float4', 'float8', 'numeric'].includes(typeName);
-  }
-
   function columnByName(name: string): ColumnMeta | undefined {
     return result?.columns.find((column) => column.name === name);
   }
@@ -835,14 +1002,10 @@
     return column?.sourceName || column?.name || '';
   }
 
-  function coerceValue(value: string, typeName: string): unknown {
-    if (isNumericColumn(typeName)) return Number(value);
-    return value;
-  }
-
   function sqlLiteral(value: unknown): string {
     if (value === null || value === undefined) return 'NULL';
     if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (typeof value === 'object') value = JSON.stringify(value);
     return `E'${String(value).replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
   }
 
@@ -855,8 +1018,8 @@
   }
 
   function runningDuration(): string {
-    if (!runningStartedAt) return '0.0s';
-    return `${((nowMs - runningStartedAt) / 1000).toFixed(1)}s`;
+    if (!operation) return '0.0s';
+    return `${((nowMs - operation.startedAt) / 1000).toFixed(1)}s`;
   }
 
   function formatHistoryTime(value: string): string {
@@ -913,11 +1076,6 @@
     }
   }
 
-  function formatCell(value: unknown): string {
-    if (value === null || value === undefined) return 'NULL';
-    if (typeof value === 'object') return JSON.stringify(value);
-    return String(value);
-  }
 </script>
 
 <main class="app-shell">
@@ -926,41 +1084,37 @@
       <span class="brand-mark">C</span>
       <div>
         <strong>Catabase</strong>
-        <small>PostgreSQL query workspace</small>
       </div>
     </div>
     <button
       class="primary run-button"
       class:cancel-button={running}
       on:click={runQuery}
-      disabled={!activeConnection && !running}
+      disabled={operation?.cancelling || (!running && (!activeConnection || tabKind !== 'query'))}
       title={activeConnection ? 'Run current statement (Cmd/Ctrl+Enter)' : 'Add or activate a connection first'}
     >
       <Icon name={running ? 'stop' : 'play'} size={16} />
-      <span>{running ? 'Cancel' : 'Run'}</span>
+      <span>{operation?.cancelling ? 'Cancelling…' : running ? 'Cancel' : 'Run'}</span>
       <kbd>⌘↵</kbd>
     </button>
-    <button class="toolbar-action" on:click={clearEditor} title="Clear SQL editor">
-      <Icon name="clear" size={16} /><span>Clear SQL</span>
-    </button>
-    <button class="toolbar-action" on:click={clearResults} title="Clear query results">
-      <Icon name="close" size={16} /><span>Clear results</span>
-    </button>
-    <div class="toolbar-spacer"></div>
     <button
       class="chip connection-chip"
       class:connected={Boolean(activeConnection)}
-      on:click={() => selectSidebar('connections')}
-      title="Show connections"
+      on:click={() => { sidebar = 'connections'; sidebarOpen = true; }}
+      title="Choose this tab’s database connection"
     >
       <span class="status-dot"></span>
-      {activeConnection ? activeConnection.name : 'No connection'}
+      {activeConnection ? activeConnection.name : 'Choose connection'}
     </button>
-    <span class="chip">{poolStats ? `${poolStats.active} active / ${poolStats.idle} idle` : `Pool ${settings.poolSize}`}</span>
-    {#if running}<span class="chip running-chip">Running {runningDuration()}</span>{/if}
-    <button class="chip ai-{aiHealth.state}" on:click={() => selectSidebar('settings')} title={aiHealth.message ?? 'AI status'}>
-      <Icon name="sparkles" size={14} /> AI {aiHealth.state}
-    </button>
+    {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : 'Exporting'} · {runningDuration()} · {tabs.find((tab) => tab.id === operation?.tabId)?.title}</button>{/if}
+    <div class="toolbar-spacer"></div>
+    <ActionMenu label="More" ariaLabel="Workspace actions" items={[
+      { id: 'duplicate', label: 'Duplicate in new query tab' },
+      { id: 'rename', label: 'Rename tab' },
+      { id: 'clear-sql', label: 'Clear SQL', disabled: tabKind !== 'query' || operation?.tabId === activeTab },
+      { id: 'clear-results', label: 'Clear results', disabled: !result || operation?.tabId === activeTab },
+      { id: 'settings', label: 'Settings' }
+    ]} onSelect={handleWorkspaceAction} />
   </header>
 
   <section class="workspace">
@@ -1014,18 +1168,18 @@
             </div>
           {/if}
           {#each connections as connection (connection.id)}
-            <article class:active-card={connection.isActive} class="connection-card">
+            <article class:active-card={connection.id === tabConnectionId} class="connection-card">
               <div class="connection-card-head">
                 <strong>{connection.name}</strong>
-                {#if connection.isActive}<span class="active-badge"><span class="status-dot"></span> Active</span>{/if}
+                {#if connection.id === tabConnectionId}<span class="active-badge"><span class="status-dot"></span> This tab</span>{/if}
               </div>
               <span class="connection-address">{connection.username}@{connection.host}:{connection.port}/{connection.database}</span>
               <div class="row-actions">
-                <button disabled={connection.isActive} on:click={() => activateConnection(connection.id)}>
-                  <Icon name="check" size={14} /> {connection.isActive ? 'In use' : 'Use'}
+                <button disabled={connection.id === tabConnectionId || running} on:click={() => activateConnection(connection.id)}>
+                  <Icon name="check" size={14} /> {connection.id === tabConnectionId ? 'In use' : 'Use in tab'}
                 </button>
-                <button on:click={() => editConnection(connection)}><Icon name="edit" size={14} /> Edit</button>
-                <button class="danger-quiet" aria-label={`Delete ${connection.name}`} title={`Delete ${connection.name}`} on:click={() => deleteConnection(connection.id)}>
+                <button disabled={running} on:click={() => editConnection(connection)}><Icon name="edit" size={14} /> Edit</button>
+                <button disabled={running} class="danger-quiet" aria-label={`Delete ${connection.name}`} title={`Delete ${connection.name}`} on:click={() => deleteConnection(connection.id)}>
                   <Icon name="trash" size={14} />
                 </button>
               </div>
@@ -1068,7 +1222,7 @@
                         <small>{column.typeName}{column.nullable ? '' : ' not null'}</small>
                       </div>
                     {/each}
-                    <button class="ddl-button" on:click={() => openDdl(item)}>Open DDL</button>
+                    <div class="row-actions"><button class="ddl-button" on:click={() => browseTable(item)}>Query table</button><button class="ddl-button" on:click={() => openDdl(item)}>Open DDL</button></div>
                   </div>
                 </details>
               {/each}
@@ -1098,14 +1252,16 @@
               </div>
               <code>{entry.query}</code>
               <small>{entry.durationMs} ms{entry.rowCount != null ? ` · ${entry.rowCount} rows` : ''}</small>
+              <small class="history-connection">{connections.find((connection) => connection.id === entry.connectionId)?.name ?? 'Unavailable connection'}</small>
               {#if entry.errorMessage}<small class="history-error">{entry.errorMessage}</small>{/if}
               <div class="row-actions">
-                <button on:click={() => restoreHistory(entry)}><Icon name="refresh" size={14} /> Restore</button>
+                <button on:click={() => restoreHistory(entry)}><Icon name="plus" size={14} /> New query</button>
                 <button disabled={!entry.hasResult} on:click={() => openHistory(entry)}>Open result</button>
                 <button class="danger-quiet" aria-label="Delete history entry" title="Delete history entry" on:click={() => deleteHistory(entry.id)}><Icon name="trash" size={14} /></button>
               </div>
             </article>
           {/each}
+          {#if history.length < historyTotal}<button class="history-more" disabled={historyLoading} on:click={() => refreshHistory(true)}>{historyLoading ? 'Loading…' : `Load more (${history.length} of ${historyTotal})`}</button>{/if}
         {:else}
           <div class="panel-head"><div><h2>Settings</h2><p>Workspace preferences</p></div></div>
           <section class="settings-card">
@@ -1118,6 +1274,7 @@
               </div>
             </label>
             <p>Choose between 1 and 32 concurrent PostgreSQL connections.</p>
+            <p>{poolStats ? `${poolStats.active} active · ${poolStats.idle} idle` : 'Pool statistics are available for the active database.'}</p>
           </section>
           <section class="settings-card">
             <div class="settings-card-head"><strong>AI completion</strong><span class="ai-{aiHealth.state}">{aiHealth.state}</span></div>
@@ -1130,21 +1287,30 @@
                 onSelect={(model) => void saveAiModel(model)}
               />
             </label>
-            <p>{aiHealth.message ?? 'Connect OpenCode to enable inline SQL suggestions.'}</p>
+            <p>{aiHealth.state === 'on' ? 'Inline SQL suggestions are available.' : 'OpenCode is unavailable. Start it to enable AI suggestions.'}</p>
+            {#if aiHealth.message}<details class="technical-detail"><summary>Connection details</summary><p>{aiHealth.message}</p></details>{/if}
           </section>
         {/if}
       </aside>
     {/if}
 
     <section class="main-pane" class:resizing={resizingResults} style={`--results-height: ${resultsHeight}px`}>
-      <nav class="tabs">
-        <button class:active={activeTab === 'playground'} on:click={() => (activeTab = 'playground')}>Playground</button>
-        {#each readonlyTabs as tab (tab.id)}
+      <nav class="tabs" aria-label="Query tabs">
+        {#each tabs as tab (tab.id)}
           <div class:active={activeTab === tab.id} class="tab-chip">
-            <button class="tab-label" on:click={() => (activeTab = tab.id)}>{tab.title}</button>
-            <button class="tab-close" aria-label={`Close ${tab.title}`} on:click={() => closeReadonlyTab(tab.id)}>x</button>
+            {#if renamingTab === tab.id}
+              <form class="tab-rename" on:submit|preventDefault={finishRename}><input aria-label="Tab name" bind:value={renameValue} on:keydown={(event) => { if (event.key === 'Escape') renamingTab = ''; }} /><button type="submit" aria-label="Save tab name"><Icon name="check" size={13} /></button></form>
+            {:else}
+              <button class="tab-label" title={`${tab.title} · ${connections.find((connection) => connection.id === (tab.id === activeTab ? tabConnectionId : tab.connectionId))?.name ?? 'No connection'}`} on:click={() => switchTab(tab.id)} on:dblclick={() => startRename(tab.id)}>
+                {#if operation?.tabId === tab.id}<span class="spinner"></span>{/if}
+                {tab.title}{#if (tab.id === activeTab ? pendingChanges : tab.pendingChanges).length}<span class="pending-dot" title="Staged edits">•</span>{/if}
+                {#if tab.kind === 'reference'}<small>read only</small>{/if}
+              </button>
+              <button class="tab-close" aria-label={`Close ${tab.title}`} on:click={() => closeTab(tab.id)}><Icon name="close" size={13} /></button>
+            {/if}
           </div>
         {/each}
+        <button class="new-tab" aria-label="New query tab" title="New query tab (Cmd/Ctrl+T)" on:click={() => newQuery()}><Icon name="plus" size={16} /></button>
       </nav>
 
       <div class="editor-pane">
@@ -1156,19 +1322,20 @@
             <button on:click={rollbackTransaction}>Rollback</button>
           </div>
         {/if}
-        {#if activeTab === 'playground'}
+        {#if workspaceLoaded}
+        {#key activeTab}
           <SqlEditor
             bind:this={editorRef}
             bind:value={sql}
-            readOnly={false}
-            aiEnabled={aiHealth.state === 'on'}
+            readOnly={tabKind !== 'query'}
+            viewState={editorViewState}
+            aiEnabled={aiHealth.state === 'on' && tabKind === 'query'}
             aiModel={settings.aiModel}
             {schemaContext}
             {schemaItems}
             aiComplete={api.aiComplete}
           />
-        {:else}
-          <SqlEditor value={readonlyContent} readOnly={true} />
+        {/key}
         {/if}
       </div>
 
@@ -1190,43 +1357,41 @@
         <div class="results-head">
           <div class="results-title">
             <strong>Results</strong>
-            {#if running}
-              <span class="running-state"><span class="spinner"></span> Running {runningDuration()}</span>
+            {#if operation?.tabId === activeTab}
+              <span class="running-state"><span class="spinner"></span> {operation.cancelling ? 'Cancelling…' : 'Running'} {runningDuration()}</span>
             {:else if result}
-              <span>{result.rowCount}{result.hasMore ? '+' : ''} rows · {result.durationMs} ms</span>
+              <span>{result.rowCount}{result.hasMore ? '+' : ''} {result.rowCount === 1 ? 'row' : 'rows'} · {result.durationMs} ms</span>
             {:else}
               <span>No query run</span>
             {/if}
           </div>
           <div class="results-actions">
-            <Dropdown
-              value={exportFormat}
-              options={EXPORT_OPTIONS}
-              ariaLabel="Export format"
-              disabled={!result?.rows.length}
-              compact
-              onSelect={(format) => (exportFormat = format as typeof exportFormat)}
-            />
-            <button disabled={!result?.rows.length} on:click={() => copyResult(exportFormat)}><Icon name="copy" size={14} /> Copy</button>
-            <button disabled={!result?.rows.length} on:click={() => downloadResult(exportFormat)}><Icon name="download" size={14} /> Save</button>
-            <button disabled={!result?.rows.length || !lastExecution} on:click={() => downloadResult(exportFormat, true)} title="Re-run the query and export up to 10,000 rows">Up to 10k</button>
+            <ActionMenu label="Export" ariaLabel="Export results" disabled={!result?.rows.length} items={exportItems} onSelect={handleExport} />
             {#if editMode}
-              <button on:click={previewUpdates}>Preview SQL</button>
-              <button disabled={!canApplyUpdates()} on:click={applyUpdates}>Apply</button>
-              <button on:click={discardUpdates}>Discard</button>
-              <button on:click={disableEditMode}>Stop Edit</button>
+              <button disabled={!pendingChanges.length || running} on:click={previewUpdates}>Review {pendingChanges.length} edits</button>
+              <button disabled={running} on:click={discardUpdates}>Discard</button>
+              <button disabled={running} on:click={disableEditMode}>Done</button>
             {:else}
-              <button disabled={!result?.rows.length} on:click={enableEditMode}><Icon name="edit" size={14} /> Edit</button>
+              <button disabled={!result?.rows.length || !resultUsable || running} on:click={enableEditMode}><Icon name="edit" size={14} /> Edit cells</button>
             {/if}
           </div>
         </div>
+        {#if resultSession}
+          <div class="result-context">
+            <span>{resultSession.connectionName}</span>
+            <time title={resultSession.executedAt}>{formatHistoryTime(resultSession.executedAt)}</time>
+            {#if resultSession.snapshot}<span class="snapshot-badge">History snapshot · read only</span>{/if}
+            {#if !resultSession.snapshot && resultSession.connectionId !== tabConnectionId}<span class="context-warning">Different connection · run the query to refresh</span>{/if}
+            <details><summary>Executed SQL</summary><pre>{resultSession.execution.sql}</pre></details>
+          </div>
+        {/if}
         {#if editMode}
           <div class="edit-bar">
             {pendingChanges.length} pending changes.
             {#if detectEditTarget()}
               Apply will update {detectEditTarget()?.schema}.{detectEditTarget()?.table}.
             {:else}
-              Apply disabled: source table ambiguous or unavailable.
+              Preview only: a single source table and primary key must be present to apply edits.
             {/if}
           </div>
         {/if}
@@ -1238,43 +1403,22 @@
             {#if queryError.code}<span>Code: {queryError.code}</span>{/if}
             {#if queryError.position}<span>Position: {queryError.position}</span>{/if}
           </div>
-        {:else if result && result.rows.length}
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>{#each result.columns as column (column.name)}<th>{column.name}<small>{column.typeName}</small></th>{/each}</tr>
-              </thead>
-              <tbody>
-                {#each result.rows as row, index (index)}
-                  <tr>
-                    {#each result.columns as column (column.name)}
-                      <td
-                        role="button"
-                        tabindex={editMode ? 0 : -1}
-                        class:editable-cell={editMode}
-                        class:changed-cell={isChanged(index, column.name)}
-                        on:click={() => editCell(index, column.name)}
-                        on:keydown={(event) => {
-                          if (event.key === 'Enter' || event.key === ' ') editCell(index, column.name);
-                        }}
-                      >{formatCell(row[column.name])}</td>
-                    {/each}
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
+        {/if}
+        {#if result && result.rows.length}
+          {#key `${activeTab}:${resultSession?.executedAt}`}
+            <ResultsGrid {result} {editMode} readOnly={!resultUsable} disabled={running} changedCells={pendingChanges} onEdit={updateCell} onMessage={flash} />
+          {/key}
           <footer class="results-foot">
-            {result.rowCount}{result.hasMore ? '+' : ''} rows · {result.durationMs} ms {result.autoLimited ? '· auto-limited' : ''}
-            {#if result.hasMore}<button on:click={loadMoreRows}>Load more rows</button>{/if}
+            <span>{result.rows.length} loaded {result.hasMore ? '· more available' : ''}</span>
+            {#if result.hasMore && !resultSession?.snapshot}<button disabled={!resultUsable || running || pendingChanges.length > 0} on:click={loadMoreRows}>Load next {PAGE_SIZE} rows</button>{/if}
           </footer>
         {:else if result}
           <p class="empty">Query completed in {result.durationMs} ms with no rows.</p>
         {:else}
           <div class="empty-state results-empty">
             <span class="empty-state-icon"><Icon name="play" size={22} /></span>
-            <strong>Run a query to see results</strong>
-            <p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>
+            <strong>{tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
+            {#if tabKind === 'query'}<p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>{:else}<button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>{/if}
           </div>
         {/if}
       </section>
@@ -1283,23 +1427,35 @@
 
   <footer class="status-bar">
     <span class="status-connection"><span class:connected={Boolean(activeConnection)} class="status-dot"></span>{activeConnection ? `${activeConnection.host}/${activeConnection.database}` : 'No connection'}</span>
-    <span>{poolStats ? `Pool ${settings.poolSize}: ${poolStats.active} active, ${poolStats.idle} idle` : `Pool ${settings.poolSize}`}</span>
-    <span>Schema {schemaItems.length ? `${schemaItems.length} objects` : 'not loaded'}</span>
+    <span>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : ''}</span>
+    <span>{workspaceLoaded ? 'Drafts saved automatically' : 'Restoring workspace…'}</span>
     {#if running}<span>Running {runningDuration()}</span>{/if}
     <span class="status-flash">{statusFlash}</span>
   </footer>
 </main>
 
 {#if toastVisible}
-  <div class="toast" role="status">
-    <span class="toast-icon"><Icon name="check" size={15} /></span>
+  <div class="toast" class:error-toast={toastError} role="status">
+    <span class="toast-icon"><Icon name={toastError ? 'close' : 'check'} size={15} /></span>
     <span>{statusFlash}</span>
     <button aria-label="Dismiss message" on:click={() => (toastVisible = false)}><Icon name="close" size={14} /></button>
   </div>
 {/if}
 
+{#if showUpdatePreview}
+  <Modal label="Review cell edits" locked={running} onClose={() => (showUpdatePreview = false)}>
+    <div class="modal update-review">
+      <div class="panel-head"><h2>Review cell edits</h2><button disabled={running} on:click={() => (showUpdatePreview = false)}>Close</button></div>
+      <p>{pendingChanges.length} staged changes on {resultSession?.connectionName}. Each updated row must match its original values.</p>
+      <pre>{generateUpdateSql()}</pre>
+      {#if !detectEditTarget()}<p class="context-warning">Apply is unavailable without an unambiguous source table and primary key.</p>{/if}
+      <div class="row-actions"><button disabled={running} on:click={() => (showUpdatePreview = false)}>Back to results</button><button class="primary" disabled={!canApplyUpdates()} on:click={applyUpdates}>{running ? 'Applying…' : 'Apply changes'}</button></div>
+    </div>
+  </Modal>
+{/if}
+
 {#if showConnectionModal}
-  <div class="modal-backdrop">
+  <Modal label={connectionForm.id ? 'Edit connection' : 'New connection'} locked={savingConnection} onClose={() => (showConnectionModal = false)}>
     <form class="modal" on:submit|preventDefault={saveConnection}>
       <div class="panel-head">
         <h2>{connectionForm.id ? 'Edit connection' : 'New connection'}</h2>
@@ -1322,5 +1478,5 @@
       </div>
       {#if modalFeedback}<p class="muted">{modalFeedback}</p>{/if}
     </form>
-  </div>
+  </Modal>
 {/if}

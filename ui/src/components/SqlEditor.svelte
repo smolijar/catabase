@@ -13,6 +13,7 @@
   export let aiModel: string | null | undefined = null;
   export let schemaContext = '';
   export let schemaItems: SchemaItem[] = [];
+  export let viewState: monaco.editor.ICodeEditorViewState | null = null;
   export let aiComplete: ((request: AiCompletionRequest) => Promise<string | null>) | undefined = undefined;
 
   const SQL_KEYWORDS = [
@@ -115,6 +116,7 @@
       tabCompletion: 'on',
       wordWrap: 'on'
     });
+    if (viewState) editor.restoreViewState(viewState);
 
     subscription = editor.onDidChangeModelContent((event) => {
       const next = editor?.getValue() ?? '';
@@ -184,6 +186,8 @@
     highlights?.clear();
     if (keydownHandler) window.removeEventListener('keydown', keydownHandler, true);
     editor?.dispose();
+    editor = undefined;
+    highlights = undefined;
   });
 
   $: if (editor && editor.getValue() !== value) {
@@ -367,11 +371,12 @@
   export async function getExecutionTarget(
     splitSql: (sql: string) => Promise<StatementRange[]>
   ): Promise<ExecutionTarget> {
-    const model = editor?.getModel();
-    if (!editor || !model) return { sql: value.trim(), start: 0, end: value.length };
+    const sourceEditor = editor;
+    const model = sourceEditor?.getModel();
+    if (!sourceEditor || !model) return { sql: value.trim(), start: 0, end: value.length };
 
     clearHighlights();
-    const selections = editor.getSelections() ?? [];
+    const selections = sourceEditor.getSelections() ?? [];
     const selected = selections
       .filter((selection) => !selection.isEmpty())
       .map((selection) => ({
@@ -390,20 +395,24 @@
       };
     }
 
-    const buffer = editor.getValue();
+    // Resolve the statement from the buffer and cursor at Run time, even when
+    // statement splitting finishes after a tab switch or another edit.
+    const buffer = model.getValue();
+    const version = model.getVersionId();
+    const position = sourceEditor.getPosition() ?? model.getFullModelRange().getStartPosition();
+    const cursor = model.getOffsetAt(position);
     const ranges = await splitSql(buffer);
+    const canHighlight = editor === sourceEditor && !model.isDisposed() && sourceEditor.getModel() === model && model.getVersionId() === version;
     if (!ranges.length) {
-      highlightOffsets([{ start: 0, end: buffer.length }]);
+      if (canHighlight) highlightOffsets([{ start: 0, end: buffer.length }]);
       return { sql: buffer.trim(), start: 0, end: buffer.length };
     }
 
-    const position = editor.getPosition() ?? model.getFullModelRange().getStartPosition();
-    const cursor = model.getOffsetAt(position);
     const containing = ranges.find((range) => cursor >= range.start && cursor <= range.end);
     const previous = ranges.filter((range) => range.end <= cursor).at(-1);
     const next = ranges.find((range) => range.start >= cursor);
     const target = containing ?? previous ?? next ?? ranges[0];
-    highlightOffsets([target]);
+    if (canHighlight) highlightOffsets([target]);
     return { sql: target.text.trim(), start: target.start, end: target.end };
   }
 
@@ -411,6 +420,10 @@
     highlights?.clear();
     const model = editor?.getModel();
     if (model) monaco.editor.setModelMarkers(model, 'catabase', []);
+  }
+
+  export function getViewState() {
+    return editor?.saveViewState() ?? null;
   }
 
   export function markError(offset: number, message: string) {
