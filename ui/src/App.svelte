@@ -1460,7 +1460,7 @@
         {#if txStatus.active}
           <div class="tx-banner">
             <strong>Transaction active</strong>
-            <span>{txStatus.startedAt}</span>
+            <span title={txStatus.startedAt ?? undefined}>{txStatus.startedAt ? formatHistoryTime(txStatus.startedAt) : ''}</span>
             <button disabled={running || Boolean(connectionMutation)} on:click={commitTransaction}>Commit</button>
             <button disabled={running || Boolean(connectionMutation)} on:click={rollbackTransaction}>Rollback</button>
           </div>

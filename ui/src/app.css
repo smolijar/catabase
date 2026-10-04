@@ -748,6 +748,12 @@ button.chip {
 
 .editor-pane {
   position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-host {
+  flex: 1;
 }
 
 .results-resizer {
@@ -788,13 +794,10 @@ button.chip {
 }
 
 .tx-banner {
-  position: absolute;
-  z-index: 2;
-  top: 0;
-  right: 0.7rem;
-  left: 0.7rem;
-  border-radius: 0 0 10px 10px;
-  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.35);
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  border-bottom: 1px solid #9b5d25;
+  background: #633c17;
 }
 
 .tx-banner span,
