@@ -40,6 +40,7 @@
     clearHighlights: () => void;
     markError: (offset: number, message: string) => void;
     getViewState: () => WorkspaceTab['viewState'];
+    getSnapshot: () => { tabId: string; sql: string; viewState: WorkspaceTab['viewState'] };
   };
   type EditTarget = {
     schema: string;
@@ -238,7 +239,9 @@
 
   function snapshotActive(): WorkspaceTab {
     const tab = tabs.find((candidate) => candidate.id === activeTab)!;
-    return { ...tab, sql, connectionId: tabConnectionId, viewState: editorRef?.getViewState() ?? editorViewState,
+    const editor = editorRef?.getSnapshot();
+    const ownsEditor = editor?.tabId === activeTab;
+    return { ...tab, sql: ownsEditor ? editor.sql : sql, connectionId: tabConnectionId, viewState: ownsEditor ? editor.viewState : editorViewState,
       session: resultSession ? { ...resultSession, data: result! } : null, error: queryError,
       originalRows, pendingChanges, editMode };
   }
@@ -1467,6 +1470,7 @@
           <SqlEditor
             bind:this={editorRef}
             bind:value={sql}
+            tabId={activeTab}
             readOnly={tabKind !== 'query'}
             viewState={editorViewState}
             aiEnabled={aiHealth.state === 'on' && tabKind === 'query'}
