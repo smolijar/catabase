@@ -48,6 +48,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 pnpm --dir ui run check
+node --experimental-strip-types --test ui/tests/*.test.ts
 pnpm --dir ui run build
 ```
 
@@ -64,9 +65,16 @@ Implemented:
 - execution-target resolution from Monaco selection/cursor/current statement
 - transaction banner plus backend transaction connection routing
 - server-side query cancellation via PostgreSQL cancel tokens
-- visible/full result export to clipboard or file
-- inline edit preview/apply flow with source-table and primary-key detection
+- loaded-row exports and explicitly re-run, read-only exports up to 10,000 rows
+- atomic, parameterized cell edits with primary-key validation and stale-row detection
 - schema-aware Monaco completions
 - OpenCode-backed Monaco inline AI completions
 - Svelte/Monaco UI shell with sidebar, tabs, editor, results, history, settings
+- independent query tabs with saved drafts, connection choice, and editor position
+- virtualized result grid with column resizing, loaded-row sorting, range selection, and copying
+- typed cell inspector distinguishing SQL NULL, empty text, and JSON values
+- result provenance and read-only history snapshots; paging remains bound to the original SQL and connection
+- opaque keyboard-accessible dropdowns and action menus
 - pnpm install age gate
+
+Query results and staged edits stay in memory only; restarting restores SQL drafts, not cached data. Sorting is limited to loaded rows. Loading more rows or requesting a larger export re-runs the original SQL in a read-only transaction, so it is unavailable while a manual transaction is open. Commit or roll back that transaction first. Cell edits made inside a manual transaction remain pending until you commit it.
