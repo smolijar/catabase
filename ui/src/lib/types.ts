@@ -56,6 +56,23 @@ export interface QueryResult {
   hasMore: boolean;
 }
 
+export interface RowUpdate {
+  schema: string;
+  table: string;
+  values: Record<string, unknown>;
+  original: Record<string, unknown>;
+}
+
+export interface ApplyUpdatesResult {
+  updatedRows: number;
+  inTransaction: boolean;
+}
+
+export interface CancelResult {
+  cancelled: boolean;
+  message: string;
+}
+
 export interface HistoryEntry {
   id: number;
   connectionId?: string | null;
