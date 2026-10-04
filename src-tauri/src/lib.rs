@@ -896,8 +896,47 @@ async fn tx_status_inner(state: &State<'_, AppState>) -> TxStatus {
     }
 }
 
+fn application_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let menu = tauri::menu::Menu::default(app)?;
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::menu::{MenuItem, MenuItemKind, PredefinedMenuItem};
+
+        // The macOS predefined Quit action calls Cocoa terminate: directly,
+        // bypassing RunEvent::ExitRequested. Replace only that action so both
+        // its menu click and Cmd+Q go through the draft-flushing exit handshake.
+        let quit_label = PredefinedMenuItem::quit(app, None)?.text()?;
+        for item in menu.items()? {
+            if let MenuItemKind::Submenu(submenu) = item {
+                for (index, item) in submenu.items()?.into_iter().enumerate() {
+                    if let MenuItemKind::Predefined(native) = item
+                        && native.text()? == quit_label
+                    {
+                        let quit = MenuItem::with_id(
+                            app,
+                            "catabase-quit",
+                            &quit_label,
+                            true,
+                            Some("CmdOrCtrl+Q"),
+                        )?;
+                        submenu.remove(&native)?;
+                        submenu.insert(&quit, index)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(menu)
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .menu(application_menu)
+        .on_menu_event(|app, event| {
+            if event.id() == "catabase-quit" {
+                app.exit(0);
+            }
+        })
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())

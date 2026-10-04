@@ -14,6 +14,7 @@
   export let schemaContext = '';
   export let schemaItems: SchemaItem[] = [];
   export let viewState: monaco.editor.ICodeEditorViewState | null = null;
+  export let tabId: string;
   export let aiComplete: ((request: AiCompletionRequest) => Promise<string | null>) | undefined = undefined;
 
   const SQL_KEYWORDS = [
@@ -79,6 +80,7 @@
   let inlineProvider: monaco.IDisposable | undefined;
   let highlights: monaco.editor.IEditorDecorationsCollection | undefined;
   let keydownHandler: ((event: KeyboardEvent) => void) | undefined;
+  const ownerTabId = tabId;
 
   onMount(() => {
     (window as unknown as { MonacoEnvironment: unknown }).MonacoEnvironment = {
@@ -424,6 +426,10 @@
 
   export function getViewState() {
     return editor?.saveViewState() ?? null;
+  }
+
+  export function getSnapshot() {
+    return { tabId: ownerTabId, sql: editor?.getValue() ?? value, viewState: getViewState() };
   }
 
   export function markError(offset: number, message: string) {
