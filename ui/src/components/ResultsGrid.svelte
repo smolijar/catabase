@@ -2,7 +2,7 @@
   import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import { copyText } from '../lib/clipboard';
-  import { cellKind, cellText, parseCellDraft, prettyCell, selectionBounds, selectionText, sortedRows, visibleRowWindow } from '../lib/resultsGrid';
+  import { cellKind, cellText, parseCellDraft, positionAfterReorder, prettyCell, selectionBounds, selectionText, sortedRows, visibleRowWindow } from '../lib/resultsGrid';
   import type { CellPosition, GridSort, IndexedRow } from '../lib/resultsGrid';
   import type { QueryResult } from '../lib/types';
 
@@ -16,6 +16,7 @@
 
   let root: HTMLDivElement;
   let scrollElement: HTMLDivElement;
+  let inspectorElement: HTMLElement | undefined;
   let scrollTop = 0;
   let viewportHeight = 300;
   const ROW_HEIGHT = 33;
@@ -47,13 +48,11 @@
 
   function reconcileSelection(nextRows: IndexedRow[]) {
     if (anchor && focus && previousRows.length) {
-      const anchorOriginal = previousRows[anchor.row]?.originalIndex;
-      const focusOriginal = previousRows[focus.row]?.originalIndex;
-      const anchorRow = nextRows.findIndex((entry) => entry.originalIndex === anchorOriginal);
-      const focusRow = nextRows.findIndex((entry) => entry.originalIndex === focusOriginal);
-      if (anchorRow >= 0 && focusRow >= 0) {
-        anchor = { ...anchor, row: anchorRow };
-        focus = { ...focus, row: focusRow };
+      const nextAnchor = positionAfterReorder(previousRows, nextRows, anchor);
+      const nextFocus = positionAfterReorder(previousRows, nextRows, focus);
+      if (nextAnchor && nextFocus) {
+        anchor = nextAnchor;
+        focus = nextFocus;
       } else { anchor = null; focus = null; }
     }
     previousRows = nextRows;
@@ -110,12 +109,38 @@
     if (editMode && !extend) inspectCell(row, column);
   }
 
-  function inspectCell(row: number, column: number) {
-    if (rows[row]) inspectorCell = { originalIndex: rows[row].originalIndex, column };
+  async function inspectCell(row: number, column: number, focusPanel = false) {
+    if (!rows[row]) return;
+    inspectorCell = { originalIndex: rows[row].originalIndex, column };
+    if (focusPanel) {
+      await tick();
+      const editor = inspectorElement?.querySelector<HTMLElement>('textarea:not(:disabled)')
+        ?? inspectorElement?.querySelector<HTMLElement>('input:not(:disabled)');
+      (editor ?? inspectorElement?.querySelector<HTMLElement>('.close-inspector'))?.focus();
+    }
   }
 
   function inspectSelection() {
-    if (focus) inspectCell(focus.row, focus.column);
+    if (focus) void inspectCell(focus.row, focus.column, true);
+  }
+
+  async function closeInspector() {
+    const inspectedRow = inspectorCell ? rows.findIndex((entry) => entry.originalIndex === inspectorCell?.originalIndex) : -1;
+    const destination = focus ?? (inspectorCell && inspectedRow >= 0 ? { row: inspectedRow, column: inspectorCell.column } : null);
+    inspectorCell = null;
+    if (!destination) return;
+    focus = destination;
+    anchor ??= destination;
+    ensureRowVisible(destination.row);
+    await tick();
+    root.querySelector<HTMLButtonElement>(`[data-cell="${destination.row}:${destination.column}"]`)?.focus();
+  }
+
+  function inspectorKey(event: KeyboardEvent) {
+    if (event.key === 'Escape' && inspectorElement?.contains(event.target as Node)) {
+      event.preventDefault();
+      void closeInspector();
+    }
   }
 
   function resetDraft(data: QueryResult, cell: typeof inspectorCell, _editMode: boolean) {
@@ -179,7 +204,7 @@
     if (event.key === 'Enter') {
       event.preventDefault();
       selectCell(row, column, event.shiftKey);
-      inspectCell(row, column);
+      await inspectCell(row, column, true);
       return;
     }
     if (event.key === 'Escape') {
@@ -211,7 +236,7 @@
   }
 </script>
 
-<svelte:window on:pointermove={moveResize} on:pointerup={() => (resize = null)} on:pointercancel={() => (resize = null)} />
+<svelte:window on:pointermove={moveResize} on:pointerup={() => (resize = null)} on:pointercancel={() => (resize = null)} on:keydown={inspectorKey} />
 
 <div class="results-grid" class:resizing={Boolean(resize)} bind:this={root}>
   <div class="grid-tools">
@@ -259,7 +284,7 @@
                     title="Click to select, Shift-click for a range, double-click or Enter for details"
                     on:click={(event) => selectCell(rowIndex, columnIndex, event.shiftKey)}
                     on:focus={(event) => { if (!focus || ((focus.row < rowWindow.first || focus.row >= rowWindow.last) && event.currentTarget.matches(':focus-visible'))) selectCell(rowIndex, columnIndex); }}
-                    on:dblclick={() => inspectCell(rowIndex, columnIndex)}
+                    on:dblclick={() => inspectCell(rowIndex, columnIndex, true)}
                     on:keydown={(event) => cellKey(event, rowIndex, columnIndex)}
                   >{entry.row[column.name] === '' && cellKind(column) !== 'json' ? 'empty string' : cellText(entry.row[column.name], column, result.jsonValuesAsText)}</button>
                 </td>
@@ -271,8 +296,8 @@
       </table>
     </div>
     {#if inspectorCell && selectedColumn}
-      <aside class="cell-inspector" aria-label="Cell details">
-        <div class="inspector-title"><strong title={selectedColumn.name}>{selectedColumn.name}</strong><button class="close-inspector" aria-label="Close cell details" on:click={() => (inspectorCell = null)}><Icon name="close" size={14} /></button></div>
+      <aside class="cell-inspector" aria-label="Cell details" bind:this={inspectorElement}>
+        <div class="inspector-title"><strong title={selectedColumn.name}>{selectedColumn.name}</strong><button class="close-inspector" aria-label="Close cell details" on:click={closeInspector}><Icon name="close" size={14} /></button></div>
         <p class="cell-meta">Row {inspectorCell.originalIndex + 1} · {selectedColumn.typeName}{selectedColumn.generated ? ' · generated' : ''}{selectedColumn.nullable === false ? ' · not nullable' : ''}</p>
         {#if canEdit}
           <form on:submit|preventDefault={stageEdit}>

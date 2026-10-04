@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cellText, parseCellDraft, prettyCell, selectionText, sortedRows, visibleRowWindow } from '../src/lib/resultsGrid.ts';
+import { cellText, parseCellDraft, positionAfterReorder, prettyCell, selectionText, sortedRows, visibleRowWindow } from '../src/lib/resultsGrid.ts';
 import type { ColumnMeta, QueryResult } from '../src/lib/types.ts';
 
 const column = (typeName = 'text', more: Partial<ColumnMeta> = {}): ColumnMeta => ({ name: 'value', typeName, typeOid: 0, nullable: true, generated: false, primaryKey: false, ...more });
@@ -16,6 +16,22 @@ test('numeric sorting preserves exact int8/decimal ordering and original row ide
 test('numeric sorting handles exponents, negatives, equivalent values and zero', () => {
   const rows = sortedRows(result(['1e-10', '-3', '-10', '100e-12', '-0', '0', '1e10', '0.00000000001'], 'numeric'), { column: 'value', direction: 'asc' });
   assert.deepEqual(rows.map((entry) => entry.originalIndex), [2, 1, 4, 5, 7, 0, 3, 6]);
+});
+
+test('numeric sorting orders special PostgreSQL values numerically and keeps NULL last', () => {
+  const data = result(['NaN', 'Infinity', '-Infinity', '-12', '0', '9007199254740993', null], 'numeric');
+  assert.deepEqual(sortedRows(data, { column: 'value', direction: 'asc' }).map((entry) => entry.originalIndex), [2, 3, 4, 5, 1, 0, 6]);
+  assert.deepEqual(sortedRows(data, { column: 'value', direction: 'desc' }).map((entry) => entry.originalIndex), [0, 1, 5, 4, 3, 2, 6]);
+});
+
+test('selection follows the same original row after a staged edit changes its sorted position', () => {
+  const data = result(['10', '20', '30'], 'int8');
+  const sort = { column: 'value', direction: 'asc' } as const;
+  const before = sortedRows(data, sort);
+  const after = sortedRows({ ...data, rows: [{ value: '40' }, data.rows[1], data.rows[2]] }, sort);
+  assert.deepEqual(positionAfterReorder(before, after, { row: 0, column: 2 }), { row: 2, column: 2 });
+  assert.deepEqual(positionAfterReorder(before, after, { row: 2, column: 1 }), { row: 1, column: 1 });
+  assert.equal(positionAfterReorder(before, [], { row: 0, column: 0 }), null);
 });
 
 test('typed drafts distinguish empty text, SQL NULL, JSON null and preserve precision', () => {

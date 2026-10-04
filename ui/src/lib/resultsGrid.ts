@@ -5,6 +5,13 @@ export type GridSort = { column: string; direction: 'asc' | 'desc' } | null;
 export type IndexedRow = { row: Record<string, unknown>; originalIndex: number };
 export type CellKind = 'boolean' | 'integer' | 'numeric' | 'json' | 'text';
 
+export function positionAfterReorder(previousRows: IndexedRow[], nextRows: IndexedRow[], position: CellPosition | null): CellPosition | null {
+  if (!position) return null;
+  const originalIndex = previousRows[position.row]?.originalIndex;
+  const row = nextRows.findIndex((entry) => entry.originalIndex === originalIndex);
+  return row < 0 ? null : { row, column: position.column };
+}
+
 export function visibleRowWindow(total: number, scrollTop: number, viewportHeight: number, rowHeight = 33, headerHeight = 49, overscan = 10) {
   const visibleStart = Math.floor(Math.max(0, scrollTop - headerHeight) / rowHeight);
   const first = Math.min(Math.max(0, total - 1), Math.max(0, visibleStart - overscan));
@@ -97,6 +104,15 @@ function compareDecimals(a: Decimal, b: Decimal): number {
   return a.negative ? -comparison : comparison;
 }
 
+function numericOrder(value: unknown): { category: number; value: Decimal | null } | null {
+  const text = String(value).trim();
+  if (/^-infinity$/i.test(text)) return { category: -1, value: null };
+  if (/^\+?infinity$/i.test(text)) return { category: 1, value: null };
+  if (/^[+-]?nan$/i.test(text)) return { category: 2, value: null };
+  const parsed = decimal(value);
+  return parsed ? { category: 0, value: parsed } : null;
+}
+
 export function sortedRows(result: QueryResult, sort: GridSort): IndexedRow[] {
   const rows = result.rows.map((row, originalIndex) => ({ row, originalIndex }));
   const column = sort && result.columns.find((candidate) => candidate.name === sort.column);
@@ -106,10 +122,10 @@ export function sortedRows(result: QueryResult, sort: GridSort): IndexedRow[] {
     const left = a.row[column.name];
     const right = b.row[column.name];
     if (left == null || right == null) return left == null && right == null ? a.originalIndex - b.originalIndex : left == null ? 1 : -1;
-    const leftDecimal = numeric ? decimal(left) : null;
-    const rightDecimal = numeric ? decimal(right) : null;
-    const comparison = leftDecimal && rightDecimal
-      ? compareDecimals(leftDecimal, rightDecimal)
+    const leftNumber = numeric ? numericOrder(left) : null;
+    const rightNumber = numeric ? numericOrder(right) : null;
+    const comparison = leftNumber && rightNumber
+      ? leftNumber.category - rightNumber.category || (leftNumber.value && rightNumber.value ? compareDecimals(leftNumber.value, rightNumber.value) : 0)
       : cellText(left, column, result.jsonValuesAsText).localeCompare(cellText(right, column, result.jsonValuesAsText), undefined, { numeric: true });
     return (sort.direction === 'asc' ? comparison : -comparison) || a.originalIndex - b.originalIndex;
   });
