@@ -1,0 +1,66 @@
+import type { editor } from 'monaco-editor';
+import type { AppError, ExecutionTarget, QueryResult } from './types';
+
+export interface ResultSession {
+  data: QueryResult;
+  execution: ExecutionTarget;
+  connectionId: string | null;
+  connectionName: string;
+  executedAt: string;
+  snapshot: boolean;
+}
+
+export interface PendingChange {
+  rowIndex: number;
+  column: string;
+  oldValue: unknown;
+  newValue: unknown;
+}
+
+export interface WorkspaceTab {
+  id: string;
+  title: string;
+  kind: 'query' | 'reference';
+  sql: string;
+  connectionId: string | null;
+  viewState: editor.ICodeEditorViewState | null;
+  session: ResultSession | null;
+  error: AppError | null;
+  originalRows: Record<string, unknown>[];
+  pendingChanges: PendingChange[];
+  editMode: boolean;
+}
+
+export function createQueryTab(id: string, title: string, sql = '', connectionId: string | null = null): WorkspaceTab {
+  return { id, title, kind: 'query', sql, connectionId, viewState: null, session: null, error: null, originalRows: [], pendingChanges: [], editMode: false };
+}
+
+export function canUseResult(session: ResultSession | null, connectionId: string | null): boolean {
+  return Boolean(session && !session.snapshot && connectionId && session.connectionId === connectionId);
+}
+
+// Persist drafts and editor positions, never cached database rows or staged edits.
+export function serializeWorkspace(tabs: WorkspaceTab[], activeId: string): string {
+  const queries = tabs.filter((tab) => tab.kind === 'query');
+  return JSON.stringify({ version: 1, activeId, tabs: queries.map(({ id, title, sql, connectionId, viewState }) => ({ id, title, sql, connectionId, viewState })) });
+}
+
+export function restoreWorkspace(serialized: string): { tabs: WorkspaceTab[]; activeId: string } | null {
+  try {
+    const stored = JSON.parse(serialized);
+    if (stored?.version !== 1 || !Array.isArray(stored.tabs)) return null;
+    const ids = new Set<string>();
+    const tabs: WorkspaceTab[] = [];
+    for (const item of stored.tabs) {
+      if (!item || typeof item.id !== 'string' || !item.id || ids.has(item.id) || typeof item.sql !== 'string' || typeof item.title !== 'string') continue;
+      ids.add(item.id);
+      const tab = createQueryTab(item.id, item.title, item.sql, typeof item.connectionId === 'string' ? item.connectionId : null);
+      if (item.viewState && Array.isArray(item.viewState.cursorState) && item.viewState.viewState) tab.viewState = item.viewState;
+      tabs.push(tab);
+    }
+    if (!tabs.length) return null;
+    return { tabs, activeId: ids.has(stored.activeId) ? stored.activeId : tabs[0].id };
+  } catch {
+    return null;
+  }
+}
