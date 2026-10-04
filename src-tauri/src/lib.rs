@@ -29,6 +29,8 @@ struct AppState {
     tx: Mutex<Option<TxSession>>,
     cancels: Mutex<HashMap<String, CancelEntry>>,
     opencode: OpenCodeClient,
+    exit_guard_enabled: AtomicBool,
+    exit_confirmed: AtomicBool,
 }
 
 struct ActivePool {
@@ -493,6 +495,17 @@ async fn load_draft(
 }
 
 #[tauri::command]
+fn enable_exit_guard(state: State<'_, AppState>) {
+    state.exit_guard_enabled.store(true, Ordering::Release);
+}
+
+#[tauri::command]
+fn finish_exit(app: AppHandle, state: State<'_, AppState>) {
+    state.exit_confirmed.store(true, Ordering::Release);
+    app.exit(0);
+}
+
+#[tauri::command]
 async fn ai_health(state: State<'_, AppState>) -> Result<AiHealth, AppError> {
     Ok(state.opencode.health().await)
 }
@@ -889,6 +902,8 @@ pub fn run() {
                 tx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 opencode: OpenCodeClient::default(),
+                exit_guard_enabled: AtomicBool::new(false),
+                exit_confirmed: AtomicBool::new(false),
             });
             Ok(())
         })
@@ -903,7 +918,9 @@ pub fn run() {
             connection_stats,
             delete_connection,
             execute_query,
+            enable_exit_guard,
             export_write_file,
+            finish_exit,
             get_ddl,
             get_settings,
             history_delete,
@@ -925,8 +942,23 @@ pub fn run() {
             tx_rollback,
             tx_status,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Catabase");
+        .build(tauri::generate_context!())
+        .expect("failed to build Catabase")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                let state = app.state::<AppState>();
+                if code != Some(tauri::RESTART_EXIT_CODE)
+                    && state.exit_guard_enabled.load(Ordering::Acquire)
+                    && !state.exit_confirmed.load(Ordering::Acquire)
+                    && app.get_webview_window("main").is_some()
+                {
+                    // Native Quit bypasses window close handlers. Wait for the
+                    // frontend to flush its latest editor snapshot before exit.
+                    api.prevent_exit();
+                    let _ = app.emit("catabase:request-exit", ());
+                }
+            }
+        });
 }
 
 #[cfg(test)]
