@@ -8,6 +8,7 @@
     | 'database'
     | 'download'
     | 'edit'
+    | 'ellipsis'
     | 'history'
     | 'plus'
     | 'play'
@@ -69,6 +70,10 @@
     <path d="m5 12 4 4L19 6" />
   {:else if name === 'edit'}
     <path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4L16.5 3.5Z" />
+  {:else if name === 'ellipsis'}
+    <circle cx="5" cy="12" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="19" cy="12" r="1.5" fill="currentColor" stroke="none" />
   {:else if name === 'trash'}
     <path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" />
   {:else if name === 'copy'}
