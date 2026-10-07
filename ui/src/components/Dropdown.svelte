@@ -14,6 +14,7 @@
   export let disabled = false;
   export let compact = false;
   export let menuMode = false;
+  export let iconOnly = false;
   export let triggerLabel = '';
   export let onSelect: (value: string) => void = () => {};
 
@@ -24,6 +25,7 @@
   let activeIndex = 0;
   let typeahead = '';
   let lastTypedAt = 0;
+  let pointerAnchor: { x: number; y: number } | null = null;
   const menuId = `dropdown-${++nextDropdownId}`;
 
   $: selectedIndex = options.findIndex((option) => option.value === value);
@@ -66,8 +68,16 @@
     };
   });
 
-  async function openMenu(fromEnd = false) {
+  export async function openAt(x?: number, y?: number) {
+    const anchor = typeof x === 'number' && Number.isFinite(x) && typeof y === 'number' && Number.isFinite(y)
+      ? { x, y }
+      : null;
+    await openMenu(false, anchor);
+  }
+
+  async function openMenu(fromEnd = false, anchor: { x: number; y: number } | null = null) {
     if (disabled || !options.some((option) => !option.disabled)) return;
+    pointerAnchor = anchor;
     const enabled = enabledIndexes();
     activeIndex = !menuMode && selectedIndex >= 0 && !options[selectedIndex].disabled
       ? selectedIndex
@@ -82,6 +92,7 @@
 
   function closeMenu(returnFocus = false) {
     open = false;
+    pointerAnchor = null;
     typeahead = '';
     if (returnFocus) trigger.focus();
   }
@@ -106,7 +117,14 @@
     const viewportWidth = viewport?.width ?? window.innerWidth;
     const viewportHeight = viewport?.height ?? window.innerHeight;
     const padding = 8;
-    const gap = 6;
+    const gap = pointerAnchor ? 2 : 6;
+    const anchorX = pointerAnchor
+      ? Math.max(viewportLeft + padding, Math.min(pointerAnchor.x, viewportLeft + viewportWidth - padding))
+      : rect.left;
+    const anchorTop = pointerAnchor
+      ? Math.max(viewportTop + padding, Math.min(pointerAnchor.y, viewportTop + viewportHeight - padding))
+      : rect.top;
+    const anchorBottom = pointerAnchor ? anchorTop : rect.bottom;
     const availableWidth = Math.max(0, viewportWidth - padding * 2);
     const previousScroll = menu.scrollTop;
 
@@ -114,19 +132,19 @@
     // names can make options taller than the usual one-line menu row.
     Object.assign(menu.style, {
       width: 'max-content',
-      minWidth: `${Math.min(Math.max(rect.width, 180), availableWidth)}px`,
+      minWidth: `${Math.min(Math.max(pointerAnchor ? 0 : rect.width, 180), availableWidth)}px`,
       maxWidth: `${Math.min(460, availableWidth)}px`,
       maxHeight: 'none'
     });
     const naturalHeight = menu.getBoundingClientRect().height;
-    const below = Math.max(0, viewportTop + viewportHeight - rect.bottom - gap - padding);
-    const above = Math.max(0, rect.top - viewportTop - gap - padding);
+    const below = Math.max(0, viewportTop + viewportHeight - anchorBottom - gap - padding);
+    const above = Math.max(0, anchorTop - viewportTop - gap - padding);
     const opensUp = below < Math.min(naturalHeight, 320) && above > below;
     menu.style.maxHeight = `${Math.min(320, opensUp ? above : below)}px`;
     const measured = menu.getBoundingClientRect();
-    const preferredLeft = menuMode ? rect.right - measured.width : rect.left;
+    const preferredLeft = pointerAnchor ? anchorX : menuMode ? rect.right - measured.width : rect.left;
     const left = Math.max(viewportLeft + padding, Math.min(preferredLeft, viewportLeft + viewportWidth - measured.width - padding));
-    const preferredTop = opensUp ? rect.top - measured.height - gap : rect.bottom + gap;
+    const preferredTop = opensUp ? anchorTop - measured.height - gap : anchorBottom + gap;
     const top = Math.max(viewportTop + padding, Math.min(preferredTop, viewportTop + viewportHeight - measured.height - padding));
     Object.assign(menu.style, { top: `${top}px`, left: `${left}px`, visibility: 'visible' });
     menu.scrollTop = previousScroll;
@@ -194,7 +212,11 @@
 
   function handleTriggerKeydown(event: KeyboardEvent) {
     if (event.metaKey || event.ctrlKey || event.altKey || event.isComposing) return;
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    if (menuMode && iconOnly && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) {
+      event.preventDefault();
+      event.stopPropagation();
+      void openAt();
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       event.stopPropagation();
       void openMenu(event.key === 'ArrowUp');
@@ -210,6 +232,13 @@
       event.preventDefault();
       void openMenu().then(() => { if (open) matchTypedCharacter(event.key); });
     }
+  }
+
+  function handleTriggerContextMenu(event: MouseEvent) {
+    if (!menuMode || !iconOnly) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void openAt(event.clientX, event.clientY);
   }
 
   function handleMenuKeydown(event: KeyboardEvent) {
@@ -246,23 +275,28 @@
   }
 </script>
 
-<div bind:this={root} class="dropdown" class:compact class:open class:action-menu={menuMode}>
+<div bind:this={root} class="dropdown" class:compact class:open class:action-menu={menuMode} class:icon-only={iconOnly}>
   <button
     bind:this={trigger}
     type="button"
     class="dropdown-trigger"
     aria-label={menuMode ? ariaLabel : `${ariaLabel}: ${label}${unavailable ? ' (unavailable)' : ''}`}
-    title={unavailable ? `${label} — unavailable; choose another option` : label}
+    title={iconOnly ? ariaLabel : unavailable ? `${label} — unavailable; choose another option` : label}
     aria-haspopup={menuMode ? 'menu' : 'listbox'}
     aria-controls={open ? menuId : undefined}
     aria-expanded={open}
     {disabled}
     on:click={toggleMenu}
     on:keydown={handleTriggerKeydown}
+    on:contextmenu={handleTriggerContextMenu}
   >
-    <span class="dropdown-label">{label}</span>
-    {#if unavailable}<span class="unavailable-hint">Unavailable</span>{/if}
-    <span class="dropdown-chevron"><Icon name="chevron" size={14} /></span>
+    {#if iconOnly}
+      <Icon name="ellipsis" size={18} />
+    {:else}
+      <span class="dropdown-label">{label}</span>
+      {#if unavailable}<span class="unavailable-hint">Unavailable</span>{/if}
+      <span class="dropdown-chevron"><Icon name="chevron" size={14} /></span>
+    {/if}
   </button>
 
   {#if open}
@@ -330,5 +364,13 @@
 
   .action-menu .dropdown-trigger {
     min-width: 0;
+  }
+
+  .dropdown.icon-only .dropdown-trigger {
+    width: 32px;
+    min-width: 32px;
+    height: 32px;
+    justify-content: center;
+    padding: 0;
   }
 </style>
