@@ -13,6 +13,7 @@
   import SqlEditor from './components/SqlEditor.svelte';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
+  import { formatRunningDuration } from './lib/status';
   import { canUseResult, createDraftWriter, createQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
   import type { PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
   import type {
@@ -84,6 +85,8 @@
   let connections: ConnectionRecord[] = [];
   let settings: Settings = { poolSize: 5, aiModel: null };
   let poolStats: ConnectionStats | null = null;
+  let poolStatsConnectionId: string | null = null;
+  let poolStatsRequest = 0;
   let poolSizeInput = 5;
   let aiModels: string[] = [];
   let aiHealth: AiHealth = { state: 'off', message: null };
@@ -123,6 +126,8 @@
 
   $: activeConnection = connections.find((connection) => connection.id === tabConnectionId) ?? null;
   $: running = operation !== null;
+  $: runningDuration = formatRunningDuration(operation?.startedAt, nowMs);
+  $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
   $: resultUsable = Boolean(activeConnection) && canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
   $: schemaContext = schemaItems
     .map((item) => `${item.schema}.${item.name}(${item.columns.map((column) => column.name).join(', ')})`)
@@ -134,6 +139,7 @@
   ];
   $: if (workspaceLoaded) scheduleDraftSave(sql, activeTab, tabConnectionId, tabs);
   $: if (workspaceLoaded) void refreshSchemaForConnection(tabConnectionId);
+  $: if (workspaceLoaded) void loadConnectionStats(activeConnection?.id ?? null);
   $: exportItems = [
     { id: 'copy-csv', label: 'Copy as CSV' },
     { id: 'copy-tsv', label: 'Copy as TSV' },
@@ -156,10 +162,15 @@
     const statsInterval = window.setInterval(() => {
       if (activeConnection) void loadConnectionStats();
     }, 5000);
+    let nextRunningStatsAt = 0;
     const runningInterval = window.setInterval(() => {
+      if (!running) return;
       nowMs = Date.now();
-      if (running && activeConnection) void loadConnectionStats();
-    }, 1000);
+      if (activeConnection && nowMs >= nextRunningStatsAt) {
+        nextRunningStatsAt = nowMs + 1000;
+        void loadConnectionStats();
+      }
+    }, 100);
     const aiInterval = window.setInterval(checkAiHealth, 30000);
 
     return () => {
@@ -725,6 +736,7 @@
       const normalized = await api.setPoolSize(poolSizeInput);
       settings = { ...settings, poolSize: normalized };
       poolSizeInput = normalized;
+      void loadConnectionStats();
       flash(`Pool size saved: ${normalized}.`);
     } catch (error) {
       flash(errorMessage(error));
@@ -751,11 +763,18 @@
     }
   }
 
-  async function loadConnectionStats() {
-    const connectionId = tabConnectionId;
-    if (!connections.some((connection) => connection.id === connectionId && connection.isActive)) { poolStats = null; return; }
-    const next = await api.connectionStats().catch(() => null);
-    if (connectionId === tabConnectionId && connections.some((connection) => connection.id === connectionId && connection.isActive)) poolStats = next;
+  async function loadConnectionStats(connectionId: string | null = tabConnectionId) {
+    const request = ++poolStatsRequest;
+    if (!connectionId || !connections.some((connection) => connection.id === connectionId)) {
+      poolStats = null;
+      poolStatsConnectionId = null;
+      return;
+    }
+    const next = await api.connectionStats(connectionId).catch(() => null);
+    if (request === poolStatsRequest && connectionId === tabConnectionId) {
+      poolStats = next;
+      poolStatsConnectionId = connectionId;
+    }
   }
 
   async function refreshTxStatus() {
@@ -1159,11 +1178,6 @@
     return new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
   }
 
-  function runningDuration(): string {
-    if (!operation) return '0.0s';
-    return `${((nowMs - operation.startedAt) / 1000).toFixed(1)}s`;
-  }
-
   function formatHistoryTime(value: string): string {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return value;
@@ -1248,7 +1262,7 @@
       <span class="status-dot"></span>
       {activeConnection ? activeConnection.name : 'Choose connection'}
     </button>
-    {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : 'Exporting'} · {runningDuration()} · {tabs.find((tab) => tab.id === operation?.tabId)?.title}</button>{/if}
+    {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : 'Exporting'} · {runningDuration} · {tabs.find((tab) => tab.id === operation?.tabId)?.title}</button>{/if}
     {#if connectionMutation}<span class="operation-status" role="status">{connectionMutation}</span>{/if}
     <div class="toolbar-spacer"></div>
     <ActionMenu label="More" ariaLabel="Workspace actions" items={[
@@ -1417,7 +1431,7 @@
               </div>
             </label>
             <p>Choose between 1 and 32 concurrent PostgreSQL connections.</p>
-            <p>{poolStats ? `${poolStats.active} active · ${poolStats.idle} idle` : 'Pool statistics are available for the active database.'}</p>
+            <p>{currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle` : 'Pool statistics will appear when this connection is in use.'}</p>
           </section>
           <section class="settings-card">
             <div class="settings-card-head"><strong>AI completion</strong><span class="ai-{aiHealth.state}">{aiHealth.state}</span></div>
@@ -1502,7 +1516,7 @@
           <div class="results-title">
             <strong>{queryError && result ? 'Previous results' : 'Results'}</strong>
             {#if operation?.tabId === activeTab}
-              <span class="running-state"><span class="spinner"></span> {operation.cancelling ? 'Cancelling…' : 'Running'} {runningDuration()}</span>
+              <span class="running-state"><span class="spinner"></span> {operation.cancelling ? 'Cancelling…' : 'Running'} {runningDuration}</span>
             {:else if result}
               <span>{result.rowCount}{result.hasMore ? '+' : ''} {result.rowCount === 1 ? 'row' : 'rows'} · {result.durationMs} ms</span>
             {:else}
@@ -1571,9 +1585,10 @@
 
   <footer class="status-bar">
     <span class="status-connection"><span class:connected={Boolean(activeConnection)} class="status-dot"></span>{activeConnection ? `${activeConnection.host}/${activeConnection.database}` : 'No connection'}</span>
+    {#if activeConnection}<span title={`Connection pool for ${activeConnection.name}${currentPoolStats ? '' : ': statistics are not currently available'}`}>Pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</span>{/if}
     <span>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : ''}</span>
     <span>{!workspaceLoaded ? 'Restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'Saving drafts…' : draftStatus === 'pending' ? 'Unsaved draft changes' : draftStatus === 'error' ? 'Draft save failed' : 'Drafts saved'}</span>
-    {#if running}<span>Running {runningDuration()}</span>{/if}
+    {#if running}<span>Running {runningDuration}</span>{/if}
     <span class="status-flash">{statusFlash}</span>
   </footer>
 </main>

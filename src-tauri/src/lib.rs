@@ -383,10 +383,38 @@ async fn cancel_query(
 }
 
 #[tauri::command]
-async fn connection_stats(state: State<'_, AppState>) -> Result<ConnectionStats, AppError> {
-    let active = active_connection(&state).await?;
-    let pool = active_pool(&state, &active).await?;
-    Ok(load_connection_stats(&pool))
+async fn connection_stats(
+    state: State<'_, AppState>,
+    connection_id: Option<String>,
+) -> Result<Option<ConnectionStats>, AppError> {
+    let connection_id = match connection_id {
+        Some(id) => Some(id),
+        None => state
+            .active
+            .read()
+            .await
+            .as_ref()
+            .map(|connection| connection.id.clone()),
+    };
+    let Some(connection_id) = connection_id else {
+        return Ok(None);
+    };
+    let cached_pool = state.pool.read().await;
+    Ok(cached_connection_stats(
+        cached_pool.as_ref(),
+        &connection_id,
+    ))
+}
+
+fn cached_connection_stats(
+    cached_pool: Option<&ActivePool>,
+    connection_id: &str,
+) -> Option<ConnectionStats> {
+    // Reading the status bar must never create a pool or connect to another
+    // saved database. A missing pool is unavailable, not a zero-usage sample.
+    cached_pool
+        .filter(|cached| cached.connection_id == connection_id)
+        .map(|cached| load_connection_stats(&cached.pool))
 }
 
 #[tauri::command]
@@ -1035,5 +1063,35 @@ mod tests {
     fn transaction_connection_must_match_exactly() {
         assert!(check_transaction_connection("source", "source").is_ok());
         assert!(check_transaction_connection("source", "other").is_err());
+    }
+
+    #[test]
+    fn pool_stats_are_bound_to_the_requested_connection_without_connecting() {
+        let pool = create_pool(
+            &ConnectionFields {
+                name: "unused".into(),
+                host: "127.0.0.1".into(),
+                port: 5432,
+                database: "unused".into(),
+                username: "unused".into(),
+                password: None,
+                ssl: false,
+            },
+            5,
+        )
+        .unwrap();
+        let cached = ActivePool {
+            connection_id: "source".into(),
+            pool_size: 5,
+            pool,
+        };
+
+        let stats = cached_connection_stats(Some(&cached), "source").unwrap();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 0);
+        assert_eq!(stats.pool_size, 5);
+        assert!(cached_connection_stats(Some(&cached), "other").is_none());
+        assert!(cached_connection_stats(None, "source").is_none());
+        assert_eq!(cached.pool.status().size, 0);
     }
 }

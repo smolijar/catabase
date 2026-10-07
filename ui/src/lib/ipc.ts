@@ -36,7 +36,7 @@ export const api = {
   applyRowUpdates: (connectionId: string, queryToken: string, updates: RowUpdate[]) =>
     invoke<ApplyUpdatesResult>('apply_row_updates', { connectionId, queryToken, updates }),
   cancelQuery: (queryToken: string) => invoke<CancelResult>('cancel_query', { queryToken }),
-  connectionStats: () => invoke<ConnectionStats>('connection_stats'),
+  connectionStats: (connectionId?: string) => invoke<ConnectionStats | null>('connection_stats', { connectionId }),
   txStatus: () => invoke<TxStatus>('tx_status'),
   txCommit: () => invoke<TxStatus>('tx_commit'),
   txRollback: () => invoke<TxStatus>('tx_rollback'),
