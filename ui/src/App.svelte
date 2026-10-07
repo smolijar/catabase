@@ -7,6 +7,7 @@
   import { onMount, tick } from 'svelte';
   import Dropdown from './components/Dropdown.svelte';
   import ActionMenu from './components/ActionMenu.svelte';
+  import ConnectionCard from './components/ConnectionCard.svelte';
   import ResultsGrid from './components/ResultsGrid.svelte';
   import Modal from './components/Modal.svelte';
   import Icon from './components/Icon.svelte';
@@ -1325,22 +1326,14 @@
             </div>
           {/if}
           {#each connections as connection (connection.id)}
-            <article class:active-card={connection.id === tabConnectionId} class="connection-card">
-              <div class="connection-card-head">
-                <strong>{connection.name}</strong>
-                {#if connection.id === tabConnectionId}<span class="active-badge"><span class="status-dot"></span> This tab</span>{/if}
-              </div>
-              <span class="connection-address">{connection.username}@{connection.host}:{connection.port}/{connection.database}</span>
-              <div class="row-actions">
-                <button disabled={connection.id === tabConnectionId || running || Boolean(connectionMutation)} on:click={() => activateConnection(connection.id)}>
-                  <Icon name="check" size={14} /> {connection.id === tabConnectionId ? 'In use' : 'Use in tab'}
-                </button>
-                <button disabled={running || Boolean(connectionMutation)} on:click={() => editConnection(connection)}><Icon name="edit" size={14} /> Edit</button>
-                <button disabled={running || Boolean(connectionMutation)} class="danger-quiet" aria-label={`Delete ${connection.name}`} title={`Delete ${connection.name}`} on:click={() => deleteConnection(connection.id)}>
-                  <Icon name="trash" size={14} />
-                </button>
-              </div>
-            </article>
+            <ConnectionCard
+              {connection}
+              active={connection.id === tabConnectionId}
+              disabled={running || Boolean(connectionMutation)}
+              onActivate={() => activateConnection(connection.id)}
+              onEdit={() => editConnection(connection)}
+              onDelete={() => deleteConnection(connection.id)}
+            />
           {/each}
         {:else if sidebar === 'schema'}
           <div class="panel-head">
