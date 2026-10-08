@@ -7,6 +7,8 @@
   import 'monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations';
   import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
   import { onDestroy, onMount } from 'svelte';
+  import { sqlCompletionContext } from '../lib/sqlCompletion';
+  import type { SqlCompletionContext } from '../lib/sqlCompletion';
   import type { AiCompletionRequest, ExecutionTarget, SchemaItem, StatementRange } from '../lib/types';
 
   export let value = '';
@@ -116,6 +118,7 @@
       quickSuggestions: { other: true, comments: false, strings: false },
       readOnly,
       suggestOnTriggerCharacters: true,
+      wordBasedSuggestions: 'off',
       scrollBeyondLastLine: false,
       tabCompletion: 'on',
       wordWrap: 'on'
@@ -146,8 +149,11 @@
       triggerCharacters: ['.', ' ', '*'],
       provideCompletionItems: (model, position) => {
         const range = completionRange(model, position);
-        const context = identifierContext(model, position);
-        const suggestions = [...syntaxSuggestions(range), ...reflectionSuggestions(range, context)];
+        const context = sqlCompletionContext(model.getValue(), model.getOffsetAt(position), schemaItems);
+        const suggestions = [
+          ...(context.kind === 'unqualified' ? syntaxSuggestions(range) : []),
+          ...reflectionSuggestions(range, context)
+        ];
         return { suggestions: dedupeSuggestions(suggestions) };
       }
     });
@@ -254,10 +260,12 @@
 
   function reflectionSuggestions(
     range: monaco.IRange,
-    context: { chain: string[]; hasQualifier: boolean }
+    context: SqlCompletionContext
   ): monaco.languages.CompletionItem[] {
-    if (!schemaItems.length) return [];
-    if (context.hasQualifier) return qualifiedReflectionSuggestions(range, context.chain);
+    if (!schemaItems.length || context.kind === 'none') return [];
+    if (context.kind === 'qualified') {
+      return [...tableSuggestions(range, context.tables, false), ...columnSuggestions(range, context.columns)];
+    }
 
     return [
       ...schemaNameSuggestions(range),
@@ -265,22 +273,6 @@
       ...tableSuggestions(range, schemaItems, true),
       ...columnSuggestions(range, schemaItems)
     ];
-  }
-
-  function qualifiedReflectionSuggestions(range: monaco.IRange, chain: string[]): monaco.languages.CompletionItem[] {
-    if (chain.length >= 3) {
-      const schema = chain.at(-3) ?? '';
-      const table = chain.at(-2) ?? '';
-      return columnSuggestions(
-        range,
-        schemaItems.filter((item) => sameIdentifier(item.schema, schema) && sameIdentifier(item.name, table))
-      );
-    }
-
-    const qualifier = chain.at(-2) ?? '';
-    const schemaMatches = schemaItems.filter((item) => sameIdentifier(item.schema, qualifier));
-    const tableMatches = schemaItems.filter((item) => sameIdentifier(item.name, qualifier));
-    return [...tableSuggestions(range, schemaMatches, false), ...columnSuggestions(range, tableMatches)];
   }
 
   function schemaNameSuggestions(range: monaco.IRange): monaco.languages.CompletionItem[] {
@@ -338,34 +330,6 @@
       seen.add(key);
       return true;
     });
-  }
-
-  function identifierContext(
-    model: monaco.editor.ITextModel,
-    position: monaco.Position
-  ): { chain: string[]; hasQualifier: boolean } {
-    const linePrefix = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
-    const prefix = linePrefix.replace(/\*\s*$/, '');
-    const match = prefix.match(
-      /(?:(?:"(?:[^"]|"")*")|(?:[A-Za-z_][\w$]*))(?:\s*\.\s*(?:(?:"(?:[^"]|"")*")|(?:[A-Za-z_][\w$]*)))*\s*\.?\s*$/
-    );
-    const raw = match?.[0]?.trim() ?? '';
-    if (!raw) return { chain: [], hasQualifier: false };
-    return {
-      chain: raw.split('.').map(normalizeIdentifier),
-      hasQualifier: raw.includes('.') || raw.endsWith('.')
-    };
-  }
-
-  function normalizeIdentifier(value: string): string {
-    const trimmed = value.trim();
-    if (!trimmed) return '';
-    if (trimmed.startsWith('"') && trimmed.endsWith('"')) return trimmed.slice(1, -1).replace(/""/g, '"').toLowerCase();
-    return trimmed.toLowerCase();
-  }
-
-  function sameIdentifier(left: string, right: string): boolean {
-    return left.toLowerCase() === right.toLowerCase();
   }
 
   function identifierInsertText(name: string): string {
