@@ -19,7 +19,7 @@ before(async () => {
   const { render } = await server.ssrLoadModule('svelte/server');
   renderCard = (active = false) => render(Card, { props: {
     connection: { id: 'zenbase', name: 'zenbase docker', username: 'zenbase', host: 'localhost', port: 5432, database: 'zenbase' },
-    active, onActivate: () => {}, onEdit: () => {}, onDelete: () => {}
+    active, onActivate: () => {}, onEdit: () => {}, onDelete: () => {}, onDuplicate: () => {}, onCopy: () => {}, onPaste: () => {}
   } }).body;
   renderMenu = (contextOnly) => render(Menu, { props: {
     contextOnly, ariaLabel: 'Actions', items: [{ id: 'edit', label: 'Edit' }]
@@ -41,6 +41,9 @@ test('the row is the only button; its action menu has no visible or keyboard-foc
   assert.doesNotMatch(html, /dropdown-trigger/);
   assert.match(html, /aria-haspopup="menu"/);
   assert.match(html, /Option\/Alt-click, right-click or Shift\+F10/);
+  assert.match(html, /Cmd\/Ctrl\+C to copy/);
+  assert.match(html, /Cmd\/Ctrl\+V to duplicate/);
+  assert.match(html, /data-connection-id="zenbase"/);
 });
 
 test('active connection rows retain an accessible selected state without a second-line badge', () => {
