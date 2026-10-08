@@ -102,6 +102,7 @@
   let resultsHeight = 360;
   let resizingResults = false;
   let showUpdatePreview = false;
+  let discardRunConfirmation: { changeCount: number; resolve: (confirmed: boolean) => void } | null = null;
   let schemaRequest = 0;
 
   let showConnectionModal = false;
@@ -396,7 +397,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.defaultPrevented || closingWorkspace || showConnectionModal || showUpdatePreview) return;
+    if (event.defaultPrevented || closingWorkspace || showConnectionModal || showUpdatePreview || discardRunConfirmation) return;
     const command = event.metaKey || event.ctrlKey;
     if (!command) return;
     if (event.key === 'Enter') {
@@ -504,7 +505,20 @@
     return { session, originalRows: cloneRows(session.data.rows), pendingChanges: [], editMode: false, error: null };
   }
 
+  function confirmDiscardForRun(): Promise<boolean> {
+    return new Promise((resolve) => {
+      discardRunConfirmation = { changeCount: pendingChanges.length, resolve };
+    });
+  }
+
+  function resolveDiscardForRun(confirmed: boolean) {
+    const confirmation = discardRunConfirmation;
+    discardRunConfirmation = null;
+    confirmation?.resolve(confirmed);
+  }
+
   async function runQuery() {
+    if (discardRunConfirmation) return;
     if (connectionMutation) { flash(connectionMutation); return; }
     if (operation) {
       await cancelQuery();
@@ -515,9 +529,16 @@
       return;
     }
     if (!activeConnection) { sidebar = 'connections'; sidebarOpen = true; flash('Choose a connection for this query.'); return; }
-    if (pendingChanges.length && !confirm('Discard staged cell edits and run this query?')) return;
-    const op = beginOperation('query', activeConnection.id);
+    const tabId = activeTab;
+    const connectionId = activeConnection.id;
     const editor = editorRef;
+    if (pendingChanges.length) {
+      if (!await confirmDiscardForRun()) return;
+      await tick();
+      // Never let a delayed confirmation execute against a different tab or connection.
+      if (activeTab !== tabId || tabConnectionId !== connectionId || operation || connectionMutation || closingWorkspace) return;
+    }
+    const op = beginOperation('query', connectionId);
     let target: ExecutionTarget = { sql: sql.trim(), start: 0, end: sql.length };
     statusFlash = 'Running query...';
     try {
@@ -1576,6 +1597,19 @@
       <pre>{generateUpdateSql()}</pre>
       {#if !detectEditTarget()}<p class="context-warning">Apply is unavailable without an unambiguous source table and a complete primary or unique key.</p>{/if}
       <div class="row-actions"><button disabled={running} on:click={() => (showUpdatePreview = false)}>Back to results</button><button class="primary" disabled={!canApplyUpdates()} on:click={applyUpdates}>{running ? 'Applying…' : 'Apply changes'}</button></div>
+    </div>
+  </Modal>
+{/if}
+
+{#if discardRunConfirmation}
+  <Modal label="Discard staged edits?" onClose={() => resolveDiscardForRun(false)}>
+    <div class="modal">
+      <h2>Discard staged edits?</h2>
+      <p>You have {discardRunConfirmation.changeCount} staged {discardRunConfirmation.changeCount === 1 ? 'cell edit' : 'cell edits'}. Running a new query will replace this result set and discard these changes. They have not been saved to the database.</p>
+      <div class="row-actions">
+        <button on:click={() => resolveDiscardForRun(false)}>Keep editing</button>
+        <button class="danger-quiet" on:click={() => resolveDiscardForRun(true)}>Discard edits and run</button>
+      </div>
     </div>
   </Modal>
 {/if}
