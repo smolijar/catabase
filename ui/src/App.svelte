@@ -8,6 +8,7 @@
   import Dropdown from './components/Dropdown.svelte';
   import ActionMenu from './components/ActionMenu.svelte';
   import ConnectionCard from './components/ConnectionCard.svelte';
+  import ConnectionPill from './components/ConnectionPill.svelte';
   import ResultsGrid from './components/ResultsGrid.svelte';
   import Modal from './components/Modal.svelte';
   import Icon from './components/Icon.svelte';
@@ -15,6 +16,8 @@
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
+  import { createConnectionTester } from './lib/connectionTest';
+  import type { ConnectionTestState } from './lib/connectionTest';
   import { assessRowEditing, buildRowUpdates, originalEditColumns } from './lib/rowEditing';
   import type { EditTarget } from './lib/rowEditing';
   import { canUseResult, createDraftWriter, createQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
@@ -80,6 +83,11 @@
   let pendingChanges: PendingChange[] = [];
 
   let connections: ConnectionRecord[] = [];
+  let connectionTests: Record<string, ConnectionTestState | null> = {};
+  const connectionTester = createConnectionTester(
+    (id, state) => { connectionTests = { ...connectionTests, [id]: state }; },
+    errorMessage
+  );
   let settings: Settings = { poolSize: 5, aiModel: null };
   let poolStats: ConnectionStats | null = null;
   let poolStatsConnectionId: string | null = null;
@@ -683,6 +691,7 @@
       // Keep the lock until the actual write finishes; timing out an IPC promise
       // would leave its uncancelled write racing a subsequent query.
       const saved = await api.saveConnection(connectionForm);
+      connectionTester.invalidate(saved.id);
       await loadConnections();
       // A reused ID may now point at a different database. Never apply or replay
       // results obtained using its previous configuration.
@@ -707,6 +716,11 @@
 
   async function activateConnection(id: string) {
     if (operation || connectionMutation) { flash('Wait for the current operation before switching connections.'); return; }
+    const connection = connections.find((candidate) => candidate.id === id);
+    if (!connection) return;
+    // A double-click on the current connection is a retry, not a switch: keep
+    // its result set, staged edits, pool and manual transaction intact.
+    if (tabConnectionId === id) { void testSavedConnection(connection); return; }
     if (pendingChanges.length && !confirm('Discard staged edits before changing this tab’s connection?')) return;
     const initiatingTab = activeTab;
     const current = snapshotActive();
@@ -714,13 +728,14 @@
     connectionMutation = 'Switching connection…';
     try {
       const active = await api.activateConnection(id);
-      await loadConnections();
       patchTab(initiatingTab, {
         connectionId: id,
         pendingChanges: [],
         editMode: false,
         session: current.session ? { ...current.session, data: { ...current.session.data, rows: cloneRows(current.originalRows) } } : null
       });
+      void testSavedConnection(active);
+      await loadConnections();
       poolStats = null;
       flash(`Using ${active.name}.`);
       void refreshTxStatus();
@@ -732,12 +747,23 @@
     }
   }
 
+  function testSavedConnection(connection: ConnectionRecord) {
+    return connectionTester.test(connection.id, () => withTimeout(
+      api.testConnection(connection), 12000, 'Connection test timed out.'
+    ));
+  }
+
+  function testCurrentConnection() {
+    if (activeConnection && !connectionMutation) void testSavedConnection(activeConnection);
+  }
+
   async function deleteConnection(id: string) {
     if (operation || connectionMutation) return;
     if (!confirm('Delete this connection?')) return;
     connectionMutation = 'Deleting connection…';
     try {
       await api.deleteConnection(id);
+      connectionTester.invalidate(id);
       await loadConnections();
       if (tabConnectionId === id) { tabConnectionId = null; poolStats = null; }
       void refreshTxStatus();
@@ -1245,15 +1271,13 @@
       <span>{connectionMutation ? 'Please wait…' : operation?.cancelling ? 'Cancelling…' : running ? 'Cancel' : 'Run'}</span>
       <kbd>⌘↵</kbd>
     </button>
-    <button
-      class="chip connection-chip"
-      class:connected={Boolean(activeConnection)}
-      on:click={() => { sidebar = 'connections'; sidebarOpen = true; }}
-      title="Choose this tab’s database connection"
-    >
-      <span class="status-dot"></span>
-      {activeConnection ? activeConnection.name : 'Choose connection'}
-    </button>
+    <ConnectionPill
+      connection={activeConnection}
+      state={activeConnection ? connectionTests[activeConnection.id] ?? null : null}
+      disabled={Boolean(connectionMutation)}
+      onTest={testCurrentConnection}
+      onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }}
+    />
     {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : 'Exporting'} · {runningDuration} · {tabs.find((tab) => tab.id === operation?.tabId)?.title}</button>{/if}
     {#if connectionMutation}<span class="operation-status" role="status">{connectionMutation}</span>{/if}
     <div class="toolbar-spacer"></div>
