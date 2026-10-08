@@ -1,18 +1,20 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::{CoreError, PgClient};
+use crate::{CoreError, PgClient, RowKey, row_keys::load_row_keys};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RowUpdate {
     pub schema: String,
     pub table: String,
+    #[serde(default)]
+    pub key_columns: Vec<String>,
     pub values: Map<String, Value>,
     pub original: Map<String, Value>,
 }
@@ -26,7 +28,6 @@ pub struct ApplyUpdatesResult {
 
 #[derive(Clone, Debug)]
 struct EditableColumn {
-    primary_key: bool,
     generated: bool,
     json_type: Option<&'static str>,
 }
@@ -35,6 +36,7 @@ struct EditableColumn {
 struct PreparedUpdate {
     sql: String,
     json_parameters: Vec<Option<String>>,
+    original: Map<String, Value>,
 }
 
 /// Apply a batch atomically. An existing user transaction is preserved with a
@@ -122,10 +124,8 @@ async fn apply_batch(
         if !tables.contains_key(&table_key) {
             let rows = client
                 .query(
-                    "SELECT a.attname, a.attgenerated <> '', EXISTS (
-                    SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid
-                    AND i.indisprimary AND a.attnum = ANY(i.indkey)
-                 ), a.atttypid = 'pg_catalog.json'::regtype, a.atttypid = 'pg_catalog.jsonb'::regtype
+                    "SELECT a.attname, a.attgenerated <> '',
+                 a.atttypid = 'pg_catalog.json'::regtype, a.atttypid = 'pg_catalog.jsonb'::regtype, c.oid
                  FROM pg_class c
                  JOIN pg_namespace n ON n.oid = c.relnamespace
                  JOIN pg_attribute a ON a.attrelid = c.oid
@@ -134,6 +134,12 @@ async fn apply_batch(
                     &[&update.schema, &update.table],
                 )
                 .await?;
+            let table_oids = rows
+                .first()
+                .map(|row| row.get::<_, u32>(4))
+                .into_iter()
+                .collect::<Vec<_>>();
+            let keys = load_row_keys(client, &table_oids).await?;
             let columns = rows
                 .into_iter()
                 .map(|row| {
@@ -141,10 +147,9 @@ async fn apply_batch(
                         row.get::<_, String>(0),
                         EditableColumn {
                             generated: row.get(1),
-                            primary_key: row.get(2),
-                            json_type: if row.get(3) {
+                            json_type: if row.get(2) {
                                 Some("json")
-                            } else if row.get(4) {
+                            } else if row.get(3) {
                                 Some("jsonb")
                             } else {
                                 None
@@ -153,13 +158,13 @@ async fn apply_batch(
                     )
                 })
                 .collect::<HashMap<_, _>>();
-            tables.insert(table_key.clone(), columns);
+            tables.insert(table_key.clone(), (columns, keys));
         }
-        let columns = &tables[&table_key];
-        let prepared = build_update_sql(update, columns)?;
+        let (columns, keys) = &tables[&table_key];
+        let prepared = build_update_sql(update, columns, keys)?;
         check_cancelled(cancelled)?;
         let values = Value::Object(update.values.clone());
-        let original = Value::Object(update.original.clone());
+        let original = Value::Object(prepared.original.clone());
         let mut parameters: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
             vec![&values, &original];
         parameters.extend(
@@ -187,6 +192,7 @@ fn ensure_one_row(affected: u64, index: usize) -> Result<(), CoreError> {
 fn build_update_sql(
     update: &RowUpdate,
     columns: &HashMap<String, EditableColumn>,
+    keys: &[RowKey],
 ) -> Result<PreparedUpdate, CoreError> {
     if columns.is_empty() {
         return Err(CoreError::message(
@@ -196,17 +202,22 @@ fn build_update_sql(
     if update.values.is_empty() {
         return Err(CoreError::message("No changed values were provided."));
     }
-    let primary_keys = columns
-        .iter()
-        .filter(|(_, column)| column.primary_key)
-        .collect::<Vec<_>>();
-    if primary_keys.is_empty()
-        || primary_keys
-            .iter()
-            .any(|(name, _)| update.original.get(*name).is_none_or(Value::is_null))
-    {
+    let key = keys.iter().find(|key| {
+        key.schema == update.schema && key.table == update.table
+            && !key.columns.is_empty()
+            && key.columns.len() == update.key_columns.len()
+            && key.columns.iter().all(|name| update.key_columns.contains(name))
+    }).ok_or_else(|| CoreError::message(
+        "Editing requires a complete primary key or usable unique key in the result. Include every key column and run the query again."
+    ))?;
+    if key.columns.iter().any(|name| {
+        update
+            .original
+            .get(name)
+            .is_none_or(|value| value.is_null() && (key.primary_key || !key.nulls_not_distinct))
+    }) {
         return Err(CoreError::message(
-            "Editing requires every primary-key column in the result. Include the complete primary key and run the query again.",
+            "The selected row key is missing a value or contains NULL without NULLS NOT DISTINCT uniqueness. Refresh the result before editing.",
         ));
     }
     for name in update.original.keys().chain(update.values.keys()) {
@@ -249,16 +260,28 @@ fn build_update_sql(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let predicates = update.original.keys().map(|name| {
+    let predicate_names = key
+        .columns
+        .iter()
+        .chain(update.values.keys())
+        .collect::<BTreeSet<_>>();
+    let predicates = predicate_names.iter().map(|name| {
         let quoted = quote_ident(name);
-        if let Some(json_type) = columns[name].json_type {
-            json_parameters.push(json_parameter(&update.original[name]));
+        let is_key = key.columns.contains(name);
+        if is_key && update.original[*name].is_null() {
+            return format!("target.{quoted} IS NULL");
+        }
+        if let Some(json_type) = columns[*name].json_type {
+            json_parameters.push(json_parameter(&update.original[*name]));
+            if is_key {
+                return format!("target.{quoted} = (${}::text)::{json_type}", json_parameters.len() + 2);
+            }
             return format!("to_jsonb(target.{quoted}) IS NOT DISTINCT FROM to_jsonb((${}::text)::{json_type})", json_parameters.len() + 2);
         }
-        // Primary-key comparisons retain their indexable native types. JSONB
-        // comparison also supports json columns, which lack an equality operator.
-        if columns[name].primary_key {
-            format!("target.{quoted} IS NOT DISTINCT FROM original_values.{quoted}")
+        // Key comparisons retain their indexable native types. Only edited
+        // non-key cells need an optimistic stale-value check.
+        if is_key {
+            format!("target.{quoted} = original_values.{quoted}")
         } else {
             format!("to_jsonb(target.{quoted}) IS NOT DISTINCT FROM to_jsonb(original_values.{quoted})")
         }
@@ -268,6 +291,10 @@ fn build_update_sql(
             "UPDATE {table} AS target SET {assignments} FROM jsonb_populate_record(NULL::{table}, $1::jsonb) AS new_values, jsonb_populate_record(NULL::{table}, $2::jsonb) AS original_values WHERE {predicates}"
         ),
         json_parameters,
+        original: predicate_names
+            .into_iter()
+            .map(|name| (name.clone(), update.original[name].clone()))
+            .collect(),
     })
 }
 
@@ -290,17 +317,16 @@ mod tests {
 
     fn columns() -> HashMap<String, EditableColumn> {
         [
-            ("id", true, false),
-            ("tenant_id", true, false),
-            ("note", false, false),
-            ("calculated", false, true),
+            ("id", false),
+            ("tenant_id", false),
+            ("note", false),
+            ("calculated", true),
         ]
         .into_iter()
-        .map(|(name, primary_key, generated)| {
+        .map(|(name, generated)| {
             (
                 name.to_string(),
                 EditableColumn {
-                    primary_key,
                     generated,
                     json_type: None,
                 },
@@ -309,10 +335,21 @@ mod tests {
         .collect()
     }
 
+    fn keys() -> Vec<RowKey> {
+        vec![RowKey {
+            schema: "odd\"schema".into(),
+            table: "orders".into(),
+            columns: vec!["id".into(), "tenant_id".into()],
+            primary_key: true,
+            nulls_not_distinct: false,
+        }]
+    }
+
     fn update() -> RowUpdate {
         RowUpdate {
             schema: "odd\"schema".into(),
             table: "orders".into(),
+            key_columns: vec!["id".into(), "tenant_id".into()],
             values: json!({"note": "'; DROP TABLE orders; --"})
                 .as_object()
                 .unwrap()
@@ -326,13 +363,15 @@ mod tests {
 
     #[test]
     fn update_sql_keeps_values_parameterized_and_identifiers_quoted() {
-        let sql = build_update_sql(&update(), &columns()).unwrap().sql;
+        let sql = build_update_sql(&update(), &columns(), &keys())
+            .unwrap()
+            .sql;
         assert!(sql.starts_with("UPDATE \"odd\"\"schema\".\"orders\""));
         assert!(!sql.contains("DROP TABLE"));
         assert!(!sql.contains("9223372036854775807"));
         assert!(sql.contains("$1::jsonb"));
         assert!(sql.contains("$2::jsonb"));
-        assert!(sql.contains("target.\"id\" IS NOT DISTINCT FROM original_values.\"id\""));
+        assert!(sql.contains("target.\"id\" = original_values.\"id\""));
         assert!(sql.contains(
             "to_jsonb(target.\"note\") IS NOT DISTINCT FROM to_jsonb(original_values.\"note\")"
         ));
@@ -341,17 +380,17 @@ mod tests {
     #[test]
     fn rejects_partial_primary_keys_generated_and_unknown_columns() {
         let mut row = update();
-        row.original.remove("tenant_id");
+        row.key_columns.pop();
         assert!(
-            build_update_sql(&row, &columns())
+            build_update_sql(&row, &columns(), &keys())
                 .unwrap_err()
                 .to_string()
-                .contains("primary-key")
+                .contains("complete primary key")
         );
         row = update();
         row.values.insert("calculated".into(), json!(10));
         assert!(
-            build_update_sql(&row, &columns())
+            build_update_sql(&row, &columns(), &keys())
                 .unwrap_err()
                 .to_string()
                 .contains("Generated")
@@ -359,7 +398,7 @@ mod tests {
         row = update();
         row.values.insert("unknown".into(), json!(10));
         assert!(
-            build_update_sql(&row, &columns())
+            build_update_sql(&row, &columns(), &keys())
                 .unwrap_err()
                 .to_string()
                 .contains("Unknown")
@@ -380,7 +419,6 @@ mod tests {
         metadata.insert(
             "payload".into(),
             EditableColumn {
-                primary_key: false,
                 generated: false,
                 json_type: Some("jsonb"),
             },
@@ -391,7 +429,7 @@ mod tests {
             .insert("payload".into(), Value::String(raw.into()));
         row.original
             .insert("payload".into(), Value::String("null".into()));
-        let prepared = build_update_sql(&row, &metadata).unwrap();
+        let prepared = build_update_sql(&row, &metadata, &keys()).unwrap();
         assert!(prepared.sql.contains("\"payload\" = ($3::text)::jsonb"));
         assert!(prepared.sql.contains("to_jsonb(($4::text)::jsonb)"));
         assert_eq!(
@@ -400,8 +438,61 @@ mod tests {
         );
         row.values.insert("payload".into(), Value::Null);
         assert_eq!(
-            build_update_sql(&row, &metadata).unwrap().json_parameters[0],
+            build_update_sql(&row, &metadata, &keys())
+                .unwrap()
+                .json_parameters[0],
             None
         );
+    }
+
+    #[test]
+    fn ignores_unmodified_columns_but_guards_every_changed_cell() {
+        let mut row = update();
+        // This value must not be fed into jsonb_populate_record or the WHERE.
+        row.original
+            .insert("calculated".into(), json!("<unsupported>"));
+        let prepared = build_update_sql(&row, &columns(), &keys()).unwrap();
+        assert!(!prepared.sql.contains("calculated"));
+        assert!(!prepared.original.contains_key("calculated"));
+        assert_eq!(prepared.original.len(), 3);
+        row.values.insert("id".into(), json!("42"));
+        let prepared = build_update_sql(&row, &columns(), &keys()).unwrap();
+        assert_eq!(prepared.original["id"], "9223372036854775807");
+        assert_eq!(prepared.sql.matches("target.\"id\"").count(), 1);
+        row.original.remove("note");
+        assert!(
+            build_update_sql(&row, &columns(), &keys())
+                .unwrap_err()
+                .to_string()
+                .contains("Missing original")
+        );
+    }
+
+    #[test]
+    fn unique_keys_are_authoritative_and_nulls_require_non_distinct_uniqueness() {
+        let mut row = update();
+        row.key_columns = vec!["note".into()];
+        let mut key = keys().remove(0);
+        key.columns = row.key_columns.clone();
+        key.primary_key = false;
+        assert!(build_update_sql(&row, &columns(), &keys()).is_err());
+        assert!(build_update_sql(&row, &columns(), &[key.clone()]).is_err());
+        key.nulls_not_distinct = true;
+        let prepared = build_update_sql(&row, &columns(), &[key.clone()]).unwrap();
+        assert!(prepared.sql.contains("target.\"note\" IS NULL"));
+        assert!(!prepared.sql.contains("target.\"id\""));
+        row.original.insert("note".into(), json!("unique value"));
+        key.nulls_not_distinct = false;
+        assert!(
+            build_update_sql(&row, &columns(), &[key.clone()])
+                .unwrap()
+                .sql
+                .contains("target.\"note\" = original_values.\"note\"")
+        );
+        key.table = "other".into();
+        assert!(build_update_sql(&row, &columns(), &[key]).is_err());
+        row = update();
+        row.original.remove("tenant_id");
+        assert!(build_update_sql(&row, &columns(), &keys()).is_err());
     }
 }

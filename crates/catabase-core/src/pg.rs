@@ -16,7 +16,7 @@ use tokio_postgres::{
 use tokio_postgres_rustls::MakeRustlsConnect;
 use uuid::Uuid;
 
-use crate::{ConnectionFields, CoreError, sql::auto_limit_sql};
+use crate::{ConnectionFields, CoreError, RowKey, row_keys::load_row_keys, sql::auto_limit_sql};
 
 pub type PgClient = TokioPgClient;
 pub type PgPool = Pool;
@@ -45,6 +45,8 @@ pub struct ColumnMeta {
 #[serde(rename_all = "camelCase")]
 pub struct QueryResult {
     pub columns: Vec<ColumnMeta>,
+    #[serde(default)]
+    pub row_keys: Vec<RowKey>,
     pub rows: Vec<Value>,
     pub row_count: usize,
     pub duration_ms: u128,
@@ -175,6 +177,14 @@ pub async fn execute_on_client_cancellable(
     check_query_cancelled(cancelled)?;
     let columns = column_metas(client, statement.columns(), cancelled).await?;
     check_query_cancelled(cancelled)?;
+    let table_oids = columns
+        .iter()
+        .filter_map(|column| column.table_oid)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let row_keys = load_row_keys(client, &table_oids).await?;
+    check_query_cancelled(cancelled)?;
     let mut rows = client.query(&statement, &[]).await?;
     let mut has_more = false;
     if auto_limited && rows.len() > requested_page {
@@ -186,6 +196,7 @@ pub async fn execute_on_client_cancellable(
     Ok(QueryResult {
         row_count: rows.len(),
         columns,
+        row_keys,
         rows,
         duration_ms: start.elapsed().as_millis(),
         auto_limited,
@@ -429,6 +440,7 @@ async fn execute_simple(
     Ok(QueryResult {
         row_count: rows.len(),
         columns,
+        row_keys: Vec::new(),
         rows,
         duration_ms: start.elapsed().as_millis(),
         auto_limited: false,
@@ -838,6 +850,7 @@ mod numeric_tests {
         }))
         .unwrap();
         assert!(!result.json_values_as_text);
+        assert!(result.row_keys.is_empty());
         assert_eq!(result.rows[0]["payload"], "null");
     }
 
