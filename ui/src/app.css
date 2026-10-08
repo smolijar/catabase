@@ -333,10 +333,21 @@ button.chip {
 }
 
 .workspace {
+  position: relative;
   display: grid;
-  grid-template-columns: 58px auto minmax(0, 1fr);
+  grid-template-columns: 58px minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
+}
+
+.workspace.sidebar-open {
+  grid-template-columns: 58px var(--sidebar-width, 340px) 7px minmax(0, 1fr);
+}
+
+.workspace.resizing-sidebar,
+.workspace.resizing-sidebar * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .icon-strip {
@@ -398,6 +409,11 @@ button.chip {
   border-right: 1px solid #1e2b44;
   background: #0d1625;
   padding: 1rem 0.9rem;
+}
+
+.workspace > .sidebar {
+  width: 100%;
+  min-width: 0;
 }
 
 .sidebar.connections-sidebar {
@@ -675,7 +691,7 @@ button.chip {
 }
 
 .main-pane {
-  grid-column: 3;
+  grid-column: -2;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 40px minmax(180px, 1fr) 7px minmax(220px, min(var(--results-height, 360px), calc(100vh - 310px)));
@@ -1193,17 +1209,18 @@ th small {
     padding: 0.5rem;
   }
 
-  .workspace {
+  .workspace,
+  .workspace.sidebar-open {
     grid-template-columns: 58px minmax(0, 1fr);
   }
 
-  .sidebar {
+  .workspace > .sidebar {
     position: absolute;
     z-index: 5;
     left: 58px;
-    top: 58px;
-    bottom: 34px;
-    width: min(360px, calc(100vw - 58px));
+    top: 0;
+    bottom: 0;
+    width: var(--sidebar-width, 340px);
     background: #0b1324;
   }
 
