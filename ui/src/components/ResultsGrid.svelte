@@ -438,8 +438,8 @@
   td { background: #151b25; }
   tr.alternate td { background: #19202b; }
   td.selected, tr.alternate td.selected { background: #2a4264; }
-  td.changed { box-shadow: inset 3px 0 #f0c56b; }
   .cell { display: block; width: 100%; height: 32px; min-height: 32px; padding: 7px 10px; overflow: hidden; text-overflow: ellipsis; border: 0; border-radius: 0; background: transparent; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 400; line-height: 17px; white-space: nowrap; user-select: none; }
+  td.changed .cell { box-shadow: inset 3px 0 #f0c56b; }
   .spacer-row td { padding: 0; border: 0; background: #151b25; }
   .cell:hover:not(:disabled) { background: #26364b; }
   .cell:active:not(:disabled) { transform: none; }
