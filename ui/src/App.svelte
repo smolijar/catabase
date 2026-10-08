@@ -1323,7 +1323,7 @@
     </aside>
 
     {#if sidebarOpen}
-      <aside class="sidebar">
+      <aside class="sidebar" class:connections-sidebar={sidebar === 'connections'}>
         {#if sidebar === 'connections'}
           <div class="panel-head">
             <div>
@@ -1339,17 +1339,22 @@
               <p>Add a PostgreSQL connection to start querying.</p>
               <button class="primary" disabled={running || Boolean(connectionMutation)} on:click={openNewConnection}><Icon name="plus" size={15} /> Add connection</button>
             </div>
+          {:else}
+            <ul class="connection-list" aria-label="Saved connections">
+              {#each connections as connection (connection.id)}
+                <li>
+                  <ConnectionCard
+                    {connection}
+                    active={connection.id === tabConnectionId}
+                    disabled={running || Boolean(connectionMutation)}
+                    onActivate={() => activateConnection(connection.id)}
+                    onEdit={() => editConnection(connection)}
+                    onDelete={() => deleteConnection(connection.id)}
+                  />
+                </li>
+              {/each}
+            </ul>
           {/if}
-          {#each connections as connection (connection.id)}
-            <ConnectionCard
-              {connection}
-              active={connection.id === tabConnectionId}
-              disabled={running || Boolean(connectionMutation)}
-              onActivate={() => activateConnection(connection.id)}
-              onEdit={() => editConnection(connection)}
-              onDelete={() => deleteConnection(connection.id)}
-            />
-          {/each}
         {:else if sidebar === 'schema'}
           <div class="panel-head">
             <div>

@@ -5,6 +5,7 @@
   export let label = 'More';
   export let disabled = false;
   export let iconOnly = false;
+  export let contextOnly = false;
   export let items: Array<{ id: string; label: string; disabled?: boolean; danger?: boolean }>;
   export let onSelect: (id: string) => void = () => {};
   let dropdown: Dropdown;
@@ -23,6 +24,7 @@
   {ariaLabel}
   {disabled}
   {iconOnly}
+  hideTrigger={contextOnly}
   compact
   menuMode
   triggerLabel={label}
