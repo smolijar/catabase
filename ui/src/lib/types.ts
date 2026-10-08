@@ -123,6 +123,15 @@ export interface SchemaItem {
   name: string;
   kind: string;
   columns: SchemaColumn[];
+  foreignKeys?: SchemaForeignKey[];
+}
+
+export interface SchemaForeignKey {
+  name: string;
+  columns: string[];
+  referencedSchema: string;
+  referencedTable: string;
+  referencedColumns: string[];
 }
 
 export interface SchemaTree {
