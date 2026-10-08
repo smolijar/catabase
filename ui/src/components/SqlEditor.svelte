@@ -7,7 +7,7 @@
   import 'monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations';
   import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
   import { onDestroy, onMount } from 'svelte';
-  import { sqlCompletionContext } from '../lib/sqlCompletion';
+  import { sqlCompletionContext, sqlJoinSuggestions } from '../lib/sqlCompletion';
   import type { SqlCompletionContext } from '../lib/sqlCompletion';
   import type { AiCompletionRequest, ExecutionTarget, SchemaItem, StatementRange } from '../lib/types';
 
@@ -128,8 +128,16 @@
     subscription = editor.onDidChangeModelContent((event) => {
       const next = editor?.getValue() ?? '';
       if (next !== value) value = next;
-      if (!event.isFlush && event.changes.some((change) => shouldTriggerSuggest(change.text))) {
-        window.setTimeout(triggerSuggest, 0);
+      const suggest = !event.isFlush && event.changes.some((change) => shouldTriggerSuggest(change.text));
+      const checkJoin = !event.isFlush && event.changes.some((change) => /\s$/.test(change.text));
+      if (suggest || checkJoin) {
+        window.setTimeout(() => {
+          const model = editor?.getModel();
+          const position = editor?.getPosition();
+          if (suggest || (model && position && sqlJoinSuggestions(model.getValue(), model.getOffsetAt(position), schemaItems).length)) {
+            triggerSuggest();
+          }
+        }, 0);
       }
     });
 
@@ -150,7 +158,21 @@
       provideCompletionItems: (model, position) => {
         const range = completionRange(model, position);
         const context = sqlCompletionContext(model.getValue(), model.getOffsetAt(position), schemaItems);
-        const suggestions = [
+        const joins = context.kind === 'unqualified'
+          ? sqlJoinSuggestions(model.getValue(), model.getOffsetAt(position), schemaItems) : [];
+        const suggestions = joins.length ? joins.map((join, index) => {
+          const start = model.getPositionAt(join.replaceStart);
+          const end = model.getPositionAt(join.replaceEnd);
+          return {
+            label: join.label,
+            insertText: join.insertText,
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            detail: 'Foreign key',
+            documentation: join.detail,
+            range: new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column),
+            sortText: `0_join_${index.toString().padStart(3, '0')}`
+          };
+        }) : [
           ...(context.kind === 'unqualified' ? syntaxSuggestions(range) : []),
           ...reflectionSuggestions(range, context)
         ];

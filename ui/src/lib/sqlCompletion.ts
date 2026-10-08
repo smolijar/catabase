@@ -1,4 +1,4 @@
-import type { SchemaItem } from './types';
+import type { SchemaForeignKey, SchemaItem } from './types';
 
 type Token = {
   kind: 'identifier' | 'symbol' | 'opaque';
@@ -13,10 +13,107 @@ export type SqlCompletionContext =
   | { kind: 'none' | 'unqualified' }
   | { kind: 'qualified'; tables: SchemaItem[]; columns: SchemaItem[] };
 
+export interface SqlJoinSuggestion {
+  label: string;
+  insertText: string;
+  detail: string;
+  replaceStart: number;
+  replaceEnd: number;
+}
+
+type Relation = {
+  alias: string;
+  qualifier: string;
+  items: SchemaItem[];
+  introducer: Token;
+  end: number;
+  joinable: boolean;
+};
+
 const RESERVED = new Set(`select from where join left right full inner outer cross natural on using
   group order by having limit offset fetch for union intersect except all distinct as with recursive
   insert into update delete set values returning window over partition only lateral tablesample
   and or not null is in exists case when then else end asc desc nulls first last`.split(/\s+/));
+
+const RESERVED_IDENTIFIERS = new Set([...RESERVED, ...`all analyse analyze array asymmetric authorization
+  binary both cast check collate collation column concurrently constraint current_catalog current_date
+  current_role current_schema current_time current_timestamp current_user default deferrable do false
+  foreign freeze grant isnull leading localtime localtimestamp notnull overlaps placing primary
+  references session_user some symmetric table trailing true unique user variadic verbose`.split(/\s+/)]);
+
+function sqlIdentifier(name: string, quoted = false): string {
+  return !quoted && /^[a-z_][a-z0-9_$]*$/.test(name) && !RESERVED_IDENTIFIERS.has(name)
+    ? name : `"${name.replaceAll('"', '""')}"`;
+}
+
+/** Offer complete predicates only for catalog-declared foreign keys, never naming heuristics. */
+export function sqlJoinSuggestions(sql: string, offset: number, items: SchemaItem[]): SqlJoinSuggestion[] {
+  const cursor = Math.max(0, Math.min(offset, sql.length));
+  const { tokens, scope } = tokenize(sql, cursor);
+  if (tokens.some((token) => token.kind === 'opaque' && token.start < cursor && cursor <= token.end)) return [];
+  const visible = currentStatement(tokens, sql, cursor)
+    .filter((token) => token.kind !== 'opaque' && sameScope(token.scope, scope));
+  const relations = relationDefinitions(visible, items, cursor);
+  const target = relations.filter((relation) => relation.introducer.start < cursor).at(-1);
+  if (!target?.joinable || target.items.length !== 1 || target.end >= cursor) return [];
+  const uniqueAlias = (relation: Relation) => relations.filter((other) => other.alias === relation.alias).length === 1;
+  if (!uniqueAlias(target)) return [];
+
+  const tail = visible.filter((token) => token.start >= target.end && token.start < cursor);
+  let includeOn = true;
+  let replaceStart = cursor;
+  let replaceEnd = cursor;
+  if (!tail.length) {
+    if (!/^\s+$/.test(sql.slice(target.end, cursor))) return [];
+    // Do not add a second predicate ahead of an existing ON/USING clause.
+    const following = visible.find((token) => token.start >= cursor);
+    if (isWord(following, 'on') || isWord(following, 'using')) return [];
+  } else if (tail.length === 1 && tail[0].kind === 'identifier' && !tail[0].quoted) {
+    const word = sql.slice(tail[0].start, Math.min(cursor, tail[0].end)).toLowerCase();
+    if (word !== 'o' && word !== 'on') return [];
+    if (!/^\s+$/.test(sql.slice(target.end, tail[0].start))) return [];
+    if (cursor > tail[0].end) {
+      if (word !== 'on' || !/^\s+$/.test(sql.slice(tail[0].end, cursor))) return [];
+      includeOn = false;
+    } else {
+      replaceStart = tail[0].start;
+      replaceEnd = tail[0].end;
+    }
+    const following = visible.find((token) => token.start >= Math.max(cursor, tail[0].end));
+    if (following && !['where', 'group', 'order', 'limit', 'join', 'left', 'right', 'inner', 'full'].some((word) => isWord(following, word))) return [];
+  } else return [];
+
+  const joined = target.items[0];
+  const suggestions: SqlJoinSuggestion[] = [];
+  const seen = new Set<string>();
+  function add(owner: SchemaItem, fk: SchemaForeignKey, previous: Relation, reverse: boolean) {
+    const prior = previous.items[0];
+    const referenced = reverse ? joined : prior;
+    if (fk.referencedSchema !== referenced.schema || fk.referencedTable !== referenced.name
+      || !fk.columns.length || fk.columns.length !== fk.referencedColumns.length
+      || !fk.columns.every((name) => owner.columns.some((column) => column.name === name))
+      || !fk.referencedColumns.every((name) => referenced.columns.some((column) => column.name === name))) return;
+    const joinedColumns = reverse ? fk.referencedColumns : fk.columns;
+    const previousColumns = reverse ? fk.columns : fk.referencedColumns;
+    const condition = joinedColumns.map((column, index) =>
+      `${target!.qualifier}.${sqlIdentifier(column)} = ${previous.qualifier}.${sqlIdentifier(previousColumns[index])}`
+    ).join(' and ');
+    if (seen.has(condition)) return;
+    seen.add(condition);
+    suggestions.push({
+      label: includeOn ? `on ${condition}` : condition,
+      insertText: `${includeOn ? 'on ' : ''}${condition}`,
+      detail: `Foreign key ${owner.schema}.${owner.name} · ${fk.name}`,
+      replaceStart, replaceEnd
+    });
+  }
+  for (const previous of relations.slice(0, relations.indexOf(target))) {
+    if (previous.items.length !== 1 || !uniqueAlias(previous)) continue;
+    for (const fk of joined.foreignKeys ?? []) add(joined, fk, previous, false);
+    for (const fk of previous.items[0].foreignKeys ?? []) add(previous.items[0], fk, previous, true);
+  }
+  return suggestions;
+}
 
 /** Resolve the qualifier at the cursor without treating SQL literals or sibling queries as aliases. */
 export function sqlCompletionContext(sql: string, offset: number, items: SchemaItem[]): SqlCompletionContext {
@@ -95,6 +192,14 @@ function currentStatement(tokens: Token[], sql: string, cursor: number): Token[]
 
 function relationBindings(tokens: Token[], items: SchemaItem[], cursor: number): Map<string, SchemaItem[]> {
   const bindings = new Map<string, SchemaItem[]>();
+  for (const relation of relationDefinitions(tokens, items, cursor)) {
+    bindings.set(relation.alias, bindings.has(relation.alias) ? [] : relation.items);
+  }
+  return bindings;
+}
+
+function relationDefinitions(tokens: Token[], items: SchemaItem[], cursor: number): Relation[] {
+  const relations: Relation[] = [];
   const ctes = new Set<string>();
   if (isWord(tokens[0], 'with')) {
     for (let i = 1; i < tokens.length; i++) {
@@ -121,9 +226,12 @@ function relationBindings(tokens: Token[], items: SchemaItem[], cursor: number):
     let next = i + 1;
     while (isWord(tokens[next], 'only') || isWord(tokens[next], 'lateral')) next++;
     const name: string[] = [];
+    let tableToken: Token | undefined;
     if (tokens[next]?.kind === 'identifier') {
+      tableToken = tokens[next];
       name.push(tokens[next++].value);
       while (isSymbol(tokens[next], '.') && tokens[next + 1]?.kind === 'identifier') {
+        tableToken = tokens[next + 1];
         name.push(tokens[next + 1].value);
         next += 2;
       }
@@ -144,15 +252,22 @@ function relationBindings(tokens: Token[], items: SchemaItem[], cursor: number):
     const explicitAlias = isWord(tokens[next], 'as');
     if (explicitAlias) next++;
     const alias = tokens[next];
-    const aliasName = alias?.kind === 'identifier' && (alias.quoted || !RESERVED.has(alias.value))
-      ? alias.value : !derived && !explicitAlias ? table : undefined;
+    const hasAlias = alias?.kind === 'identifier' && (alias.quoted || !RESERVED.has(alias.value));
+    const aliasName = hasAlias ? alias.value : !derived && !explicitAlias ? table : undefined;
     if (aliasName) {
-      // An ambiguous alias must not offer columns from an arbitrary relation.
-      const renamedColumns = alias?.kind === 'identifier' && isSymbol(tokens[next + 1], '(');
-      bindings.set(aliasName, bindings.has(aliasName) || renamedColumns ? [] : matches);
+      const renamedColumns = hasAlias && isSymbol(tokens[next + 1], '(');
+      relations.push({
+        alias: aliasName,
+        qualifier: sqlIdentifier(aliasName, hasAlias ? alias.quoted : tableToken?.quoted),
+        items: renamedColumns ? [] : matches,
+        introducer: token,
+        end: hasAlias ? alias.end : tokens[next - 1].end,
+        joinable: isWord(token, 'join') && !tokens.slice(Math.max(0, i - 3), i)
+          .some((modifier) => isWord(modifier, 'cross') || isWord(modifier, 'natural'))
+      });
     }
   }
-  return bindings;
+  return relations;
 }
 
 function tokenize(sql: string, cursor: number): { tokens: Token[]; scope: number[] } {

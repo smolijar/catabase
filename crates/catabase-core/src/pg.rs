@@ -77,6 +77,18 @@ pub struct SchemaItem {
     pub name: String,
     pub kind: String,
     pub columns: Vec<SchemaColumn>,
+    #[serde(default)]
+    pub foreign_keys: Vec<SchemaForeignKey>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaForeignKey {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -288,10 +300,51 @@ pub async fn introspect_schema_on_client(client: &PgClient) -> Result<SchemaTree
                 name,
                 kind,
                 columns: vec![column],
+                foreign_keys: Vec::new(),
             });
         }
     }
 
+    let foreign_keys = client
+        .query(
+            "SELECT
+                n.nspname, c.relname, fk.conname,
+                rn.nspname, rc.relname,
+                array_agg(a.attname::text ORDER BY k.ordinality),
+                array_agg(ra.attname::text ORDER BY k.ordinality)
+             FROM pg_constraint fk
+             JOIN pg_class c ON c.oid = fk.conrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_class rc ON rc.oid = fk.confrelid
+             JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+             JOIN LATERAL unnest(fk.conkey, fk.confkey)
+                 WITH ORDINALITY AS k(attnum, ref_attnum, ordinality) ON true
+             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+             JOIN pg_attribute ra ON ra.attrelid = rc.oid AND ra.attnum = k.ref_attnum
+             WHERE fk.contype = 'f'
+               AND c.relkind IN ('r', 'p')
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+             GROUP BY fk.oid, n.nspname, c.relname, fk.conname, rn.nspname, rc.relname
+             ORDER BY n.nspname, c.relname, fk.conname",
+            &[],
+        )
+        .await?;
+    for row in foreign_keys {
+        let schema: String = row.get(0);
+        let table: String = row.get(1);
+        if let Some(item) = items
+            .iter_mut()
+            .find(|item| item.schema == schema && item.name == table)
+        {
+            item.foreign_keys.push(SchemaForeignKey {
+                name: row.get(2),
+                referenced_schema: row.get(3),
+                referenced_table: row.get(4),
+                columns: row.get(5),
+                referenced_columns: row.get(6),
+            });
+        }
+    }
     Ok(SchemaTree { schemas: items })
 }
 
@@ -778,6 +831,39 @@ fn decode_numeric(raw: &[u8]) -> Result<String, std::io::Error> {
         integer.insert(0, '-');
     }
     Ok(integer)
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_schema_items_default_to_no_foreign_keys() {
+        let item: SchemaItem = serde_json::from_value(json!({
+            "schema": "public", "name": "properties", "kind": "table", "columns": []
+        }))
+        .unwrap();
+        assert!(item.foreign_keys.is_empty());
+    }
+
+    #[test]
+    fn foreign_key_wire_metadata_preserves_ordered_composite_column_pairs() {
+        let key = SchemaForeignKey {
+            name: "parent_fk".into(),
+            columns: vec!["parent_id".into(), "tenant_id".into()],
+            referenced_schema: "pms".into(),
+            referenced_table: "parents".into(),
+            referenced_columns: vec!["id".into(), "tenant".into()],
+        };
+        let encoded = serde_json::to_value(&key).unwrap();
+        assert_eq!(encoded["referencedSchema"], "pms");
+        assert_eq!(encoded["columns"], json!(["parent_id", "tenant_id"]));
+        assert_eq!(encoded["referencedColumns"], json!(["id", "tenant"]));
+        assert_eq!(
+            serde_json::from_value::<SchemaForeignKey>(encoded).unwrap(),
+            key
+        );
+    }
 }
 
 #[cfg(test)]
