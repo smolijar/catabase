@@ -410,7 +410,7 @@
       return { sql: buffer.trim(), start: 0, end: buffer.length };
     }
 
-    const containing = ranges.find((range) => cursor >= range.start && cursor <= range.end);
+    const containing = ranges.find((range) => cursor >= range.start && cursor < range.end);
     const previous = ranges.filter((range) => range.end <= cursor).at(-1);
     const next = ranges.find((range) => range.start >= cursor);
     const target = containing ?? previous ?? next ?? ranges[0];

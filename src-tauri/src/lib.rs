@@ -248,7 +248,15 @@ async fn set_ai_model(
 
 #[tauri::command]
 async fn split_sql(sql: String) -> Result<Vec<StatementRange>, AppError> {
-    Ok(split_statements(&sql))
+    Ok(split_statements(&sql)
+        .into_iter()
+        .map(|range| StatementRange {
+            // Monaco offsets are UTF-16 units; the lexer uses UTF-8 bytes.
+            start: sql[..range.start].encode_utf16().count(),
+            end: sql[..range.end].encode_utf16().count(),
+            text: range.text,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -1042,6 +1050,19 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn editor_statement_offsets_use_monaco_utf16_units() {
+        let sql = "select 'ž🐈';select '猫';select 1";
+        let ranges = split_sql(sql.to_string()).await.unwrap();
+        assert_eq!(ranges.len(), 3);
+        let last_start = sql.rfind("select 1").unwrap();
+        assert_eq!(ranges[0].end, "select 'ž🐈';".encode_utf16().count());
+        assert_eq!(ranges[1].start, ranges[0].end);
+        assert_eq!(ranges[2].start, sql[..last_start].encode_utf16().count());
+        assert_eq!(ranges[2].end, sql.encode_utf16().count());
+        assert_eq!(ranges[2].text, "select 1");
+    }
 
     #[test]
     fn replay_rejects_transaction_escape_and_explicit_mutations() {
