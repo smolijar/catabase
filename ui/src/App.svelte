@@ -133,6 +133,7 @@
   $: activeConnection = connections.find((connection) => connection.id === tabConnectionId) ?? null;
   $: running = operation !== null;
   $: runningDuration = formatRunningDuration(operation?.startedAt, nowMs);
+  $: transactionDuration = formatRunningDuration(txStatus.startedAt, nowMs);
   $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
   $: resultUsable = Boolean(activeConnection) && canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
   $: editEligibility = assessRowEditing(result, editMode ? originalRows : result?.rows);
@@ -177,9 +178,9 @@
     }, 5000);
     let nextRunningStatsAt = 0;
     const runningInterval = window.setInterval(() => {
-      if (!running) return;
+      if (!running && !txStatus.active) return;
       nowMs = Date.now();
-      if (activeConnection && nowMs >= nextRunningStatsAt) {
+      if (running && activeConnection && nowMs >= nextRunningStatsAt) {
         nextRunningStatsAt = nowMs + 1000;
         void loadConnectionStats();
       }
@@ -1491,7 +1492,7 @@
         {#if txStatus.active}
           <div class="tx-banner">
             <strong>Transaction active</strong>
-            <span title={txStatus.startedAt ?? undefined}>{txStatus.startedAt ? formatHistoryTime(txStatus.startedAt) : ''}</span>
+            <span title={txStatus.startedAt ? `Started ${formatHistoryTime(txStatus.startedAt)}` : undefined}>{transactionDuration}</span>
             <button disabled={running || Boolean(connectionMutation)} on:click={commitTransaction}>Commit</button>
             <button disabled={running || Boolean(connectionMutation)} on:click={rollbackTransaction}>Rollback</button>
           </div>
