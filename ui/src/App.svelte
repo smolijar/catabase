@@ -13,12 +13,14 @@
   import Modal from './components/Modal.svelte';
   import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
+  import SidebarResizer from './components/SidebarResizer.svelte';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
   import { createConnectionTester } from './lib/connectionTest';
   import type { ConnectionTestState } from './lib/connectionTest';
   import { parseConnectionReference, serializeConnectionReference } from './lib/connectionClipboard';
+  import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, restoreSidebarWidth } from './lib/sidebarLayout';
   import { assessRowEditing, buildRowUpdates, originalEditColumns } from './lib/rowEditing';
   import type { EditTarget } from './lib/rowEditing';
   import { canUseResult, createDraftWriter, createQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
@@ -55,6 +57,10 @@
 
   let sidebar: SidebarTab = 'connections';
   let sidebarOpen = true;
+  let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
+  let workspaceWidth = 1280;
+  let workspaceElement: HTMLElement;
+  let resizingSidebar = false;
   let sql = DEFAULT_SQL;
   let activeTab = 'playground';
   let tabs: WorkspaceTab[] = [createQueryTab('playground', 'Query 1', DEFAULT_SQL)];
@@ -133,6 +139,7 @@
 
   $: activeConnection = connections.find((connection) => connection.id === tabConnectionId) ?? null;
   $: running = operation !== null;
+  $: visibleSidebarWidth = clampSidebarWidth(sidebarWidth, workspaceWidth);
   $: runningDuration = formatRunningDuration(operation?.startedAt, nowMs);
   $: transactionDuration = formatRunningDuration(txStatus.startedAt, nowMs);
   $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
@@ -170,6 +177,12 @@
     mounted = true;
     const savedResultsHeight = Number(localStorage.getItem('catabase.resultsHeight'));
     if (Number.isFinite(savedResultsHeight) && savedResultsHeight >= 180) resultsHeight = savedResultsHeight;
+    sidebarWidth = restoreSidebarWidth(localStorage.getItem('catabase.sidebarWidth'));
+    const layoutObserver = new ResizeObserver(() => {
+      workspaceWidth = workspaceElement.getBoundingClientRect().width;
+    });
+    workspaceWidth = workspaceElement.getBoundingClientRect().width;
+    layoutObserver.observe(workspaceElement);
     bootstrapTask = bootstrap();
     void registerNativeLifecycle();
     window.addEventListener('keydown', handleKeydown);
@@ -191,6 +204,7 @@
     return () => {
       flushDraftOnUnload();
       mounted = false;
+      layoutObserver.disconnect();
       for (const cleanup of nativeCleanup) cleanup();
       window.removeEventListener('keydown', handleKeydown);
       window.removeEventListener('beforeunload', flushDraftOnUnload);
@@ -1259,6 +1273,14 @@
     window.addEventListener('pointerup', stopResultsResize, { once: true });
   }
 
+  function persistSidebarWidth(width: number) {
+    try {
+      localStorage.setItem('catabase.sidebarWidth', String(width));
+    } catch {
+      // Resizing still works if browser preference storage is unavailable/full.
+    }
+  }
+
   function resizeResults(event: PointerEvent) {
     const pane = document.querySelector<HTMLElement>('.main-pane');
     if (!pane) return;
@@ -1335,7 +1357,7 @@
     ]} onSelect={handleWorkspaceAction} />
   </header>
 
-  <section class="workspace">
+  <section bind:this={workspaceElement} class="workspace" class:sidebar-open={sidebarOpen} class:resizing-sidebar={resizingSidebar} style={`--sidebar-width: ${visibleSidebarWidth}px`}>
     <aside class="icon-strip" aria-label="Workspace navigation">
       <button
         class:active={sidebar === 'connections' && sidebarOpen}
@@ -1368,7 +1390,7 @@
     </aside>
 
     {#if sidebarOpen}
-      <aside class="sidebar" class:connections-sidebar={sidebar === 'connections'}>
+      <aside id="workspace-sidebar" class="sidebar" class:connections-sidebar={sidebar === 'connections'}>
         {#if sidebar === 'connections'}
           <div class="panel-head">
             <div>
@@ -1510,6 +1532,7 @@
           </section>
         {/if}
       </aside>
+      <SidebarResizer bind:width={sidebarWidth} {workspaceWidth} bind:resizing={resizingSidebar} onResizeEnd={persistSidebarWidth} />
     {/if}
 
     <section class="main-pane" class:resizing={resizingResults} style={`--results-height: ${resultsHeight}px`}>
