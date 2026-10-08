@@ -11,7 +11,15 @@ type Token = {
 
 export type SqlCompletionContext =
   | { kind: 'none' | 'unqualified' }
+  | { kind: 'expression'; references: SqlReferenceSuggestion[] }
   | { kind: 'qualified'; tables: SchemaItem[]; columns: SchemaItem[] };
+
+export interface SqlReferenceSuggestion {
+  kind: 'relation' | 'column';
+  label: string;
+  insertText: string;
+  detail: string;
+}
 
 export interface SqlJoinSuggestion {
   label: string;
@@ -28,6 +36,7 @@ type Relation = {
   introducer: Token;
   end: number;
   joinable: boolean;
+  aliased: boolean;
 };
 
 const RESERVED = new Set(`select from where join left right full inner outer cross natural on using
@@ -132,17 +141,27 @@ export function sqlCompletionContext(sql: string, offset: number, items: SchemaI
     chain.unshift(before[index - 1].value);
     index -= 2;
   }
-  if (chain.length < 2) return { kind: 'unqualified' };
+  const statement = currentStatement(tokens, sql, cursor);
+  const relations = visibleRelations(statement, items, cursor, scope, tokens);
+  const expression = expressionPosition(statement, cursor, scope, relations.length > 0);
+  if (chain.length < 2) return expression
+    ? { kind: 'expression', references: expressionReferences(relations) }
+    : { kind: 'unqualified' };
 
   if (chain.length >= 3) {
+    const available = expression
+      ? relations.filter((relation) => !relation.aliased && relation.items.length === 1).flatMap((relation) => relation.items) : items;
     return {
       kind: 'qualified', tables: [],
-      columns: items.filter((item) => item.schema === chain.at(-3) && item.name === chain.at(-2))
+      columns: available.filter((item) => item.schema === chain.at(-3) && item.name === chain.at(-2))
     };
   }
 
   const qualifier = chain[0];
-  const statement = currentStatement(tokens, sql, cursor);
+  if (expression) return {
+    kind: 'qualified', tables: [],
+    columns: relations.find((relation) => relation.alias === qualifier && relation.items.length === 1)?.items ?? []
+  };
   // Inner query bindings shadow outer bindings, including unsupported derived tables/CTEs.
   for (let depth = scope.length; depth >= 0; depth--) {
     const visible = statement.filter((token) => token.kind !== 'opaque' && sameScope(token.scope, scope.slice(0, depth)));
@@ -154,6 +173,88 @@ export function sqlCompletionContext(sql: string, offset: number, items: SchemaI
     tables: items.filter((item) => item.schema === qualifier),
     columns: items.filter((item) => item.name === qualifier)
   };
+}
+
+function expressionReferences(relations: Relation[]): SqlReferenceSuggestion[] {
+  const references: SqlReferenceSuggestion[] = relations.map((relation) => ({
+    kind: 'relation', label: relation.qualifier, insertText: relation.qualifier,
+    detail: relation.items.length === 1
+      ? `${relation.aliased ? 'alias · ' : ''}${relation.items[0].schema}.${relation.items[0].name}` : 'query alias'
+  }));
+  const sources = relations.filter((relation) => relation.items.length === 1);
+  const occurrences = new Map<string, number>();
+  for (const relation of sources) {
+    for (const column of relation.items[0].columns) {
+      occurrences.set(column.name, (occurrences.get(column.name) ?? 0) + 1);
+    }
+  }
+  for (const relation of sources) {
+    const item = relation.items[0];
+    for (const column of item.columns) {
+      const name = sqlIdentifier(column.name);
+      const detail = `${item.schema}.${item.name} column (${column.typeName})`;
+      references.push({ kind: 'column', label: `${relation.qualifier}.${name}`, insertText: `${relation.qualifier}.${name}`, detail });
+      // A bare name must resolve to one source, not cause an ambiguous-column error.
+      if (occurrences.get(column.name) === 1) references.push({ kind: 'column', label: name, insertText: name, detail });
+    }
+  }
+  return references;
+}
+
+function visibleRelations(statement: Token[], items: SchemaItem[], cursor: number, scope: number[], allTokens: Token[]): Relation[] {
+  const available: Relation[] = [];
+  const seen = new Set<string>();
+  const openings = allTokens.filter((token) => isSymbol(token, '('));
+  let parentCutoff: number | undefined;
+  for (let depth = scope.length; depth >= 0; depth--) {
+    const level = scope.slice(0, depth);
+    const visible = statement.filter((token) => token.kind !== 'opaque' && sameScope(token.scope, level));
+    const inOn = nearestClause(visible.filter((token) => token.end < cursor)) === 'on';
+    const relations = relationDefinitions(visible, items, cursor)
+      .filter((relation) => (!inOn || relation.introducer.start < cursor)
+        && (parentCutoff === undefined || relation.end < parentCutoff));
+    parentCutoff = undefined;
+    for (const relation of relations) {
+      if (seen.has(relation.alias)) continue;
+      seen.add(relation.alias);
+      if (relations.filter((other) => other.alias === relation.alias).length === 1) available.push(relation);
+    }
+    if (!depth) break;
+    const opening = openings[scope[depth - 1] - 1];
+    const parent = statement.filter((token) => token.kind !== 'opaque' && sameScope(token.scope, scope.slice(0, depth - 1)));
+    const prefix = parent.filter((token) => token.start < opening.start);
+    const last = prefix.at(-1);
+    // CTE bodies and non-LATERAL derived tables cannot reference the outer query's aliases.
+    if (isWord(prefix[0], 'with') && !prefix.some((token) => isWord(token, 'select'))
+      && (isWord(last, 'as') || isWord(last, 'materialized'))) break;
+    if (isWord(last, 'from') || isWord(last, 'join')
+      || (isSymbol(last, ',') && nearestClause(prefix) === 'from')) break;
+    if (isWord(last, 'lateral')) parentCutoff = opening.start;
+  }
+  return available;
+}
+
+function nearestClause(tokens: Token[]): string | undefined {
+  let clause: string | undefined;
+  for (const token of tokens) {
+    if (token.kind === 'identifier' && !token.quoted
+      && ['select', 'from', 'join', 'where', 'on', 'having', 'group', 'order', 'returning', 'set', 'values', 'limit', 'offset', 'into', 'update'].includes(token.value)) {
+      clause = token.value;
+    }
+  }
+  return clause;
+}
+
+function expressionPosition(statement: Token[], cursor: number, scope: number[], hasRelations: boolean): boolean {
+  for (let depth = scope.length; depth >= 0; depth--) {
+    const prefix = statement.filter((token) => token.kind !== 'opaque' && token.end < cursor
+      && sameScope(token.scope, scope.slice(0, depth)));
+    const clause = nearestClause(prefix);
+    if (!clause) continue;
+    if (clause === 'select') return hasRelations;
+    return ['where', 'on', 'having', 'group', 'order', 'returning', 'set'].includes(clause);
+  }
+  return false;
 }
 
 function sameScope(left: number[], right: number[]): boolean {
@@ -218,7 +319,7 @@ function relationDefinitions(tokens: Token[], items: SchemaItem[], cursor: numbe
   let inFrom = false;
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
-    const beginsRelation = ['from', 'join', 'update', 'into'].some((word) => isWord(token, word));
+    const beginsRelation = ['from', 'join', 'update', 'into', 'using'].some((word) => isWord(token, word));
     if (isWord(token, 'from')) inFrom = true;
     else if (['where', 'on', 'group', 'order', 'having', 'limit', 'offset', 'returning', 'union', 'set'].some((word) => isWord(token, word))) inFrom = false;
     if (!beginsRelation && !(inFrom && isSymbol(token, ','))) continue;
@@ -261,6 +362,7 @@ function relationDefinitions(tokens: Token[], items: SchemaItem[], cursor: numbe
         qualifier: sqlIdentifier(aliasName, hasAlias ? alias.quoted : tableToken?.quoted),
         items: renamedColumns ? [] : matches,
         introducer: token,
+        aliased: !!hasAlias,
         end: hasAlias ? alias.end : tokens[next - 1].end,
         joinable: isWord(token, 'join') && !tokens.slice(Math.max(0, i - 3), i)
           .some((modifier) => isWord(modifier, 'cross') || isWord(modifier, 'natural'))

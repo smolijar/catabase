@@ -158,7 +158,7 @@
       provideCompletionItems: (model, position) => {
         const range = completionRange(model, position);
         const context = sqlCompletionContext(model.getValue(), model.getOffsetAt(position), schemaItems);
-        const joins = context.kind === 'unqualified'
+        const joins = context.kind === 'unqualified' || context.kind === 'expression'
           ? sqlJoinSuggestions(model.getValue(), model.getOffsetAt(position), schemaItems) : [];
         const suggestions = joins.length ? joins.map((join, index) => {
           const start = model.getPositionAt(join.replaceStart);
@@ -285,6 +285,14 @@
     context: SqlCompletionContext
   ): monaco.languages.CompletionItem[] {
     if (!schemaItems.length || context.kind === 'none') return [];
+    if (context.kind === 'expression') return context.references.map((reference) => ({
+      label: reference.label,
+      insertText: reference.insertText,
+      kind: reference.kind === 'relation' ? monaco.languages.CompletionItemKind.Reference : monaco.languages.CompletionItemKind.Field,
+      detail: reference.detail,
+      range,
+      sortText: `${reference.kind === 'relation' ? '0_alias' : '1_column'}_${reference.label}`
+    }));
     if (context.kind === 'qualified') {
       return [...tableSuggestions(range, context.tables, false), ...columnSuggestions(range, context.columns)];
     }
