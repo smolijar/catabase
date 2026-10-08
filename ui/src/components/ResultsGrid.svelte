@@ -11,6 +11,8 @@
   export let readOnly = false;
   export let disabled = false;
   export let changedCells: Array<{ rowIndex: number; column: string }> = [];
+  export let canLoadMore = false;
+  export let onLoadMore: () => Promise<void> = async () => {};
   export let onEdit: (rowIndex: number, column: string, newValue: unknown) => void = () => {};
   export let onMessage: (message: string) => void = () => {};
 
@@ -31,6 +33,11 @@
   let draftNull = false;
   let draftError = '';
   let resize: { column: string; startX: number; startWidth: number } | null = null;
+  let requestingMore = false;
+  let requestedRows = -1;
+  let lastScrollPosition = 0;
+  let lastWheelAt = -Infinity;
+  let touchPosition: { x: number; y: number } | null = null;
 
   $: rows = sortedRows(result, sort);
   $: rowWindow = visibleRowWindow(rows.length, scrollTop, viewportHeight, ROW_HEIGHT, HEADER_HEIGHT);
@@ -45,6 +52,58 @@
   $: changed = new Set(changedCells.map((cell) => `${cell.rowIndex}\u001f${cell.column}`));
   $: totalWidth = 48 + result.columns.reduce((total, column) => total + columnWidth(column.name, widths), 0);
   $: resetDraft(result, inspectorCell, editMode);
+
+  function nearBottom() {
+    return scrollElement && scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight <= ROW_HEIGHT * 2;
+  }
+
+  async function requestMore() {
+    // Latch the current batch so scroll momentum cannot repeat a failed or
+    // cancelled request. Appending rows or a fresh gesture allows another try.
+    if (!canLoadMore || readOnly || disabled || requestingMore || requestedRows === rows.length || !nearBottom()) return;
+    requestedRows = rows.length;
+    requestingMore = true;
+    try {
+      await onLoadMore();
+    } catch (error) {
+      onMessage(`Load more failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      requestingMore = false;
+    }
+  }
+
+  function handleScroll() {
+    const next = scrollElement.scrollTop;
+    const movingDown = next > lastScrollPosition;
+    lastScrollPosition = next;
+    scrollTop = next;
+    if (!nearBottom()) requestedRows = -1;
+    else if (movingDown) void requestMore();
+  }
+
+  function handleWheel(event: WheelEvent) {
+    if (event.deltaY <= 0 || Math.abs(event.deltaY) < Math.abs(event.deltaX)) return;
+    const now = performance.now();
+    if (!requestingMore && now - lastWheelAt > 250) requestedRows = -1;
+    lastWheelAt = now;
+    // Wheel input still arrives when the scrollbar is already at its limit.
+    void requestMore();
+  }
+
+  function startTouch(event: TouchEvent) {
+    const touch = event.touches.length === 1 ? event.touches[0] : undefined;
+    touchPosition = touch ? { x: touch.clientX, y: touch.clientY } : null;
+    if (touchPosition && !requestingMore) requestedRows = -1;
+  }
+
+  function moveTouch(event: TouchEvent) {
+    const touch = event.touches.length === 1 ? event.touches[0] : undefined;
+    if (touch && touchPosition) {
+      const down = touchPosition.y - touch.clientY;
+      if (down > 0 && down >= Math.abs(touch.clientX - touchPosition.x)) void requestMore();
+    }
+    touchPosition = touch ? { x: touch.clientX, y: touch.clientY } : null;
+  }
 
   function reconcileSelection(nextRows: IndexedRow[]) {
     if (anchor && focus && previousRows.length) {
@@ -215,7 +274,13 @@
     }
     let nextRow = row;
     let nextColumn = column;
-    if (event.key === 'ArrowDown') nextRow += 1;
+    if (event.key === 'ArrowDown') {
+      nextRow += 1;
+      if (row === rows.length - 1) {
+        if (!event.repeat && !requestingMore) requestedRows = -1;
+        void requestMore();
+      }
+    }
     else if (event.key === 'ArrowUp') nextRow -= 1;
     else if (event.key === 'ArrowLeft') nextColumn -= 1;
     else if (event.key === 'ArrowRight') nextColumn += 1;
@@ -247,7 +312,20 @@
     <button disabled={!focus} on:click={inspectSelection}>Cell details</button>
   </div>
   <div class="grid-content">
-    <div class="grid-scroll" bind:this={scrollElement} bind:clientHeight={viewportHeight} on:scroll={() => (scrollTop = scrollElement.scrollTop)}>
+    <div
+      class="grid-scroll"
+      role="region"
+      aria-label="Query result rows"
+      aria-busy={requestingMore}
+      bind:this={scrollElement}
+      bind:clientHeight={viewportHeight}
+      on:scroll={handleScroll}
+      on:wheel|passive={handleWheel}
+      on:touchstart|passive={startTouch}
+      on:touchmove|passive={moveTouch}
+      on:touchend={() => (touchPosition = null)}
+      on:touchcancel={() => (touchPosition = null)}
+    >
       <table style:width={`${totalWidth}px`} aria-rowcount={rows.length + 1} aria-label="Query result; column sorting applies only to loaded rows">
         <colgroup><col style:width="48px" />{#each result.columns as column}<col style:width={`${columnWidth(column.name, widths)}px`} />{/each}</colgroup>
         <thead>
