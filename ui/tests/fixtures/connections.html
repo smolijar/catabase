@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>Connection list UX fixture</title></head>
+  <body>
+    <div id="fixture"></div>
+    <script type="module">
+      import { mount } from 'svelte';
+      import Preview from './ConnectionListPreview.svelte';
+      import '../../src/app.css';
+      mount(Preview, { target: document.getElementById('fixture') });
+    </script>
+  </body>
+</html>

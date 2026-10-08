@@ -400,6 +400,27 @@ button.chip {
   padding: 1rem 0.9rem;
 }
 
+.sidebar.connections-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.connections-sidebar > .panel-head { flex-shrink: 0; }
+
+.connection-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 2px;
+  list-style: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+}
+
 .panel-head {
   justify-content: space-between;
   gap: 1rem;

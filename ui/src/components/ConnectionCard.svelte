@@ -21,12 +21,26 @@
     if (!disabled) onActivate();
   }
 
+  function handleClick(event: MouseEvent) {
+    (event.currentTarget as HTMLElement).focus();
+    if (event.altKey) {
+      event.preventDefault();
+      event.stopPropagation();
+      void actions.openAt(event.clientX, event.clientY);
+    }
+  }
+
+  function handleDoubleClick(event: MouseEvent) {
+    if (!event.altKey) activate();
+  }
+
   function handleKeydown(event: KeyboardEvent) {
     if (event.isComposing) return;
     if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
       event.preventDefault();
       event.stopPropagation();
-      void actions.openAt();
+      const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+      void actions.openAt(rect.left, rect.bottom);
     } else if (!event.metaKey && !event.ctrlKey && !event.altKey && (event.key === 'Enter' || event.key === ' ')) {
       event.preventDefault();
       event.stopPropagation();
@@ -37,6 +51,7 @@
   function handleContextMenu(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
+    (event.currentTarget as HTMLElement).focus();
     void actions.openAt(event.clientX, event.clientY);
   }
 
@@ -55,32 +70,27 @@
     aria-label={`Use ${connection.name} in this tab`}
     aria-pressed={active}
     aria-disabled={disabled}
-    title={`${address}\nDouble-click or press Enter to use and test. Right-click for actions.`}
-    on:click={(event) => event.currentTarget.focus()}
-    on:dblclick={activate}
+    aria-haspopup="menu"
+    title={`${address}${active ? ' · This tab' : ''}\nDouble-click or press Enter to use and test. Option/Alt-click, right-click or Shift+F10 for actions.`}
+    on:click={handleClick}
+    on:dblclick={handleDoubleClick}
     on:keydown={handleKeydown}
     on:contextmenu={handleContextMenu}
   >
-    <span class="connection-heading">
-      <strong>{connection.name}</strong>
-      {#if active}<span class="current-badge"><span class="status-dot"></span>This tab</span>{/if}
-    </span>
-    <span class="connection-address">{address}</span>
+    <span class="connection-label"><strong>{connection.name}</strong><span class="connection-username">{` (${connection.username})`}</span></span>
   </button>
-  <ActionMenu bind:this={actions} iconOnly ariaLabel={`Actions for ${connection.name}`} items={items} onSelect={handleAction} />
+  <ActionMenu bind:this={actions} contextOnly ariaLabel={`Actions for ${connection.name}`} items={items} onSelect={handleAction} />
 </article>
 
 <style>
   .connection-item {
     display: flex;
     align-items: center;
-    gap: 0.25rem;
     min-width: 0;
-    margin-bottom: 0.4rem;
-    padding: 0.2rem 0.35rem 0.2rem 0.2rem;
-    border: 1px solid #1e2b44;
-    border-radius: 8px;
-    background: #101a2b;
+    margin-bottom: 2px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: transparent;
   }
 
   .connection-item:hover {
@@ -95,13 +105,12 @@
   }
 
   .connection-select {
-    display: flex;
+    display: block;
     flex: 1;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 0.25rem;
+    width: 100%;
     min-width: 0;
-    padding: 0.45rem 0.5rem;
+    min-height: 28px;
+    padding: 4px 10px;
     border: 0;
     border-radius: 5px;
     background: transparent;
@@ -109,6 +118,8 @@
     color: inherit;
     text-align: left;
     user-select: none;
+    font-size: .78rem;
+    line-height: 20px;
   }
 
   .connection-select:hover {
@@ -120,42 +131,16 @@
     cursor: default;
   }
 
-  .connection-heading {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    min-width: 0;
-  }
+  .connection-select:focus-visible { outline-offset: -2px; }
 
-  strong {
-    flex: 1;
+  .connection-label {
+    display: block;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 0.84rem;
-    font-weight: 600;
   }
 
-  .current-badge {
-    display: inline-flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 0.3rem;
-    color: #92dcd4;
-    font-size: 0.64rem;
-    font-weight: 500;
-  }
-
-  .current-badge .status-dot {
-    width: 5px;
-    height: 5px;
-    background: #54b9af;
-    box-shadow: none;
-  }
-
-  .connection-address {
-    color: #91a1ba;
-    font-size: 0.71rem;
-    line-height: 1.35;
-  }
+  strong { font-weight: 700; }
+  .connection-username { color: #91a1ba; }
 </style>

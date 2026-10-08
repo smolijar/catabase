@@ -15,11 +15,13 @@
   export let compact = false;
   export let menuMode = false;
   export let iconOnly = false;
+  export let hideTrigger = false;
   export let triggerLabel = '';
   export let onSelect: (value: string) => void = () => {};
 
   let root: HTMLDivElement;
-  let trigger: HTMLButtonElement;
+  let trigger: HTMLButtonElement | undefined;
+  let focusReturnTarget: HTMLElement | undefined;
   let menu: HTMLDivElement | undefined;
   let open = false;
   let activeIndex = 0;
@@ -51,7 +53,7 @@
     }
 
     const observer = new ResizeObserver(() => handleViewportChange());
-    observer.observe(trigger);
+    if (trigger) observer.observe(trigger);
     window.addEventListener('pointerdown', handleOutsidePointer);
     window.addEventListener('focusin', handleFocusChange);
     window.addEventListener('resize', handleViewportChange);
@@ -77,6 +79,7 @@
 
   async function openMenu(fromEnd = false, anchor: { x: number; y: number } | null = null) {
     if (disabled || !options.some((option) => !option.disabled)) return;
+    focusReturnTarget = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : undefined);
     pointerAnchor = anchor;
     const enabled = enabledIndexes();
     activeIndex = !menuMode && selectedIndex >= 0 && !options[selectedIndex].disabled
@@ -94,7 +97,7 @@
     open = false;
     pointerAnchor = null;
     typeahead = '';
-    if (returnFocus) trigger.focus();
+    if (returnFocus) focusReturnTarget?.focus();
   }
 
   function toggleMenu() {
@@ -109,8 +112,8 @@
   }
 
   function updateMenuPosition() {
-    if (!trigger || !menu) return;
-    const rect = trigger.getBoundingClientRect();
+    if (!menu) return;
+    const rect = (trigger ?? root).getBoundingClientRect();
     const viewport = window.visualViewport;
     const viewportLeft = viewport?.offsetLeft ?? 0;
     const viewportTop = viewport?.offsetTop ?? 0;
@@ -275,29 +278,31 @@
   }
 </script>
 
-<div bind:this={root} class="dropdown" class:compact class:open class:action-menu={menuMode} class:icon-only={iconOnly}>
-  <button
-    bind:this={trigger}
-    type="button"
-    class="dropdown-trigger"
-    aria-label={menuMode ? ariaLabel : `${ariaLabel}: ${label}${unavailable ? ' (unavailable)' : ''}`}
-    title={iconOnly ? ariaLabel : unavailable ? `${label} — unavailable; choose another option` : label}
-    aria-haspopup={menuMode ? 'menu' : 'listbox'}
-    aria-controls={open ? menuId : undefined}
-    aria-expanded={open}
-    {disabled}
-    on:click={toggleMenu}
-    on:keydown={handleTriggerKeydown}
-    on:contextmenu={handleTriggerContextMenu}
-  >
-    {#if iconOnly}
-      <Icon name="ellipsis" size={18} />
-    {:else}
-      <span class="dropdown-label">{label}</span>
-      {#if unavailable}<span class="unavailable-hint">Unavailable</span>{/if}
-      <span class="dropdown-chevron"><Icon name="chevron" size={14} /></span>
-    {/if}
-  </button>
+<div bind:this={root} class="dropdown" class:compact class:open class:action-menu={menuMode} class:icon-only={iconOnly} class:context-only={hideTrigger}>
+  {#if !hideTrigger}
+    <button
+      bind:this={trigger}
+      type="button"
+      class="dropdown-trigger"
+      aria-label={menuMode ? ariaLabel : `${ariaLabel}: ${label}${unavailable ? ' (unavailable)' : ''}`}
+      title={iconOnly ? ariaLabel : unavailable ? `${label} — unavailable; choose another option` : label}
+      aria-haspopup={menuMode ? 'menu' : 'listbox'}
+      aria-controls={open ? menuId : undefined}
+      aria-expanded={open}
+      {disabled}
+      on:click={toggleMenu}
+      on:keydown={handleTriggerKeydown}
+      on:contextmenu={handleTriggerContextMenu}
+    >
+      {#if iconOnly}
+        <Icon name="ellipsis" size={18} />
+      {:else}
+        <span class="dropdown-label">{label}</span>
+        {#if unavailable}<span class="unavailable-hint">Unavailable</span>{/if}
+        <span class="dropdown-chevron"><Icon name="chevron" size={14} /></span>
+      {/if}
+    </button>
+  {/if}
 
   {#if open}
     <div bind:this={menu} id={menuId} class="dropdown-menu" role={menuMode ? 'menu' : 'listbox'} aria-label={ariaLabel} tabindex="-1" style="visibility:hidden" on:keydown={handleMenuKeydown}>
@@ -373,4 +378,6 @@
     justify-content: center;
     padding: 0;
   }
+
+  .dropdown.context-only { width: 0; height: 0; min-width: 0; }
 </style>
