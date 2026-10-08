@@ -98,7 +98,8 @@ pub fn split_statements(sql: &str) -> Vec<StatementRange> {
     ranges
 }
 
-/// Editor-only boundaries for independent SELECTs separated by blank lines.
+/// Editor-only boundaries for independent queries and transaction commands
+/// separated by blank lines.
 /// SQL execution and transaction validation still use semicolons exclusively.
 /// A WITH clause stays attached to its first top-level query, and set-operation
 /// operands, nested queries, strings and comments never introduce a boundary.
@@ -107,7 +108,14 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
     let mut ranges = Vec::new();
 
     for statement in split_statements(sql) {
-        if classify_statement(&statement.text) != StatementKind::SelectLike {
+        let kind = classify_statement(&statement.text);
+        if !matches!(
+            kind,
+            StatementKind::SelectLike
+                | StatementKind::TxBegin
+                | StatementKind::TxCommit
+                | StatementKind::TxRollback
+        ) {
             ranges.push(statement);
             continue;
         }
@@ -116,7 +124,9 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
         let mut depth = 0usize;
         let mut line_breaks = 0;
         let mut query_body_seen = false;
+        let mut transaction_body_seen = kind != StatementKind::SelectLike;
         let mut set_operand_pending = false;
+        let mut case_depth = 0usize;
 
         while index < statement.end {
             let byte = bytes[index];
@@ -145,14 +155,30 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
                 }
                 if depth == 0 {
                     let word = sql[word_start..index].to_ascii_lowercase();
-                    if word == "select"
-                        && query_body_seen
+                    let starts_query =
+                        matches!(word.as_str(), "select" | "with" | "values" | "table");
+                    let starts_transaction = matches!(
+                        word.as_str(),
+                        "begin" | "commit" | "end" | "rollback" | "abort"
+                    ) || (word == "start"
+                        && classify_statement(&sql[word_start..]) == StatementKind::TxBegin);
+                    if (starts_query || starts_transaction)
+                        && (query_body_seen || transaction_body_seen)
                         && !set_operand_pending
+                        && case_depth == 0
                         && line_breaks >= 2
                     {
                         let end = start + sql[start..word_start].trim_end().len();
                         push_statement(&mut ranges, sql, start, end);
                         start = word_start;
+                        query_body_seen = false;
+                        transaction_body_seen = starts_transaction;
+                    }
+                    // END in a multiline CASE expression is not COMMIT's alias.
+                    if word == "case" {
+                        case_depth += 1;
+                    } else if word == "end" {
+                        case_depth = case_depth.saturating_sub(1);
                     }
                     if matches!(word.as_str(), "select" | "values" | "table") {
                         query_body_seen = true;
@@ -443,6 +469,90 @@ select 1"#;
     }
 
     #[test]
+    fn editor_splits_begin_between_ledger_cte_and_query() {
+        let sql = r#"with foo as (
+    select x.notes, x."chargeCode", x.description, x."chargeAmountCents" / 100 as charge_amount, "transType" as trans_type, "transDate" as date, tenant_id
+from
+	pms.property_residents_ledger,
+	jsonb_to_recordset(transactions) as x(
+		notes text,
+		"chargeCode" text,
+		description text,
+		"transType" text,
+		"transDate" date,
+		"chargeAmountCents" numeric
+	)
+)
+
+select * from foo
+order by "chargeCode"
+
+
+begin
+
+
+SELECT name FROM LANDLORDS"#;
+        let ranges = split_editor_statements(sql);
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0].text, sql[..sql.find("\n\n\nbegin").unwrap()]);
+        assert_eq!(ranges[1].text, "begin");
+        assert_eq!(ranges[1].start, sql.find("begin").unwrap());
+        assert_eq!(ranges[1].end, ranges[1].start + "begin".len());
+        assert_eq!(ranges[2].text, "SELECT name FROM LANDLORDS");
+        assert_eq!(classify_statement(&ranges[1].text), StatementKind::TxBegin);
+        assert!(validate_transaction_sql(&ranges[1].text).is_ok());
+        // An explicit selection remains one unmodified batch, not editor blocks.
+        assert_eq!(split_statements(sql).len(), 1);
+    }
+
+    #[test]
+    fn editor_splits_transaction_commands_before_and_after_queries() {
+        for command in [
+            "BEGIN",
+            "begin transaction isolation level serializable",
+            "START /* explanation */ TRANSACTION READ ONLY",
+            "COMMIT",
+            "END",
+            "ROLLBACK",
+            "ABORT",
+            "ROLLBACK TO SAVEPOINT checkpoint",
+        ] {
+            let sql = format!("SELECT 1\r\n \r\n{command}\r\n\r\nSELECT 2");
+            let ranges = split_editor_statements(&sql);
+            assert_eq!(ranges.len(), 3, "{command}");
+            assert_eq!(ranges[0].text, "SELECT 1");
+            assert_eq!(ranges[1].text, command);
+            assert_eq!(ranges[2].text, "SELECT 2");
+        }
+        let ranges =
+            split_editor_statements("BEGIN\n\nSELECT 1\n\nCOMMIT\n\nBEGIN\n\nSELECT 2\n\nROLLBACK");
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| range.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "BEGIN", "SELECT 1", "COMMIT", "BEGIN", "SELECT 2", "ROLLBACK"
+            ]
+        );
+    }
+
+    #[test]
+    fn editor_keeps_ctes_query_clauses_and_case_end_together() {
+        let query = "WITH foo AS (SELECT 1 AS n)\n\nSELECT CASE WHEN n = 1 THEN CASE WHEN true THEN 2\n\nEND\n\nEND AS value\n\nFROM foo\n\nORDER BY value";
+        let next = "WITH bar AS (SELECT 3)\n\nSELECT * FROM bar";
+        let sql = format!("{query}\n\nBEGIN\n\n{next}\n\nVALUES (4)\n\nTABLE example");
+        let ranges = split_editor_statements(&sql);
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| range.text.as_str())
+                .collect::<Vec<_>>(),
+            [query, "BEGIN", next, "VALUES (4)", "TABLE example"]
+        );
+    }
+
+    #[test]
     fn editor_keeps_nested_queries_and_cte_body_together() {
         let query = "WITH foo AS (\nSELECT 1\n\nUNION ALL\n\nSELECT 2\n), bar AS (SELECT 3)\n\nSELECT * FROM (\n\nSELECT * FROM foo\n) AS nested";
         let sql = format!("{query}\n\nSELECT 4");
@@ -469,10 +579,13 @@ select 1"#;
     fn editor_ignores_blank_lines_in_quoted_content_and_comments() {
         for query in [
             "SELECT 'a\n\nselect 99' AS literal",
+            "SELECT 'a\n\nBEGIN\n\nEND' AS literal",
             "SELECT E'escaped\\'\n\nselect 99' AS literal",
             "SELECT 1 AS \"a\n\nselect 99\"",
             "SELECT $tag$a\n\nselect 99$tag$ AS literal",
+            "SELECT $tag$a\n\nBEGIN\n\nROLLBACK$tag$ AS literal",
             "SELECT 1 /* outer\n\nselect /* nested */ 99 */ AS value",
+            "SELECT 1 /* outer\n\nBEGIN /* nested */ COMMIT */ AS value",
             "SELECT 1 -- select 99\nAS value",
             "SELECT 1 AS čselect",
         ] {
@@ -486,6 +599,7 @@ select 1"#;
     #[test]
     fn editor_respects_semicolons_and_requires_a_blank_line() {
         assert_eq!(split_editor_statements("select 1\nselect 2").len(), 1);
+        assert_eq!(split_editor_statements("select 1\nbegin").len(), 1);
         let sql = "select 1;select 2\r\n \r\nselect 3; -- end";
         let ranges = split_editor_statements(sql);
         assert_eq!(ranges.len(), 3);

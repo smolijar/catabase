@@ -1065,6 +1065,23 @@ mod tests {
         assert_eq!(ranges[2].text, "select 1");
     }
 
+    #[tokio::test]
+    async fn editor_cursor_on_begin_targets_only_the_transaction_command() {
+        let sql = "WITH foo AS (SELECT 'ž🐈' AS value)\n\nSELECT * FROM foo\nORDER BY value\n\n\nbegin\n\n\nSELECT 1";
+        let ranges = split_sql(sql.to_string()).await.unwrap();
+        assert_eq!(ranges.len(), 3);
+        let begin_start = sql[..sql.find("begin").unwrap()].encode_utf16().count();
+        for cursor in begin_start..begin_start + "begin".len() {
+            let target = ranges
+                .iter()
+                .find(|range| cursor >= range.start && cursor < range.end)
+                .unwrap();
+            assert_eq!(target.text, "begin");
+            assert_eq!(target.start, begin_start);
+            assert_eq!(target.end, begin_start + "begin".len());
+        }
+    }
+
     #[test]
     fn replay_rejects_transaction_escape_and_explicit_mutations() {
         assert!(validate_replay_sql("select 1").is_ok());
