@@ -16,7 +16,8 @@ use catabase_core::{
     checkout_pool_client, classify_statement, connection_stats as load_connection_stats,
     create_pool, execute_on_client, execute_on_client_cancellable, get_ddl_on_client as load_ddl,
     introspect_schema_on_client as load_schema, parse_connection_url as parse_url,
-    split_statements, test_connection as test_pg_connection, validate_transaction_sql,
+    split_editor_statements, split_statements, test_connection as test_pg_connection,
+    validate_transaction_sql,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -248,7 +249,7 @@ async fn set_ai_model(
 
 #[tauri::command]
 async fn split_sql(sql: String) -> Result<Vec<StatementRange>, AppError> {
-    Ok(split_statements(&sql)
+    Ok(split_editor_statements(&sql)
         .into_iter()
         .map(|range| StatementRange {
             // Monaco offsets are UTF-16 units; the lexer uses UTF-8 bytes.

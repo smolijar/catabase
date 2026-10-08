@@ -98,6 +98,102 @@ pub fn split_statements(sql: &str) -> Vec<StatementRange> {
     ranges
 }
 
+/// Editor-only boundaries for independent SELECTs separated by blank lines.
+/// SQL execution and transaction validation still use semicolons exclusively.
+/// A WITH clause stays attached to its first top-level query, and set-operation
+/// operands, nested queries, strings and comments never introduce a boundary.
+pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
+    let bytes = sql.as_bytes();
+    let mut ranges = Vec::new();
+
+    for statement in split_statements(sql) {
+        if classify_statement(&statement.text) != StatementKind::SelectLike {
+            ranges.push(statement);
+            continue;
+        }
+        let mut start = statement.start;
+        let mut index = start;
+        let mut depth = 0usize;
+        let mut line_breaks = 0;
+        let mut query_body_seen = false;
+        let mut set_operand_pending = false;
+
+        while index < statement.end {
+            let byte = bytes[index];
+            if byte.is_ascii_whitespace() {
+                line_breaks += usize::from(byte == b'\n');
+                index += 1;
+                continue;
+            }
+            if byte == b'-' && bytes.get(index + 1) == Some(&b'-') {
+                index = find_line_end(bytes, index + 2);
+                continue;
+            }
+            if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                index = find_block_comment_end(bytes, index + 2);
+                continue;
+            }
+
+            if byte.is_ascii_alphabetic() || byte == b'_' || byte >= 128 {
+                let word_start = index;
+                while index < statement.end
+                    && (bytes[index].is_ascii_alphanumeric()
+                        || matches!(bytes[index], b'_' | b'$')
+                        || bytes[index] >= 128)
+                {
+                    index += 1;
+                }
+                if depth == 0 {
+                    let word = sql[word_start..index].to_ascii_lowercase();
+                    if word == "select"
+                        && query_body_seen
+                        && !set_operand_pending
+                        && line_breaks >= 2
+                    {
+                        let end = start + sql[start..word_start].trim_end().len();
+                        push_statement(&mut ranges, sql, start, end);
+                        start = word_start;
+                    }
+                    if matches!(word.as_str(), "select" | "values" | "table") {
+                        query_body_seen = true;
+                        set_operand_pending = false;
+                    } else if matches!(word.as_str(), "union" | "intersect" | "except") {
+                        set_operand_pending = true;
+                    }
+                }
+            } else if byte == b'\'' {
+                let escape_backslash = index > 0
+                    && matches!(bytes[index - 1], b'e' | b'E')
+                    && (index == 1
+                        || !(bytes[index - 2].is_ascii_alphanumeric() || bytes[index - 2] == b'_'));
+                index = find_single_quote_end(bytes, index + 1, escape_backslash);
+            } else if byte == b'"' {
+                index = find_double_quote_end(bytes, index + 1);
+            } else if byte == b'$'
+                && let Some(tag) = dollar_tag_at(sql, index)
+            {
+                index += tag.len();
+                index = sql[index..]
+                    .find(&tag)
+                    .map_or(bytes.len(), |offset| index + offset + tag.len());
+            } else {
+                if byte == b'(' {
+                    if depth == 0 {
+                        set_operand_pending = false;
+                    }
+                    depth += 1;
+                } else if byte == b')' {
+                    depth = depth.saturating_sub(1);
+                }
+                index += 1;
+            }
+            line_breaks = 0;
+        }
+        push_statement(&mut ranges, sql, start, statement.end);
+    }
+    ranges
+}
+
 pub fn classify_statement(sql: &str) -> StatementKind {
     let words = leading_keywords(sql, 4);
     let words = words.iter().map(String::as_str).collect::<Vec<_>>();
@@ -313,6 +409,101 @@ mod tests {
         assert_eq!(ranges[0].text, "select ';' as semi;");
         assert_eq!(ranges[1].text, "select $$;$$ as dollar;");
         assert_eq!(ranges[2].text, "select 3");
+    }
+
+    #[test]
+    fn editor_splits_independent_select_after_ledger_cte() {
+        let sql = r#"with foo as (
+    select x.notes, x."chargeCode", x.description, x."chargeAmountCents" / 100 as charge_amount, "transType" as trans_type, "transDate" as date, tenant_id
+from
+	pms.property_residents_ledger,
+	jsonb_to_recordset(transactions) as x(
+		notes text,
+		"chargeCode" text,
+		description text,
+		"transType" text,
+		"transDate" date,
+		"chargeAmountCents" numeric
+	)
+)
+
+select * from foo
+
+
+select 1"#;
+        let ranges = split_editor_statements(sql);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].text, sql[..sql.find("\n\n\nselect 1").unwrap()]);
+        assert_eq!(ranges[1].text, "select 1");
+        assert_eq!(ranges[1].start, sql.rfind("select 1").unwrap());
+        assert_eq!(ranges[1].end, sql.len());
+        assert!(ranges[0].end < ranges[1].start);
+        // Editor conveniences must not change batch execution/transaction parsing.
+        assert_eq!(split_statements(sql).len(), 1);
+    }
+
+    #[test]
+    fn editor_keeps_nested_queries_and_cte_body_together() {
+        let query = "WITH foo AS (\nSELECT 1\n\nUNION ALL\n\nSELECT 2\n), bar AS (SELECT 3)\n\nSELECT * FROM (\n\nSELECT * FROM foo\n) AS nested";
+        let sql = format!("{query}\n\nSELECT 4");
+        let ranges = split_editor_statements(&sql);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].text, query);
+        assert_eq!(ranges[1].text, "SELECT 4");
+    }
+
+    #[test]
+    fn editor_keeps_set_operation_operands_together() {
+        for operator in ["UNION", "UNION ALL", "INTERSECT", "EXCEPT"] {
+            for operand in ["SELECT 2", "(SELECT 2)"] {
+                let query = format!("SELECT 1\n\n{operator}\n\n{operand}");
+                let ranges = split_editor_statements(&format!("{query}\n\nSELECT 3"));
+                assert_eq!(ranges.len(), 2, "{query}");
+                assert_eq!(ranges[0].text, query);
+                assert_eq!(ranges[1].text, "SELECT 3");
+            }
+        }
+    }
+
+    #[test]
+    fn editor_ignores_blank_lines_in_quoted_content_and_comments() {
+        for query in [
+            "SELECT 'a\n\nselect 99' AS literal",
+            "SELECT E'escaped\\'\n\nselect 99' AS literal",
+            "SELECT 1 AS \"a\n\nselect 99\"",
+            "SELECT $tag$a\n\nselect 99$tag$ AS literal",
+            "SELECT 1 /* outer\n\nselect /* nested */ 99 */ AS value",
+            "SELECT 1 -- select 99\nAS value",
+            "SELECT 1 AS čselect",
+        ] {
+            let ranges = split_editor_statements(&format!("{query}\n\nSELECT 2"));
+            assert_eq!(ranges.len(), 2, "{query}");
+            assert_eq!(ranges[0].text, query);
+            assert_eq!(ranges[1].text, "SELECT 2");
+        }
+    }
+
+    #[test]
+    fn editor_respects_semicolons_and_requires_a_blank_line() {
+        assert_eq!(split_editor_statements("select 1\nselect 2").len(), 1);
+        let sql = "select 1;select 2\r\n \r\nselect 3; -- end";
+        let ranges = split_editor_statements(sql);
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0].text, "select 1;");
+        assert_eq!(ranges[1].text, "select 2");
+        assert_eq!(ranges[2].text, "select 3;");
+        assert_eq!(ranges[1].start, sql.find("select 2").unwrap());
+    }
+
+    #[test]
+    fn editor_does_not_split_selects_belonging_to_other_commands() {
+        for sql in [
+            "CREATE TABLE example AS\n\nSELECT 1",
+            "EXPLAIN SELECT 1\n\nUNION ALL SELECT 2",
+            "INSERT INTO example\n\nSELECT 1",
+        ] {
+            assert_eq!(split_editor_statements(sql), split_statements(sql), "{sql}");
+        }
     }
 
     #[test]

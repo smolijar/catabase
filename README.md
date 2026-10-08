@@ -78,3 +78,5 @@ Implemented:
 - pnpm install age gate
 
 Query results and staged edits stay in memory only; restarting restores SQL drafts, not cached data. Sorting is limited to loaded rows. Loading more rows or requesting a larger export re-runs the original SQL in a read-only transaction, so it is unavailable while a manual transaction is open. Commit or roll back that transaction first. Cell edits made inside a manual transaction remain pending until you commit it.
+
+Run (Cmd/Ctrl+Enter) executes selected SQL, or the statement under the cursor when nothing is selected. In addition to semicolons, the editor recognizes independent SELECTs separated by a blank line. CTEs stay attached to their main query, and nested queries and UNION/INTERSECT/EXCEPT operands stay together. Use semicolons for other statement boundaries; this editor convenience does not change PostgreSQL batch syntax.

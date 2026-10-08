@@ -17,7 +17,8 @@ pub use pg::{
 };
 pub use row_updates::{ApplyUpdatesResult, RowUpdate, apply_row_updates};
 pub use sql::{
-    StatementKind, StatementRange, classify_statement, split_statements, validate_transaction_sql,
+    StatementKind, StatementRange, classify_statement, split_editor_statements, split_statements,
+    validate_transaction_sql,
 };
 pub use storage::{
     ConnectionInput, ConnectionRecord, HistoryEntry, HistoryPage, HistoryStats, NewHistoryEntry,
