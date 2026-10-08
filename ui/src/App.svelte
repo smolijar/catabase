@@ -130,6 +130,7 @@
   $: runningDuration = formatRunningDuration(operation?.startedAt, nowMs);
   $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
   $: resultUsable = Boolean(activeConnection) && canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
+  $: canLoadMore = Boolean(result?.autoLimited && result.hasMore && resultUsable && !running && !connectionMutation && !pendingChanges.length);
   $: schemaContext = schemaItems
     .map((item) => `${item.schema}.${item.name}(${item.columns.map((column) => column.name).join(', ')})`)
     .join('\n');
@@ -556,7 +557,7 @@
   }
 
   async function loadMoreRows() {
-    if (!result || !resultSession || !resultUsable || operation || connectionMutation || !tabConnectionId) return;
+    if (!result || !result.autoLimited || !result.hasMore || !resultSession || !resultUsable || operation || connectionMutation || !tabConnectionId) return;
     if (pendingChanges.length) { flash('Apply or discard staged edits before loading more rows.'); return; }
     const session = { ...resultSession, data: result };
     const op = beginOperation('load', tabConnectionId);
@@ -569,7 +570,7 @@
         rowCount: session.data.rows.length + next.rows.length
       };
       patchTab(op.tabId, resultPatch({ ...session, data: merged }));
-      flash(`Loaded ${merged.rowCount}${next.hasMore ? '+' : ''} rows.`);
+      statusFlash = `Loaded ${merged.rowCount}${next.hasMore ? '+' : ''} rows.`;
     } catch (error) {
       if (isCurrentOperation(op)) flash(normalizeAppError(error).code === '57014' ? 'Loading cancelled.' : `Load more failed: ${errorMessage(error)}`, normalizeAppError(error).code !== '57014');
     } finally {
@@ -1509,7 +1510,7 @@
           <div class="results-title">
             <strong>{queryError && result ? 'Previous results' : 'Results'}</strong>
             {#if operation?.tabId === activeTab}
-              <span class="running-state"><span class="spinner"></span> {operation.cancelling ? 'Cancelling…' : 'Running'} {runningDuration}</span>
+              <span class="running-state"><span class="spinner"></span> {operation.cancelling ? 'Cancelling…' : operation.kind === 'load' ? 'Loading' : 'Running'} {runningDuration}</span>
             {:else if result}
               <span>{result.rowCount}{result.hasMore ? '+' : ''} {result.rowCount === 1 ? 'row' : 'rows'} · {result.durationMs} ms</span>
             {:else}
@@ -1557,11 +1558,15 @@
         {/if}
         {#if result && result.rows.length}
           {#key `${activeTab}:${resultSession?.executedAt}`}
-            <ResultsGrid {result} {editMode} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onMessage={flash} />
+            <ResultsGrid {result} {editMode} {canLoadMore} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onMessage={flash} />
           {/key}
           <footer class="results-foot">
             <span>{result.rows.length} loaded {result.hasMore ? '· more available' : ''}</span>
-            {#if result.hasMore && !resultSession?.snapshot}<button disabled={!resultUsable || running || Boolean(connectionMutation) || pendingChanges.length > 0} on:click={loadMoreRows}>Load next {PAGE_SIZE} rows</button>{/if}
+            {#if operation?.tabId === activeTab && operation.kind === 'load'}
+              <span class="running-state" role="status"><span class="spinner"></span> Loading next {PAGE_SIZE} rows…</span>
+            {:else if result.autoLimited && result.hasMore && resultUsable}
+              <span>{pendingChanges.length ? 'Apply or discard edits to load more' : 'Scroll down to load more'}</span>
+            {/if}
           </footer>
         {:else if result}
           <p class="empty">Query completed in {result.durationMs} ms with no rows.</p>
