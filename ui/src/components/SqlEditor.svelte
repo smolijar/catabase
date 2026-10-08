@@ -3,6 +3,8 @@
   import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
   import 'monaco-editor/esm/vs/editor/contrib/snippet/browser/snippetController2';
   import 'monaco-editor/esm/vs/editor/contrib/suggest/browser/suggestController';
+  // editor.api omits the standard word movement, selection and deletion commands.
+  import 'monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations';
   import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
   import { onDestroy, onMount } from 'svelte';
   import type { AiCompletionRequest, ExecutionTarget, SchemaItem, StatementRange } from '../lib/types';
