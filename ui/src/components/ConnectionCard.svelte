@@ -18,7 +18,7 @@
   ];
 
   function activate() {
-    if (!disabled && !active) onActivate();
+    if (!disabled) onActivate();
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -55,7 +55,7 @@
     aria-label={`Use ${connection.name} in this tab`}
     aria-pressed={active}
     aria-disabled={disabled}
-    title={`${address}\nDouble-click or press Enter to use. Right-click for actions.`}
+    title={`${address}\nDouble-click or press Enter to use and test. Right-click for actions.`}
     on:click={(event) => event.currentTarget.focus()}
     on:dblclick={activate}
     on:keydown={handleKeydown}
