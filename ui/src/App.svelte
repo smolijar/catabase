@@ -15,6 +15,8 @@
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
+  import { assessRowEditing, buildRowUpdates, originalEditColumns } from './lib/rowEditing';
+  import type { EditTarget } from './lib/rowEditing';
   import { canUseResult, createDraftWriter, createQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
   import type { PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
   import type {
@@ -43,12 +45,6 @@
     markError: (offset: number, message: string) => void;
     getViewState: () => WorkspaceTab['viewState'];
     getSnapshot: () => { tabId: string; sql: string; viewState: WorkspaceTab['viewState'] };
-  };
-  type EditTarget = {
-    schema: string;
-    table: string;
-    whereColumns: ColumnMeta[];
-    warning?: string;
   };
   type SchemaGroup = { name: string; items: SchemaItem[] };
   type Operation = { token: string; tabId: string; connectionId: string; kind: 'query' | 'load' | 'export' | 'apply'; startedAt: number; cancelling: boolean };
@@ -130,6 +126,12 @@
   $: runningDuration = formatRunningDuration(operation?.startedAt, nowMs);
   $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
   $: resultUsable = Boolean(activeConnection) && canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
+  $: editEligibility = assessRowEditing(result, editMode ? originalRows : result?.rows);
+  $: editableColumns = editEligibility.target?.editableColumns.map((column) => column.name) ?? [];
+  $: editDisabledReason = running || connectionMutation ? 'Wait for the current operation to finish before editing.'
+    : resultSession?.snapshot ? 'History snapshots are read-only. Re-run the query to edit.'
+    : result && !resultUsable ? 'Re-run this query on its original connection before editing.'
+    : editEligibility.reason;
   $: canLoadMore = Boolean(result?.autoLimited && result.hasMore && resultUsable && !running && !connectionMutation && !pendingChanges.length);
   $: schemaContext = schemaItems
     .map((item) => `${item.schema}.${item.name}(${item.columns.map((column) => column.name).join(', ')})`)
@@ -979,19 +981,12 @@
   }
 
   function enableEditMode() {
-    if (!result || !result.rows.length || !resultUsable || operation || connectionMutation) {
-      flash('No result set to edit. Run a query first.');
-      return;
-    }
+    if (editDisabledReason || !editEligibility.target || !result) return;
+    const target = editEligibility.target;
     editMode = true;
     originalRows = cloneRows(result.rows);
     pendingChanges = [];
-    const target = detectEditTarget();
-    flash(
-      target
-        ? `Edit mode enabled for ${target.schema}.${target.table}.${target.warning ? ` ${target.warning}` : ''}`
-        : 'Edit mode enabled. Preview only: source table could not be detected.'
-    );
+    flash(`Edit mode enabled for ${target.schema}.${target.table} using ${target.key.primaryKey ? 'primary' : 'unique'} key (${target.key.columns.join(', ')}).`);
   }
 
   function disableEditMode() {
@@ -1001,7 +996,7 @@
   }
 
   function updateCell(rowIndex: number, column: string, newValue: unknown) {
-    if (!result || !resultUsable || operation || connectionMutation) return;
+    if (!editMode || !result || !resultUsable || operation || connectionMutation || !editableColumns.includes(column)) return;
     const oldValue = originalRows[rowIndex]?.[column];
     result = {
       ...result,
@@ -1028,14 +1023,14 @@
     }
     const target = detectEditTarget();
     if (!target) {
-      flash('Apply disabled: source table could not be detected. Use Preview SQL.');
+      flash(`Apply disabled: ${editEligibility.reason || 'Re-run the query to refresh its row key.'}`);
       return;
     }
 
     const op = beginOperation('apply', tabConnectionId);
     const editedRows = cloneRows(result!.rows);
-    const updates = buildRowUpdates(target);
     try {
+      const updates = buildRowUpdates(target, originalRows, pendingChanges);
       const applied = await api.applyRowUpdates(op.connectionId, op.token, updates);
       if (!isCurrentOperation(op)) return;
       patchTab(op.tabId, { originalRows: editedRows, pendingChanges: [], editMode: false });
@@ -1048,14 +1043,6 @@
     }
   }
 
-  function buildRowUpdates(target: EditTarget) {
-    const indices = [...new Set(pendingChanges.map((change) => change.rowIndex))];
-    const sourceColumns = result!.columns.filter((column) => column.tableSchema === target.schema && column.tableName === target.table && column.sourceName);
-    return indices.map((rowIndex) => ({ schema: target.schema, table: target.table,
-      values: Object.fromEntries(pendingChanges.filter((change) => change.rowIndex === rowIndex).map((change) => [sourceColumnName(columnByName(change.column)), change.newValue])),
-      original: Object.fromEntries(sourceColumns.map((column) => [sourceColumnName(column), originalRows[rowIndex]?.[column.name]])) }));
-  }
-
   function discardUpdates() {
     if (result) result = { ...result, rows: cloneRows(originalRows) };
     pendingChanges = [];
@@ -1065,13 +1052,7 @@
   function generateUpdateSql(): string {
     const target = detectEditTarget();
     if (!target) {
-      return [
-        '-- Source table detection unavailable. Replace table_name and WHERE clause before running.',
-        ...pendingChanges.map(
-          (change) =>
-            `UPDATE table_name SET ${quoteIdent(change.column)} = ${sqlLiteral(change.newValue)} WHERE /* row ${change.rowIndex + 1} key */;`
-        )
-      ].join('\n');
+      return '-- Editing unavailable: the result does not contain a usable complete row key.';
     }
 
     const changesByRow = new Map<number, PendingChange[]>();
@@ -1084,16 +1065,12 @@
     }
 
     return [
-      target.warning ? `-- ${target.warning}` : '',
       ...Array.from(changesByRow.entries()).map(([rowIndex, changes]) => {
         const setSql = changes
           .map((change) => `${quoteIdent(sourceColumnName(columnByName(change.column)))} = ${sqlLiteral(change.newValue)}`)
           .join(', ');
-        const whereSql = target.whereColumns
-          .map(
-            (column) =>
-              `${quoteIdent(sourceColumnName(column))} IS NOT DISTINCT FROM ${sqlLiteral(originalRows[rowIndex]?.[column.name])}`
-          )
+        const whereSql = originalEditColumns(target, changes)
+          .map((column) => originalValuePredicate(column, originalRows[rowIndex]?.[column.name], target))
           .join(' AND ');
         return `UPDATE ${quoteIdent(target.schema)}.${quoteIdent(target.table)} SET ${setSql} WHERE ${whereSql};`;
       })
@@ -1103,26 +1080,18 @@
   }
 
   function detectEditTarget(): EditTarget | null {
-    if (!result || !result.columns.length || !resultUsable) return null;
-    const changedColumns = pendingChanges.map((change) => columnByName(change.column)).filter(Boolean) as ColumnMeta[];
-    const relevantColumns = changedColumns.length ? changedColumns : result.columns;
-    const identities = new Set(
-      relevantColumns
-        .filter((column) => column.tableSchema && column.tableName && sourceColumnName(column))
-        .map((column) => `${column.tableSchema}\u001f${column.tableName}`)
-    );
-    if (identities.size !== 1) return null;
+    return resultUsable ? editEligibility.target : null;
+  }
 
-    const [identity] = Array.from(identities);
-    const [schema, table] = identity.split('\u001f');
-    const tableColumns = result.columns.filter(
-      (column) => column.tableSchema === schema && column.tableName === table && sourceColumnName(column)
-    );
-    if (!tableColumns.length) return null;
-
-    const primaryKeyColumns = tableColumns.filter((column) => column.primaryKey);
-    if (primaryKeyColumns.length) return { schema, table, whereColumns: tableColumns.filter((column) => !column.generated) };
-    return null;
+  function originalValuePredicate(column: ColumnMeta, value: unknown, target: EditTarget): string {
+    const name = quoteIdent(sourceColumnName(column));
+    if (target.key.columns.includes(sourceColumnName(column))) {
+      return value === null ? `${name} IS NULL` : `${name} = ${sqlLiteral(value)}`;
+    }
+    if (column.typeName === 'json' || column.typeName === 'jsonb') {
+      return `to_jsonb(${name}) IS NOT DISTINCT FROM to_jsonb(${sqlLiteral(value)}::${column.typeName})`;
+    }
+    return `${name} IS NOT DISTINCT FROM ${sqlLiteral(value)}`;
   }
 
   function setResult(next: QueryResult | null) {
@@ -1134,7 +1103,7 @@
   }
 
   function canApplyUpdates(): boolean {
-    return !operation && !connectionMutation && resultUsable && pendingChanges.length > 0 && detectEditTarget() !== null;
+    return !operation && !connectionMutation && resultUsable && pendingChanges.length > 0 && detectEditTarget() !== null && pendingChanges.every((change) => editableColumns.includes(change.column));
   }
 
   function normalizeAppError(error: unknown): AppError {
@@ -1524,7 +1493,7 @@
               <button disabled={running || Boolean(connectionMutation)} on:click={discardUpdates}>Discard</button>
               <button disabled={running || Boolean(connectionMutation)} on:click={disableEditMode}>Done</button>
             {:else}
-              <button disabled={!result?.rows.length || !resultUsable || running || Boolean(connectionMutation)} on:click={enableEditMode}><Icon name="edit" size={14} /> Edit cells</button>
+              <button aria-disabled={Boolean(editDisabledReason)} title={editDisabledReason || 'Edit cells using the selected primary or unique key'} on:click={enableEditMode}><Icon name="edit" size={14} /> Edit cells</button>
             {/if}
           </div>
         </div>
@@ -1541,9 +1510,9 @@
           <div class="edit-bar">
             {pendingChanges.length} pending {pendingChanges.length === 1 ? 'change' : 'changes'}.
             {#if detectEditTarget()}
-              Apply will update {detectEditTarget()?.schema}.{detectEditTarget()?.table}.
+              Apply will update {detectEditTarget()?.schema}.{detectEditTarget()?.table} using {editEligibility.target?.key.primaryKey ? 'primary' : 'unique'} key ({editEligibility.target?.key.columns.join(', ')}).
             {:else}
-              Preview only: a single source table and primary key must be present to apply edits.
+              Editing unavailable: {editEligibility.reason}
             {/if}
           </div>
         {/if}
@@ -1558,7 +1527,7 @@
         {/if}
         {#if result && result.rows.length}
           {#key `${activeTab}:${resultSession?.executedAt}`}
-            <ResultsGrid {result} {editMode} {canLoadMore} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onMessage={flash} />
+            <ResultsGrid {result} {editMode} {editableColumns} {editDisabledReason} {canLoadMore} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onMessage={flash} />
           {/key}
           <footer class="results-foot">
             <span>{result.rows.length} loaded {result.hasMore ? '· more available' : ''}</span>
@@ -1603,9 +1572,9 @@
   <Modal label="Review cell edits" locked={running} onClose={() => (showUpdatePreview = false)}>
     <div class="modal update-review">
       <div class="panel-head"><h2>Review cell edits</h2><button disabled={running} on:click={() => (showUpdatePreview = false)}>Close</button></div>
-      <p>{pendingChanges.length} staged {pendingChanges.length === 1 ? 'change' : 'changes'} on {resultSession?.connectionName}. Each updated row must match its original values.</p>
+      <p>{pendingChanges.length} staged {pendingChanges.length === 1 ? 'change' : 'changes'} on {resultSession?.connectionName}. Rows are identified by {editEligibility.target?.key.primaryKey ? 'primary' : 'unique'} key ({editEligibility.target?.key.columns.join(', ')}); changed cells must still match their original values.</p>
       <pre>{generateUpdateSql()}</pre>
-      {#if !detectEditTarget()}<p class="context-warning">Apply is unavailable without an unambiguous source table and primary key.</p>{/if}
+      {#if !detectEditTarget()}<p class="context-warning">Apply is unavailable without an unambiguous source table and a complete primary or unique key.</p>{/if}
       <div class="row-actions"><button disabled={running} on:click={() => (showUpdatePreview = false)}>Back to results</button><button class="primary" disabled={!canApplyUpdates()} on:click={applyUpdates}>{running ? 'Applying…' : 'Apply changes'}</button></div>
     </div>
   </Modal>

@@ -49,6 +49,8 @@ export interface ColumnMeta {
 
 export interface QueryResult {
   columns: ColumnMeta[];
+  /** Complete catalog keys, not merely PK flags on projected columns. */
+  rowKeys?: RowKey[];
   rows: Record<string, unknown>[];
   rowCount: number;
   durationMs: number;
@@ -58,9 +60,18 @@ export interface QueryResult {
   jsonValuesAsText?: boolean;
 }
 
+export interface RowKey {
+  schema: string;
+  table: string;
+  columns: string[];
+  primaryKey: boolean;
+  nullsNotDistinct: boolean;
+}
+
 export interface RowUpdate {
   schema: string;
   table: string;
+  keyColumns: string[];
   values: Record<string, unknown>;
   original: Record<string, unknown>;
 }

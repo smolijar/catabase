@@ -66,7 +66,7 @@ Implemented:
 - transaction banner plus backend transaction connection routing
 - server-side query cancellation via PostgreSQL cancel tokens
 - loaded-row exports and explicitly re-run, read-only exports up to 10,000 rows
-- atomic, parameterized cell edits with primary-key validation and stale-row detection
+- atomic, parameterized cell edits with complete primary/unique-key validation and stale-cell detection
 - schema-aware Monaco completions
 - OpenCode-backed Monaco inline AI completions
 - Svelte/Monaco UI shell with sidebar, tabs, editor, results, history, settings
@@ -78,5 +78,7 @@ Implemented:
 - pnpm install age gate
 
 Query results and staged edits stay in memory only; restarting restores SQL drafts, not cached data. Sorting is limited to loaded rows. Loading more rows or requesting a larger export re-runs the original SQL in a read-only transaction, so it is unavailable while a manual transaction is open. Commit or roll back that transaction first. Cell edits made inside a manual transaction remain pending until you commit it.
+
+Edit cells requires a complete primary key or usable unique key from one source table in the selected columns. The disabled control explains what is missing. Nullable unique keys require non-null values in every loaded row unless the index uses NULLS NOT DISTINCT; partial, expression, invalid and deferred indexes are not row identities. Updates use the original key plus stale-value checks for changed cells, not every selected column. Expressions, generated columns and unsupported value types remain read-only.
 
 Run (Cmd/Ctrl+Enter) executes selected SQL, or the statement under the cursor when nothing is selected. In addition to semicolons, the editor recognizes independent SELECTs separated by a blank line. CTEs stay attached to their main query, and nested queries and UNION/INTERSECT/EXCEPT operands stay together. Use semicolons for other statement boundaries; this editor convenience does not change PostgreSQL batch syntax.
