@@ -723,7 +723,7 @@ button.chip {
 .tab-label small { color: #a2b0c5; font-size: 0.65rem; }
 .pending-dot { color: #f5ca80; }
 .new-tab { flex: 0 0 auto; border: 0; background: transparent; }
-.tab-rename { display: flex; padding: 2px; gap: 3px; }
+.tab-rename { display: flex; padding: 2px; }
 .tab-rename input { width: 145px; padding: 0.25rem; font-size: 0.8rem; }
 .operation-status { border: 0; background: transparent; color: #e5c78c; font-size: 0.77rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-context { display: flex; align-items: center; flex: 0 0 auto; flex-wrap: wrap; gap: 0.8rem; min-height: 30px; padding: 0.35rem 0.75rem; border-bottom: 1px solid #23324a; color: #aab8cb; font-size: 0.73rem; }

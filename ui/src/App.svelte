@@ -252,7 +252,7 @@
 
   async function flushWorkspaceForClose() {
     await bootstrapTask;
-    if (renamingTab) finishRename();
+    if (renamingTab) finishRename(false);
     await tick();
     await persistDraftNow();
   }
@@ -342,14 +342,18 @@
     }
   }
 
-  function finishRename() {
+  function finishRename(restoreFocus = true) {
     const id = renamingTab;
-    if (renameValue.trim()) tabs = tabs.map((tab) => tab.id === renamingTab ? { ...tab, title: renameValue.trim() } : tab);
+    // Removing the input after Enter or Escape can also fire blur. A completed
+    // or cancelled rename must not be saved again by that trailing event.
+    if (!id) return;
+    if (renameValue.trim()) tabs = tabs.map((tab) => tab.id === id ? { ...tab, title: renameValue.trim() } : tab);
     renamingTab = '';
-    focusTabLabel(id);
+    if (restoreFocus) focusTabLabel(id);
   }
 
   function handleRenameKeydown(event: KeyboardEvent) {
+    if (event.isComposing) return;
     if (event.key !== 'Enter' && event.key !== 'Escape') return;
     event.preventDefault();
     event.stopPropagation();
@@ -1469,7 +1473,7 @@
         {#each tabs as tab (tab.id)}
           <div class:active={activeTab === tab.id} class="tab-chip">
             {#if renamingTab === tab.id}
-              <form class="tab-rename" on:submit|preventDefault={finishRename}><input bind:this={renameInput} aria-label="Tab name" bind:value={renameValue} on:keydown={handleRenameKeydown} /><button type="submit" aria-label="Save tab name"><Icon name="check" size={13} /></button></form>
+              <div class="tab-rename"><input bind:this={renameInput} aria-label="Tab name" bind:value={renameValue} on:keydown={handleRenameKeydown} on:blur={() => finishRename(false)} /></div>
             {:else}
               <button data-tab-id={tab.id} class="tab-label" title={`${tab.title} · ${connections.find((connection) => connection.id === (tab.id === activeTab ? tabConnectionId : tab.connectionId))?.name ?? 'No connection'}`} on:click={() => switchTab(tab.id)} on:dblclick={() => startRename(tab.id)}>
                 {#if operation?.tabId === tab.id}<span class="spinner"></span>{/if}
