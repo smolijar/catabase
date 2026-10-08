@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+  import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
   import { save } from '@tauri-apps/plugin-dialog';
   import { isTauri } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -18,6 +18,7 @@
   import { formatRunningDuration } from './lib/status';
   import { createConnectionTester } from './lib/connectionTest';
   import type { ConnectionTestState } from './lib/connectionTest';
+  import { parseConnectionReference, serializeConnectionReference } from './lib/connectionClipboard';
   import { assessRowEditing, buildRowUpdates, originalEditColumns } from './lib/rowEditing';
   import type { EditTarget } from './lib/rowEditing';
   import { canUseResult, createDraftWriter, createQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
@@ -647,6 +648,45 @@
     modalFeedback = '';
     showConnectionModal = true;
     void syncConnectionUrl();
+  }
+
+  async function copyConnection(connection: ConnectionRecord) {
+    try {
+      const reference = serializeConnectionReference(connection);
+      await writeText(reference).catch(() => navigator.clipboard.writeText(reference));
+      flash(`${connection.name} copied. Paste in the connection list to duplicate.`);
+    } catch (error) {
+      flash(`Could not copy connection: ${errorMessage(error)}`, true);
+    }
+  }
+
+  async function pasteConnection(text?: string) {
+    if (operation || connectionMutation || closingWorkspace || showConnectionModal) return;
+    try {
+      const reference = text ?? await readText().catch(() => navigator.clipboard.readText());
+      const id = parseConnectionReference(reference);
+      if (!id) { flash('Copy a saved connection first, then paste in the connection list.'); return; }
+      await duplicateConnection(id);
+    } catch (error) {
+      flash(`Could not paste connection: ${errorMessage(error)}`, true);
+    }
+  }
+
+  async function duplicateConnection(id: string) {
+    if (operation || connectionMutation || closingWorkspace || showConnectionModal) return;
+    connectionMutation = 'Duplicating connection…';
+    try {
+      const saved = await api.duplicateConnection(id);
+      const index = connections.findIndex((connection) => connection.id === id);
+      connections = [...connections.slice(0, index + 1), saved, ...connections.slice(index + 1)];
+      await tick();
+      document.querySelector<HTMLButtonElement>(`.connection-select[data-connection-id="${CSS.escape(saved.id)}"]`)?.focus();
+      flash(`${saved.name} created.`);
+    } catch (error) {
+      flash(`Could not duplicate connection: ${errorMessage(error)}`, true);
+    } finally {
+      connectionMutation = null;
+    }
   }
 
   function queueConnectionUrlSync() {
@@ -1354,6 +1394,9 @@
                     disabled={running || Boolean(connectionMutation)}
                     onActivate={() => activateConnection(connection.id)}
                     onEdit={() => editConnection(connection)}
+                    onDuplicate={() => duplicateConnection(connection.id)}
+                    onCopy={() => copyConnection(connection)}
+                    onPaste={pasteConnection}
                     onDelete={() => deleteConnection(connection.id)}
                   />
                 </li>

@@ -168,6 +168,16 @@ async fn save_connection(
 }
 
 #[tauri::command]
+async fn duplicate_connection(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ConnectionRecord, AppError> {
+    // A duplicate is inactive configuration only. The existing pool, checked-out
+    // transaction and active connection must not be reset by creating it.
+    state.storage.duplicate_connection(&id).map_err(Into::into)
+}
+
+#[tauri::command]
 async fn delete_connection(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1004,6 +1014,7 @@ pub fn run() {
             cancel_query,
             connection_stats,
             delete_connection,
+            duplicate_connection,
             execute_query,
             enable_exit_guard,
             export_write_file,

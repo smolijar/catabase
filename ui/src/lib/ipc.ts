@@ -22,6 +22,7 @@ import type {
 export const api = {
   listConnections: () => invoke<ConnectionRecord[]>('list_connections'),
   saveConnection: (input: ConnectionInput) => invoke<ConnectionRecord>('save_connection', { input }),
+  duplicateConnection: (id: string) => invoke<ConnectionRecord>('duplicate_connection', { id }),
   deleteConnection: (id: string) => invoke<void>('delete_connection', { id }),
   activateConnection: (id: string) => invoke<ConnectionRecord>('activate_connection', { id }),
   testConnection: (input: ConnectionInput) => invoke<void>('test_connection', { input }),

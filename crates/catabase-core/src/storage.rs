@@ -191,6 +191,23 @@ impl Storage {
     }
 
     pub fn save_connection(&self, input: ConnectionInput) -> Result<ConnectionRecord, CoreError> {
+        self.save_connection_inner(input, true)
+    }
+
+    pub fn duplicate_connection(&self, id: &str) -> Result<ConnectionRecord, CoreError> {
+        let source = self
+            .get_connection(id)?
+            .ok_or_else(|| CoreError::message("The copied connection no longer exists."))?;
+        // Creating a copy must not activate it, reset the pool or lose the
+        // original connection's resolved keyring/fallback password.
+        self.save_connection_inner(connection_copy_input(&source), false)
+    }
+
+    fn save_connection_inner(
+        &self,
+        input: ConnectionInput,
+        activate_new: bool,
+    ) -> Result<ConnectionRecord, CoreError> {
         validate_connection(&input)?;
 
         let now = Utc::now().to_rfc3339();
@@ -230,13 +247,28 @@ impl Storage {
             let is_active = existing
                 .as_ref()
                 .map(|(_, is_active, _)| *is_active)
-                .unwrap_or(true);
+                .unwrap_or(activate_new);
             let stored_fallback = incoming_password
                 .clone()
                 .or_else(|| existing.and_then(|(_, _, password)| password));
 
-            if is_new {
+            if is_new && activate_new {
                 tx.execute("UPDATE connections SET is_active = 0", [])?;
+            }
+
+            let mut name = input.name.trim().to_string();
+            if is_new && !activate_new {
+                // Generate collision-free copy names inside the write transaction.
+                let base = name.clone();
+                let mut number = 2;
+                while tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM connections WHERE name = ?1)",
+                    params![name],
+                    |row| row.get::<_, bool>(0),
+                )? {
+                    name = format!("{base} {number}");
+                    number += 1;
+                }
             }
 
             tx.execute(
@@ -256,14 +288,14 @@ impl Storage {
                     updated_at = excluded.updated_at",
                 params![
                     id,
-                    input.name.trim(),
+                    name,
                     input.host.trim(),
                     input.port,
                     input.database.trim(),
                     input.username.trim(),
                     bool_to_i64(input.ssl),
                     stored_fallback,
-                    bool_to_i64(is_active || is_new),
+                    bool_to_i64(is_active),
                     created_at,
                     now,
                 ],
@@ -674,6 +706,19 @@ fn bool_to_i64(value: bool) -> i64 {
     if value { 1 } else { 0 }
 }
 
+fn connection_copy_input(source: &ConnectionRecord) -> ConnectionInput {
+    ConnectionInput {
+        id: None,
+        name: format!("{} copy", source.name),
+        host: source.host.clone(),
+        port: source.port,
+        database: source.database.clone(),
+        username: source.username.clone(),
+        password: source.password.clone(),
+        ssl: source.ssl,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +796,80 @@ mod tests {
         assert!(second.is_active);
         assert_eq!(storage.activate_connection(&first.id).unwrap().id, first.id);
         assert_eq!(storage.active_connection().unwrap().unwrap().id, first.id);
+    }
+
+    #[test]
+    fn copies_connection_fields_and_resolved_password_without_reusing_identity() {
+        let source = ConnectionRecord {
+            id: "source-id".to_string(),
+            name: "zenbase docker".to_string(),
+            host: "localhost".to_string(),
+            port: 5433,
+            database: "zenbase".to_string(),
+            username: "zenbase".to_string(),
+            password: Some("synthetic-test-secret".to_string()),
+            ssl: true,
+            is_active: true,
+            created_at: "original-created-at".to_string(),
+            updated_at: "original-updated-at".to_string(),
+        };
+        let input = connection_copy_input(&source);
+        assert_eq!(input.id, None);
+        assert_eq!(input.name, "zenbase docker copy");
+        assert_eq!(input.host, source.host);
+        assert_eq!(input.port, source.port);
+        assert_eq!(input.database, source.database);
+        assert_eq!(input.username, source.username);
+        assert_eq!(input.password, source.password);
+        assert_eq!(input.ssl, source.ssl);
+    }
+
+    #[test]
+    fn duplicates_get_unique_ids_and_names_without_changing_the_active_connection() {
+        let storage = Storage::in_memory().unwrap();
+        let source = storage
+            .save_connection(ConnectionInput {
+                id: None,
+                name: "zenbase docker".to_string(),
+                host: "localhost".to_string(),
+                port: 5433,
+                database: "zenbase".to_string(),
+                username: "zenbase".to_string(),
+                password: None,
+                ssl: true,
+            })
+            .unwrap();
+        let active = storage
+            .save_connection(ConnectionInput {
+                id: None,
+                name: "other active connection".to_string(),
+                host: "localhost".to_string(),
+                port: 5432,
+                database: "postgres".to_string(),
+                username: "postgres".to_string(),
+                password: None,
+                ssl: false,
+            })
+            .unwrap();
+        let first = storage.duplicate_connection(&source.id).unwrap();
+        let second = storage.duplicate_connection(&source.id).unwrap();
+        assert_ne!(first.id, source.id);
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.name, "zenbase docker copy");
+        assert_eq!(second.name, "zenbase docker copy 2");
+        assert!(!first.is_active && !second.is_active);
+        assert_eq!(first.host, source.host);
+        assert_eq!(first.port, source.port);
+        assert_eq!(first.database, source.database);
+        assert_eq!(first.username, source.username);
+        assert_eq!(first.ssl, source.ssl);
+        assert_eq!(storage.active_connection().unwrap().unwrap().id, active.id);
+        let original = storage.get_connection(&source.id).unwrap().unwrap();
+        assert_eq!(original.name, source.name);
+        assert_eq!(original.updated_at, source.updated_at);
+        assert!(!original.is_active);
+        assert_eq!(storage.list_connections().unwrap().len(), 4);
+        assert!(storage.duplicate_connection("missing-id").is_err());
+        assert_eq!(storage.list_connections().unwrap().len(), 4);
     }
 }

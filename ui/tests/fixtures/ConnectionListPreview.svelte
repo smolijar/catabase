@@ -20,6 +20,9 @@
         <li><ConnectionCard {connection} active={selected === index}
           onActivate={() => { selected = index; action = `Selected ${connection.name}`; }}
           onEdit={() => { action = `Edit ${connection.name}`; }}
+          onDuplicate={() => { action = `Duplicate ${connection.name}`; }}
+          onCopy={() => { action = `Copy ${connection.name}`; }}
+          onPaste={() => { action = `Paste on ${connection.name}`; }}
           onDelete={() => { action = `Delete ${connection.name}`; }} /></li>
       {/each}
     </ul>
