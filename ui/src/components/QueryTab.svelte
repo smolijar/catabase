@@ -2,6 +2,8 @@
   import { onDestroy } from 'svelte';
   import ActionMenu from './ActionMenu.svelte';
   import Icon from './Icon.svelte';
+  import { connectionClipboardAction as clipboardAction } from '../lib/connectionClipboard';
+  import { serializeTabReference } from '../lib/tabClipboard';
 
   export let id: string;
   export let title: string;
@@ -19,6 +21,8 @@
   export let onRename: () => void;
   export let onDuplicate: () => void;
   export let onClose: () => void;
+  export let onCopy: () => void = () => {};
+  export let onPaste: (text?: string) => void = () => {};
   export let onRenameValue: (value: string) => void;
   export let onRenameKeydown: (event: KeyboardEvent) => void;
   export let onRenameBlur: () => void;
@@ -47,7 +51,16 @@
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.isComposing) return;
-    if (event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+    const action = clipboardAction(event);
+    if (action) {
+      event.preventDefault();
+      event.stopPropagation();
+      // Consume repeats too; one held paste shortcut must not create many tabs.
+      if (!event.repeat) {
+        if (action === 'copy') onCopy();
+        else onPaste();
+      }
+    } else if (event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
       event.preventDefault();
       event.stopPropagation();
       onReorder(event.key === 'ArrowLeft' ? -1 : 1);
@@ -69,12 +82,28 @@
     else if (action === 'rename') onRename();
   }
 
+  function handleCopy(event: ClipboardEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    event.clipboardData?.setData('text/plain', serializeTabReference({ id }));
+    onCopy();
+  }
+
+  function handlePaste(event: ClipboardEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    onPaste(event.clipboardData?.getData('text/plain'));
+  }
+
   function handleClick(event: MouseEvent) {
     if (suppressClick) {
       suppressClick = false;
       event.preventDefault();
       event.stopPropagation();
-    } else onSelect();
+    } else {
+      label.focus({ preventScroll: true });
+      onSelect();
+    }
   }
 
   function startDrag(event: PointerEvent) {
@@ -146,13 +175,15 @@
       bind:this={label}
       data-tab-id={id}
       class="tab-label"
-      title={`${title} · ${connectionName}\nDouble-click or F2 to rename. Right-click or Shift+F10 for actions.\nDrag or Alt+Shift+Left/Right to reorder.`}
+      title={`${title} · ${connectionName}\nDouble-click or F2 to rename. Right-click or Shift+F10 for actions.\nDrag or Alt+Shift+Left/Right to reorder. Cmd/Ctrl+C to copy; Cmd/Ctrl+V to duplicate a copied tab.`}
       aria-pressed={active}
       aria-haspopup="menu"
       on:click={handleClick}
       on:dblclick={() => { if (!suppressClick) onRename(); }}
       on:contextmenu={handleContextMenu}
       on:keydown={handleKeydown}
+      on:copy={handleCopy}
+      on:paste={handlePaste}
       on:pointerdown={startDrag}
       on:lostpointercapture={cancelDrag}
       on:dragstart={(event) => event.preventDefault()}

@@ -31,6 +31,7 @@ test('tabs expose context actions without adding another visible menu button', (
   assert.match(html, /aria-haspopup="menu"/);
   assert.match(html, /Right-click or Shift\+F10/);
   assert.match(html, /Double-click or F2 to rename/);
+  assert.match(html, /Cmd\/Ctrl\+C to copy; Cmd\/Ctrl\+V to duplicate/);
   assert.doesNotMatch(html, /dropdown-trigger/);
 });
 
@@ -46,4 +47,11 @@ test('rename is still an input without a confirm button; reference tabs keep the
   assert.match(html, /aria-label="Tab name" value="New title"/);
   assert.doesNotMatch(html, /<button\b/);
   assert.match(renderTab({ readonly: true }), /read only/);
+});
+
+test('tab labels expose saved-order drag and keyboard reorder affordances', () => {
+  const html = renderTab({ dragging: true, dropSide: 'before' });
+  assert.match(html, /data-tab-chip-id="query"/);
+  assert.match(html, /tab-chip[^\"]*dragging[^\"]*drop-before/);
+  assert.match(html, /Drag or Alt\+Shift\+Left\/Right to reorder/);
 });
