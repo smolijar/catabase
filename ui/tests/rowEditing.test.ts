@@ -76,3 +76,12 @@ test('aliased keys and edits use source names, only key plus changed originals a
   assert.equal(buildRowUpdates(target, result.rows, changes)[0].values.id, 'new-key');
   assert.throws(() => buildRowUpdates(target, result.rows, [{ ...changes[0], column: 'computed' }]), /not editable/);
 });
+
+test('a composite FK pick produces one row update with both components and the original row identity', () => {
+  const result = data([column('id'), column('parent', { sourceName: 'parent_id' }), column('tenant', { sourceName: 'tenant_id' })], [key(['id'])], [{ id: 'child', parent: 'old-parent', tenant: 'old-tenant' }]);
+  const target = assessRowEditing(result).target!;
+  assert.deepEqual(buildRowUpdates(target, result.rows, [
+    { rowIndex: 0, column: 'parent', oldValue: 'old-parent', newValue: 'new-parent' },
+    { rowIndex: 0, column: 'tenant', oldValue: 'old-tenant', newValue: 'new-tenant' }
+  ]), [{ schema: 'public', table: 'items', keyColumns: ['id'], values: { parent_id: 'new-parent', tenant_id: 'new-tenant' }, original: { id: 'child', parent_id: 'old-parent', tenant_id: 'old-tenant' } }]);
+});

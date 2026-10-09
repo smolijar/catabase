@@ -1,10 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cellText, parseCellDraft, positionAfterReorder, prettyCell, selectionText, sortedRows, visibleRowWindow } from '../src/lib/resultsGrid.ts';
+import { cellText, parseCellDraft, positionAfterReorder, prettyCell, sameCellValue, selectionText, sortedRows, visibleRowWindow } from '../src/lib/resultsGrid.ts';
 import type { ColumnMeta, QueryResult } from '../src/lib/types.ts';
 
 const column = (typeName = 'text', more: Partial<ColumnMeta> = {}): ColumnMeta => ({ name: 'value', typeName, typeOid: 0, nullable: true, generated: false, primaryKey: false, ...more });
 const result = (values: unknown[], typeName = 'text'): QueryResult => ({ columns: [column(typeName)], rows: values.map((value) => ({ value })), rowCount: values.length, durationMs: 1, autoLimited: false, hasMore: false });
+
+test('re-selecting an original FK clears the change without confusing exact text, SQL NULL or JSON null', () => {
+  assert.ok(sameCellValue(42, '42', column('int4')));
+  assert.ok(sameCellValue('9223372036854775807', '9223372036854775807', column('int8')));
+  assert.ok(!sameCellValue('9007199254740993', '9007199254740992', column('int8')));
+  assert.ok(!sameCellValue(null, 'NULL', column()));
+  assert.ok(!sameCellValue('NULL', null, column()));
+  assert.ok(sameCellValue(null, null, column()));
+  assert.ok(!sameCellValue(null, 'null', column('jsonb'), true, true));
+  assert.ok(sameCellValue({ id: 1 }, '{"id":1}', column('jsonb'), false, true));
+  assert.ok(!sameCellValue('null', '"null"', column('jsonb'), true, true));
+});
 
 test('numeric sorting preserves exact int8/decimal ordering and original row identity', () => {
   const values = ['9007199254740993', '9007199254740992', null, '-0.000000000000000001', '1.000000000000000002', '1.000000000000000001', '0'];

@@ -11,6 +11,8 @@ import type {
   ConnectionStats,
   HistoryPage,
   HistoryStats,
+  ForeignKeyLookup,
+  ForeignKeyValues,
   QueryResult,
   RowUpdate,
   SchemaTree,
@@ -42,6 +44,8 @@ export const api = {
   txCommit: () => invoke<TxStatus>('tx_commit'),
   txRollback: () => invoke<TxStatus>('tx_rollback'),
   introspectSchema: (connectionId?: string) => invoke<SchemaTree>('introspect_schema', { connectionId }),
+  foreignKeyValues: (connectionId: string, queryToken: string, request: ForeignKeyLookup) =>
+    invoke<ForeignKeyValues>('foreign_key_values', { connectionId, queryToken, request }),
   getDdl: (schema: string, name: string, connectionId?: string) => invoke<string>('get_ddl', { schema, name, connectionId }),
   historyPage: (search: string | null, offset = 0, limit = 50) =>
     invoke<HistoryPage>('history_page', { search, offset, limit }),

@@ -9,15 +9,16 @@ use std::{
 
 use catabase_core::{
     AiCompletionRequest, AiHealth, ApplyUpdatesResult, ConnectionFields, ConnectionInput,
-    ConnectionRecord, ConnectionStats, CoreError, HistoryPage, HistoryStats, NewHistoryEntry,
-    OpenCodeClient, PgCancelToken, PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryResult,
-    RowUpdate, SchemaTree, Settings, StatementKind, StatementRange, Storage,
-    apply_row_updates as apply_rows, build_connection_url as build_url, cancel_query_token,
-    checkout_pool_client, classify_statement, connection_stats as load_connection_stats,
-    create_pool, execute_on_client, execute_on_client_cancellable, get_ddl_on_client as load_ddl,
-    introspect_schema_on_client as load_schema, parse_connection_url as parse_url,
-    split_editor_statements, split_statements, test_connection as test_pg_connection,
-    validate_transaction_sql,
+    ConnectionRecord, ConnectionStats, CoreError, ForeignKeyLookup, ForeignKeyValues, HistoryPage,
+    HistoryStats, NewHistoryEntry, OpenCodeClient, PgCancelToken, PgClient, PgErrorInfo, PgPool,
+    PooledPgClient, QueryResult, RowUpdate, SchemaTree, Settings, StatementKind, StatementRange,
+    Storage, apply_row_updates as apply_rows, build_connection_url as build_url,
+    cancel_query_token, checkout_pool_client, classify_statement, connect_client,
+    connection_stats as load_connection_stats, create_pool, execute_on_client,
+    execute_on_client_cancellable, get_ddl_on_client as load_ddl,
+    introspect_schema_on_client as load_schema, lookup_foreign_key_values as lookup_fk_values,
+    parse_connection_url as parse_url, split_editor_statements, split_statements,
+    test_connection as test_pg_connection, validate_transaction_sql,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -466,6 +467,36 @@ async fn introspect_schema(
     let pool = active_pool(&state, &active).await?;
     let client = checkout_pool_client(&pool).await.map_err(AppError::from)?;
     load_schema(&client).await.map_err(Into::into)
+}
+
+#[tauri::command]
+async fn foreign_key_values(
+    state: State<'_, AppState>,
+    connection_id: String,
+    query_token: String,
+    request: ForeignKeyLookup,
+) -> Result<ForeignKeyValues, AppError> {
+    begin_operation(&state, &query_token).await;
+    let outcome = async {
+        let active = requested_connection(&state, Some(&connection_id)).await?;
+        // An isolated connection cannot steal, mutate or abort the user's held
+        // transaction, even with a one-client pool. Preview committed rows only.
+        let client = connect_client(&ConnectionFields::from(&active)).await.map_err(AppError::from)?;
+        let cancelled = register_cancel(&state, &query_token, &client, active.ssl).await?;
+        let outcome = async {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(CoreError::Cancelled("Foreign-key preview cancelled.".into()));
+            }
+            client.batch_execute("BEGIN READ ONLY; SET LOCAL statement_timeout = '5s'; SET LOCAL lock_timeout = '1s'").await?;
+            lookup_fk_values(&client, &request).await
+        }.await;
+        // Late cancellation must never interrupt cleanup or another request.
+        state.cancels.lock().await.remove(&query_token);
+        client.batch_execute("ROLLBACK").await.map_err(|error| AppError::from(CoreError::from(error)))?;
+        outcome.map_err(AppError::from)
+    }.await;
+    state.cancels.lock().await.remove(&query_token);
+    outcome
 }
 
 #[tauri::command]
@@ -1027,6 +1058,7 @@ pub fn run() {
             history_purge,
             history_stats,
             introspect_schema,
+            foreign_key_values,
             list_connections,
             load_draft,
             parse_connection_url,

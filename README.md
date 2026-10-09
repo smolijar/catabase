@@ -93,4 +93,6 @@ Edit cells requires a complete primary key or usable unique key from one source 
 
 The cell editor has a Set NULL shortcut next to Reset. It changes the draft only; Stage change is still required, and non-nullable columns disable the shortcut.
 
+Foreign-key cells offer a searchable list of referenced keys with up to three text-column previews. Lookups use the result's saved connection, re-check the actual constraint, and run in an isolated, time-limited read-only transaction without replacing results or adding query history. The first 50 matches are shown; search keys or preview text to narrow the list. Composite picks fill/stage all projected components together; incomplete selections explain what is missing. Previews show committed rows, not uncommitted changes in a manual transaction.
+
 Run (Cmd/Ctrl+Enter) executes selected SQL, or the statement under the cursor when nothing is selected. In addition to semicolons, the editor recognizes independent SELECTs separated by a blank line. CTEs stay attached to their main query, and nested queries and UNION/INTERSECT/EXCEPT operands stay together. Use semicolons for other statement boundaries; this editor convenience does not change PostgreSQL batch syntax.

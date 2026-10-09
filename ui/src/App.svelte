@@ -26,6 +26,7 @@
   import { reorderTabs, tabDropTarget, tabScrollDelta } from './lib/tabDrag';
   import type { TabDrop } from './lib/tabDrag';
   import { assessRowEditing, buildRowUpdates, originalEditColumns } from './lib/rowEditing';
+  import { sameCellValue } from './lib/resultsGrid';
   import type { EditTarget } from './lib/rowEditing';
   import { canUseResult, createDraftWriter, createQueryTab, duplicateQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
   import type { PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
@@ -39,6 +40,7 @@
     ExecutionTarget,
     HistoryEntry,
     HistoryStats,
+    ForeignKeyLookup,
     QueryResult,
     SchemaItem,
     Settings,
@@ -1179,16 +1181,26 @@
   }
 
   function updateCell(rowIndex: number, column: string, newValue: unknown) {
-    if (!editMode || !result || !resultUsable || operation || connectionMutation || !editableColumns.includes(column)) return;
-    const oldValue = originalRows[rowIndex]?.[column];
+    updateCells(rowIndex, { [column]: newValue });
+  }
+
+  function updateCells(rowIndex: number, values: Record<string, unknown>) {
+    const columns = Object.keys(values);
+    if (!editMode || !result || !resultUsable || operation || connectionMutation || !columns.length || columns.some((column) => !editableColumns.includes(column))) return;
     result = {
       ...result,
-      rows: result.rows.map((row, index) => (index === rowIndex ? { ...row, [column]: newValue } : row))
+      rows: result.rows.map((row, index) => (index === rowIndex ? { ...row, ...values } : row))
     };
-    pendingChanges = pendingChanges.filter((change) => !(change.rowIndex === rowIndex && change.column === column));
-    if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
-      pendingChanges = [...pendingChanges, { rowIndex, column, oldValue, newValue }];
+    pendingChanges = pendingChanges.filter((change) => !(change.rowIndex === rowIndex && columns.includes(change.column)));
+    for (const [column, newValue] of Object.entries(values)) {
+      const oldValue = originalRows[rowIndex]?.[column];
+      if (!sameCellValue(oldValue, newValue, result.columns.find((item) => item.name === column)!, result.jsonValuesAsText, true)) pendingChanges = [...pendingChanges, { rowIndex, column, oldValue, newValue }];
     }
+  }
+
+  function lookupForeignKey(request: ForeignKeyLookup, token: string) {
+    if (!tabConnectionId || !resultUsable || operation || connectionMutation) return Promise.reject(new Error('Wait for an idle, editable result on its original connection.'));
+    return api.foreignKeyValues(tabConnectionId, token, request);
   }
 
   function previewUpdates() {
@@ -1719,7 +1731,7 @@
         {/if}
         {#if result && result.rows.length}
           {#key `${activeTab}:${resultSession?.executedAt}`}
-            <ResultsGrid {result} {editMode} {editableColumns} {editDisabledReason} {canLoadMore} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onMessage={flash} />
+            <ResultsGrid {result} {editMode} {editableColumns} {editDisabledReason} {schemaItems} {canLoadMore} resultContext={`${activeTab}:${resultSession?.executedAt ?? ''}`} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onEditMany={updateCells} onForeignKeyLookup={lookupForeignKey} onCancelLookup={(token) => { void api.cancelQuery(token).catch(() => {}); }} onMessage={flash} />
           {/key}
           <footer class="results-foot">
             <span>{result.rows.length} loaded {result.hasMore ? '· more available' : ''}</span>
