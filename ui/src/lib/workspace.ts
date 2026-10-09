@@ -35,6 +35,18 @@ export function createQueryTab(id: string, title: string, sql = '', connectionId
   return { id, title, kind: 'query', sql, connectionId, viewState: null, session: null, error: null, originalRows: [], pendingChanges: [], editMode: false };
 }
 
+// Duplicate a draft, not its database results, errors or staged writes.
+// References become editable queries, just like opening their SQL in a new tab.
+export function duplicateQueryTab(source: WorkspaceTab, id: string, tabs: WorkspaceTab[]): WorkspaceTab {
+  const base = `${source.title} copy`;
+  const titles = new Set(tabs.map((tab) => tab.title));
+  let title = base;
+  for (let suffix = 2; titles.has(title); suffix++) title = `${base} ${suffix}`;
+  const copy = createQueryTab(id, title, source.sql, source.connectionId);
+  copy.viewState = source.viewState ? structuredClone(source.viewState) : null;
+  return copy;
+}
+
 export function canUseResult(session: ResultSession | null, connectionId: string | null): boolean {
   return Boolean(session && !session.snapshot && connectionId && session.connectionId === connectionId);
 }

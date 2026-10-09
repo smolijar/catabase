@@ -14,6 +14,7 @@
   import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
   import SidebarResizer from './components/SidebarResizer.svelte';
+  import QueryTab from './components/QueryTab.svelte';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
@@ -23,7 +24,7 @@
   import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, restoreSidebarWidth } from './lib/sidebarLayout';
   import { assessRowEditing, buildRowUpdates, originalEditColumns } from './lib/rowEditing';
   import type { EditTarget } from './lib/rowEditing';
-  import { canUseResult, createDraftWriter, createQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
+  import { canUseResult, createDraftWriter, createQueryTab, duplicateQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
   import type { PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
   import type {
     AiHealth,
@@ -69,7 +70,6 @@
   let editorViewState: WorkspaceTab['viewState'] = null;
   let renamingTab = '';
   let renameValue = '';
-  let renameInput: HTMLInputElement | undefined;
   let tabBar: HTMLElement;
   let workspaceLoaded = false;
   let editorRef: EditorHandle | undefined;
@@ -346,15 +346,32 @@
     tabs = tabs.filter((item) => item.id !== id);
     if (!tabs.length) tabs = [createQueryTab(crypto.randomUUID(), 'Query 1', '', tabConnectionId)];
     if (activeTab === id) displayTab(tabs[Math.min(index, tabs.length - 1)]);
+    focusTabLabel(activeTab);
+  }
+
+  function duplicateTab(id: string) {
+    if (closingWorkspace || connectionMutation) return;
+    if (renamingTab) finishRename(false);
+    captureActive();
+    const index = tabs.findIndex((tab) => tab.id === id);
+    if (index < 0) { flash('This tab is no longer open.'); return; }
+    const copy = duplicateQueryTab(tabs[index], crypto.randomUUID(), tabs);
+    tabs = [...tabs.slice(0, index + 1), copy, ...tabs.slice(index + 1)];
+    displayTab(copy);
+    focusTabLabel(copy.id);
+    flash(`${copy.title} created.`);
   }
 
   async function startRename(id = activeTab) {
+    if (renamingTab) finishRename(false);
+    if (!tabs.some((tab) => tab.id === id)) return;
     renamingTab = id;
     renameValue = tabs.find((tab) => tab.id === id)?.title ?? '';
     await tick();
     if (renamingTab === id) {
-      renameInput?.focus();
-      renameInput?.select();
+      const input = tabBar?.querySelector<HTMLInputElement>('.tab-rename input');
+      input?.focus();
+      input?.select();
     }
   }
 
@@ -1512,18 +1529,16 @@
     <section class="main-pane" class:resizing={resizingResults} style={`--results-height: ${resultsHeight}px`}>
       <nav bind:this={tabBar} class="tabs" aria-label="Query tabs">
         {#each tabs as tab (tab.id)}
-          <div class:active={activeTab === tab.id} class="tab-chip">
-            {#if renamingTab === tab.id}
-              <div class="tab-rename"><input bind:this={renameInput} aria-label="Tab name" bind:value={renameValue} on:keydown={handleRenameKeydown} on:blur={() => finishRename(false)} /></div>
-            {:else}
-              <button data-tab-id={tab.id} class="tab-label" title={`${tab.title} · ${connections.find((connection) => connection.id === (tab.id === activeTab ? tabConnectionId : tab.connectionId))?.name ?? 'No connection'}`} on:click={() => switchTab(tab.id)} on:dblclick={() => startRename(tab.id)}>
-                {#if operation?.tabId === tab.id}<span class="spinner"></span>{/if}
-                {tab.title}{#if (tab.id === activeTab ? pendingChanges : tab.pendingChanges).length}<span class="pending-dot" title="Staged edits">•</span>{/if}
-                {#if tab.kind === 'reference'}<small>read only</small>{/if}
-              </button>
-              <button class="tab-close" aria-label={`Close ${tab.title}`} on:click={() => closeTab(tab.id)}><Icon name="close" size={13} /></button>
-            {/if}
-          </div>
+          <QueryTab
+            id={tab.id} title={tab.title} active={activeTab === tab.id} readonly={tab.kind === 'reference'}
+            connectionName={connections.find((connection) => connection.id === (tab.id === activeTab ? tabConnectionId : tab.connectionId))?.name ?? 'No connection'}
+            running={operation?.tabId === tab.id} closeDisabled={operation?.tabId === tab.id}
+            pending={Boolean((tab.id === activeTab ? pendingChanges : tab.pendingChanges).length)}
+            renaming={renamingTab === tab.id} {renameValue}
+            onSelect={() => switchTab(tab.id)} onRename={() => startRename(tab.id)}
+            onDuplicate={() => duplicateTab(tab.id)} onClose={() => closeTab(tab.id)}
+            onRenameValue={(value) => { renameValue = value; }} onRenameKeydown={handleRenameKeydown} onRenameBlur={() => finishRename(false)}
+          />
         {/each}
         <button class="new-tab" aria-label="New query tab" title="New query tab (Cmd/Ctrl+T)" on:click={() => newQuery()}><Icon name="plus" size={16} /></button>
       </nav>
