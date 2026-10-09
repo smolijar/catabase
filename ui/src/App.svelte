@@ -22,6 +22,8 @@
   import type { ConnectionTestState } from './lib/connectionTest';
   import { parseConnectionReference, serializeConnectionReference } from './lib/connectionClipboard';
   import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, restoreSidebarWidth } from './lib/sidebarLayout';
+  import { reorderTabs, tabDropTarget, tabScrollDelta } from './lib/tabDrag';
+  import type { TabDrop } from './lib/tabDrag';
   import { assessRowEditing, buildRowUpdates, originalEditColumns } from './lib/rowEditing';
   import type { EditTarget } from './lib/rowEditing';
   import { canUseResult, createDraftWriter, createQueryTab, duplicateQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
@@ -71,6 +73,10 @@
   let renamingTab = '';
   let renameValue = '';
   let tabBar: HTMLElement;
+  let draggingTab = '';
+  let tabDrop: TabDrop | null = null;
+  let tabDragPointer: { x: number; y: number } | null = null;
+  let tabDragFrame = 0;
   let workspaceLoaded = false;
   let editorRef: EditorHandle | undefined;
   let running = false;
@@ -400,6 +406,54 @@
 
   function focusTabLabel(id: string) {
     void tick().then(() => tabBar?.querySelector<HTMLButtonElement>(`[data-tab-id="${CSS.escape(id)}"]`)?.focus());
+  }
+
+  function startTabDrag(id: string, x: number, y: number) {
+    draggingTab = id;
+    updateTabDrag(x, y);
+    tabDragFrame = requestAnimationFrame(scrollTabDrag);
+  }
+
+  function updateTabDrag(x: number, y: number) {
+    tabDragPointer = { x, y };
+    const bar = tabBar.getBoundingClientRect();
+    if (y < bar.top - 16 || y > bar.bottom + 16) { tabDrop = null; return; }
+    const bounds = Array.from(tabBar.querySelectorAll<HTMLElement>('[data-tab-chip-id]'))
+      .filter((element) => element.dataset.tabChipId !== draggingTab)
+      .map((element) => ({ id: element.dataset.tabChipId!, left: element.getBoundingClientRect().left, right: element.getBoundingClientRect().right }));
+    tabDrop = tabDropTarget(bounds, x);
+  }
+
+  function scrollTabDrag() {
+    if (!draggingTab || !tabDragPointer) return;
+    const { x, y } = tabDragPointer;
+    const bar = tabBar.getBoundingClientRect();
+    if (y >= bar.top - 16 && y <= bar.bottom + 16) {
+      const delta = tabScrollDelta(bar.left, bar.right, x);
+      if (delta) { tabBar.scrollLeft += delta; updateTabDrag(x, y); }
+    }
+    tabDragFrame = requestAnimationFrame(scrollTabDrag);
+  }
+
+  function finishTabDrag(cancelled: boolean) {
+    if (tabDragFrame) cancelAnimationFrame(tabDragFrame);
+    tabDragFrame = 0;
+    if (!cancelled) {
+      captureActive();
+      tabs = reorderTabs(tabs, draggingTab, tabDrop);
+    }
+    draggingTab = '';
+    tabDrop = null;
+    tabDragPointer = null;
+  }
+
+  function reorderTabWithKeyboard(id: string, direction: number) {
+    const neighbor = tabs[tabs.findIndex((tab) => tab.id === id) + direction];
+    if (!neighbor) return;
+    captureActive();
+    tabs = reorderTabs(tabs, id, { id: neighbor.id, side: direction < 0 ? 'before' : 'after' });
+    focusTabLabel(id);
+    flash('Tab order updated.');
   }
 
   function emptyConnection(): ConnectionInput {
@@ -1527,7 +1581,7 @@
     {/if}
 
     <section class="main-pane" class:resizing={resizingResults} style={`--results-height: ${resultsHeight}px`}>
-      <nav bind:this={tabBar} class="tabs" aria-label="Query tabs">
+      <nav bind:this={tabBar} class="tabs" class:dragging={Boolean(draggingTab)} aria-label="Query tabs">
         {#each tabs as tab (tab.id)}
           <QueryTab
             id={tab.id} title={tab.title} active={activeTab === tab.id} readonly={tab.kind === 'reference'}
@@ -1535,9 +1589,12 @@
             running={operation?.tabId === tab.id} closeDisabled={operation?.tabId === tab.id}
             pending={Boolean((tab.id === activeTab ? pendingChanges : tab.pendingChanges).length)}
             renaming={renamingTab === tab.id} {renameValue}
+            dragging={draggingTab === tab.id} dropSide={tabDrop?.id === tab.id ? tabDrop.side : null}
             onSelect={() => switchTab(tab.id)} onRename={() => startRename(tab.id)}
             onDuplicate={() => duplicateTab(tab.id)} onClose={() => closeTab(tab.id)}
             onRenameValue={(value) => { renameValue = value; }} onRenameKeydown={handleRenameKeydown} onRenameBlur={() => finishRename(false)}
+            onDragStart={(x, y) => startTabDrag(tab.id, x, y)} onDragMove={updateTabDrag} onDragEnd={finishTabDrag}
+            onReorder={(direction) => reorderTabWithKeyboard(tab.id, direction)}
           />
         {/each}
         <button class="new-tab" aria-label="New query tab" title="New query tab (Cmd/Ctrl+T)" on:click={() => newQuery()}><Icon name="plus" size={16} /></button>
