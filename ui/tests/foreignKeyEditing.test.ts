@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createForeignKeyLookup, foreignKeyDraft, foreignKeyTargets, foreignKeyValuesMatch } from '../src/lib/foreignKeyEditing.ts';
+import { createForeignKeyLookup, foreignKeyDraft, foreignKeyStageReason, foreignKeyTargets, foreignKeyValuesMatch } from '../src/lib/foreignKeyEditing.ts';
 import type { ForeignKeyLookupState } from '../src/lib/foreignKeyEditing.ts';
 import type { ColumnMeta, ForeignKeyLookup, ForeignKeyValues, SchemaForeignKey, SchemaItem } from '../src/lib/types.ts';
 
@@ -11,6 +11,16 @@ const key: SchemaForeignKey = { name: 'parent_fk', columns: ['parent_id', 'tenan
 const source: SchemaItem = { schema: 'public', name: 'children', kind: 'table', columns: [], foreignKeys: [key] };
 const data: ForeignKeyValues = { foreignKey: key, previewColumns: ['name'], rows: [{ id: '9223372036854775807', tenant: 'team', name: 'Parent' }], hasMore: false };
 const request: ForeignKeyLookup = { schema: 'public', table: 'children', constraint: 'parent_fk', search: '' };
+
+test('FK edits require an actual picked row or explicit SQL NULL, with no manual fallback', () => {
+  const targets = foreignKeyTargets(parent, [parent, tenant], [source], ['parent', 'tenant']);
+  assert.match(foreignKeyStageReason(targets, false, false), /Choose a referenced row/);
+  assert.equal(foreignKeyStageReason(targets, true, false), '');
+  assert.equal(foreignKeyStageReason(targets, false, true), '');
+  assert.equal(foreignKeyStageReason([], false, false), '');
+  const incomplete = foreignKeyTargets(parent, [parent], [source], ['parent']);
+  assert.match(foreignKeyStageReason(incomplete, false, false), /Missing: tenant_id/);
+});
 
 test('FK previews use exact source metadata and map composite keys to projected aliases', () => {
   const targets = foreignKeyTargets(parent, [parent, tenant], [source], ['parent', 'tenant']);

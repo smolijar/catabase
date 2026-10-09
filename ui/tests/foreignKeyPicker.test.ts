@@ -22,8 +22,8 @@ test('the FK preview has a bounded search input and explains staged/committed-ro
   assert.match(html, /public.parents \(id\)/);
   assert.match(html, /aria-label="Search referenced values"/);
   assert.match(html, /maxlength="512"/);
-  assert.match(html, /Preview uses committed rows/);
-  assert.match(html, /Choose a row, then stage the change/);
+  assert.match(html, /Committed rows/);
+  assert.match(html, /choose, then stage/);
 });
 
 test('unavailable composite mappings show their explanation without a misleading search field', () => {

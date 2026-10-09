@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Dropdown from './Dropdown.svelte';
+  import ForeignKeyOption from './ForeignKeyOption.svelte';
   import { createForeignKeyLookup, foreignKeyValuesMatch } from '../lib/foreignKeyEditing';
   import type { ForeignKeyLookupState, ForeignKeyTarget } from '../lib/foreignKeyEditing';
   import type { ForeignKeyLookup, ForeignKeyValues } from '../lib/types';
@@ -43,21 +44,13 @@
     onTargetChange();
   }
 
-  function keyText(row: Record<string, string | null>) {
-    return target.key.referencedColumns.map((name) => row[name] ?? 'NULL').join(' · ');
-  }
-
   function isSelected(row: Record<string, string | null>, picked: typeof selectedRow, columns: string[]) {
     return Boolean(picked && columns.every((name) => picked[name] === row[name]));
   }
 
-  function previewColumns(row: Record<string, string | null>) {
-    return validData?.previewColumns.filter((name) => row[name] != null && row[name] !== '') ?? [];
-  }
 </script>
 
 <section class="fk-picker" aria-label="Foreign key values">
-  <div class="fk-title">Referenced values</div>
   {#if targets.length > 1}
     <Dropdown value={target?.key.name ?? ''} options={targets.map((item) => ({ value: item.key.name, label: `${item.key.name} → ${item.key.referencedSchema}.${item.key.referencedTable}` }))} ariaLabel="Foreign key relationship" {disabled} onSelect={changeTarget} />
   {/if}
@@ -74,31 +67,22 @@
       {:else if validData}
         <div class="fk-options" aria-label="Available referenced rows">
           {#each validData.rows as row}
-            <button type="button" class="fk-option" class:chosen={isSelected(row, selectedRow, target.key.referencedColumns)} aria-pressed={isSelected(row, selectedRow, target.key.referencedColumns)} aria-label={`Use referenced key ${keyText(row)}${previewColumns(row).length ? `: ${previewColumns(row).map((name) => row[name]).join(' · ')}` : ''}`} {disabled} on:click={() => { if (!disabled) onPick(target, row); }}>
-              <strong>{keyText(row)}</strong>
-              {#each previewColumns(row) as name}<span title={`${name}: ${row[name]}`}><small>{name}</small> {row[name]}</span>{/each}
-            </button>
+            <ForeignKeyOption {row} keyColumns={target.key.referencedColumns} previewColumns={validData.previewColumns} selected={isSelected(row, selectedRow, target.key.referencedColumns)} {disabled} onPick={() => onPick(target, row)} />
           {/each}
         </div>
-        <p class="fk-status" role="status">{!validData.rows.length ? 'No matching referenced rows.' : validData.hasMore ? 'First 50 matches. Search to narrow the list.' : `${validData.rows.length} ${validData.rows.length === 1 ? 'available row' : 'available rows'}.`}</p>
+        <p class="fk-status" role="status" title={`Choose a row, then stage the change.${validData.hasMore ? ' First 50 matches; search to narrow the list.' : ''}${target.mappings.length > 1 ? ' All foreign-key components will be staged together.' : ''}`}>{!validData.rows.length ? 'No matching referenced rows.' : `${validData.rows.length}${validData.hasMore ? '+' : ''} ${validData.rows.length === 1 && !validData.hasMore ? 'match' : 'matches'} · committed rows`}</p>
       {/if}
-      <p class="fk-note">Preview uses committed rows. Choose a row, then stage the change.{target.mappings.length > 1 ? ' All foreign-key components will be staged together.' : ''}</p>
+      {#if !validData}<p class="fk-note" title={target.mappings.length > 1 ? 'All foreign-key components will be staged together.' : undefined}>Committed rows · choose, then stage.{target.mappings.length > 1 ? ' Composite key.' : ''}</p>{/if}
     {/if}
   {/if}
 </section>
 
 <style>
-  .fk-picker { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #42516a; }
-  .fk-title { font-size: 12px; font-weight: 600; }
-  .fk-source { margin: 4px 0 8px; color: #a9bed5; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
-  input { width: 100%; min-height: 30px; padding: 6px 8px; border: 1px solid #596d87; border-radius: 5px; background: #111a26; color: #eef4ff; font-size: 11px; }
-  .fk-options { max-height: 190px; overflow-y: auto; overscroll-behavior: contain; margin-top: 6px; }
-  .fk-option { display: block; width: 100%; padding: 8px; margin-bottom: 3px; border: 1px solid #35465d; border-radius: 4px; background: #141e2b; text-align: left; font-size: 11px; }
-  .fk-option strong { display: block; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
-  .fk-option span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d2deed; font-size: 11px; line-height: 1.5; }
-  .fk-option small { margin-right: 4px; color: #9dafc7; font-size: 10px; }
-  .fk-option.chosen { background: #293e5d; border-color: #8cb6f3; }
-  .fk-status, .fk-note, .fk-error { margin: 6px 0; font-size: 10px; line-height: 1.5; }
+  .fk-picker { display: flex; flex-direction: column; flex: 1; min-height: 140px; margin-top: 6px; }
+  .fk-source { flex-shrink: 0; margin: 0 0 6px; color: #a9bed5; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  input { flex-shrink: 0; width: 100%; min-height: 30px; padding: 6px 8px; border: 1px solid #596d87; border-radius: 5px; background: #111a26; color: #eef4ff; font-size: 11px; }
+  .fk-options { flex: 1; min-height: 56px; overflow-y: auto; overscroll-behavior: contain; margin-top: 6px; border: 1px solid #35465d; border-radius: 4px; }
+  .fk-status, .fk-note, .fk-error { flex-shrink: 0; margin: 4px 0; font-size: 10px; line-height: 1.5; }
   .fk-status, .fk-note { color: #b9c6d8; }
   .fk-error { color: #ffb6b6; overflow-wrap: anywhere; }
 </style>

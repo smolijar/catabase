@@ -45,6 +45,11 @@ export function foreignKeyDraft(target: ForeignKeyTarget, option: Record<string,
   }));
 }
 
+export function foreignKeyStageReason(targets: ForeignKeyTarget[], hasPickedRow: boolean, isNull: boolean): string {
+  if (!targets.length || hasPickedRow || isNull) return '';
+  return targets.every((target) => target.unavailableReason) ? targets[0].unavailableReason : 'Choose a referenced row before staging the change.';
+}
+
 export interface ForeignKeyLookupState { loading: boolean; data: ForeignKeyValues | null; error: string }
 
 export function createForeignKeyLookup(
