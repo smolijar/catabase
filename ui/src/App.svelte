@@ -629,16 +629,6 @@
     }
   }
 
-  function clearEditor() {
-    if (tabKind !== 'query' || operation?.tabId === activeTab) {
-      flash('Open an idle query tab to clear SQL.');
-      return;
-    }
-    if (sql.trim() && !confirm('Clear the SQL editor? This cannot be undone.')) return;
-    sql = '';
-    flash('Editor cleared.');
-  }
-
   function clearResults() {
     if (operation?.tabId === activeTab || connectionMutation) return;
     if (pendingChanges.length && !confirm('Discard staged cell edits and clear results?')) return;
@@ -1078,14 +1068,6 @@
     else void downloadResult(format, kind === 'more');
   }
 
-  function handleWorkspaceAction(action: string) {
-    if (action === 'clear-sql') clearEditor();
-    else if (action === 'clear-results') clearResults();
-    else if (action === 'rename') startRename();
-    else if (action === 'duplicate') newQuery(sql, tabConnectionId, `${tabs.find((tab) => tab.id === activeTab)?.title ?? 'Query'} copy`);
-    else if (action === 'settings') { sidebar = 'settings'; sidebarOpen = true; }
-  }
-
   function enableEditMode() {
     if (editDisabledReason || !editEligibility.target || !result) return;
     const target = editEligibility.target;
@@ -1347,14 +1329,6 @@
     />
     {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : 'Exporting'} · {runningDuration} · {tabs.find((tab) => tab.id === operation?.tabId)?.title}</button>{/if}
     {#if connectionMutation}<span class="operation-status" role="status">{connectionMutation}</span>{/if}
-    <div class="toolbar-spacer"></div>
-    <ActionMenu label="More" ariaLabel="Workspace actions" items={[
-      { id: 'duplicate', label: 'Duplicate in new query tab' },
-      { id: 'rename', label: 'Rename tab' },
-      { id: 'clear-sql', label: 'Clear SQL', disabled: tabKind !== 'query' || operation?.tabId === activeTab },
-      { id: 'clear-results', label: 'Clear results', disabled: !result || operation?.tabId === activeTab || Boolean(connectionMutation) },
-      { id: 'settings', label: 'Settings' }
-    ]} onSelect={handleWorkspaceAction} />
   </header>
 
   <section bind:this={workspaceElement} class="workspace" class:sidebar-open={sidebarOpen} class:resizing-sidebar={resizingSidebar} style={`--sidebar-width: ${visibleSidebarWidth}px`}>

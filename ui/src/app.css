@@ -268,10 +268,6 @@ label {
   font-weight: 900;
 }
 
-.toolbar-spacer {
-  flex: 1;
-}
-
 .chip {
   border: 1px solid #33415f;
   border-radius: 999px;
