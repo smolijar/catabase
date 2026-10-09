@@ -1,6 +1,36 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canUseResult, createDraftWriter, createQueryTab, restoreWorkspace, serializeWorkspace } from '../src/lib/workspace.ts';
+import { canUseResult, createDraftWriter, createQueryTab, duplicateQueryTab, restoreWorkspace, serializeWorkspace } from '../src/lib/workspace.ts';
+
+test('duplicating copies the draft and connection, never query results or staged edits', () => {
+  const source = createQueryTab('one', 'Orders', 'select * from orders;', 'db-one');
+  source.editMode = true;
+  source.error = { message: 'Old error', code: 'test', position: null };
+  source.pendingChanges = [{ rowIndex: 0, column: 'private', oldValue: 'secret', newValue: 'changed' }];
+  source.originalRows = [{ private: 'secret' }];
+  source.session = { data: { rows: source.originalRows, columns: [], rowCount: 1, durationMs: 1, autoLimited: false, hasMore: false }, execution: { sql: source.sql, start: 0, end: source.sql.length }, connectionId: 'db-one', connectionName: 'One', executedAt: '', snapshot: false };
+  const copy = duplicateQueryTab(source, 'two', [source]);
+  assert.deepEqual(copy, createQueryTab('two', 'Orders copy', source.sql, 'db-one'));
+  assert.equal(source.pendingChanges.length, 1);
+  assert.equal(source.session.data.rows[0].private, 'secret');
+});
+
+test('duplicate names are unique and references become fresh editable query tabs', () => {
+  const source = { ...createQueryTab('one', 'Orders', 'select 1;'), kind: 'reference' as const };
+  const copies = [source, createQueryTab('two', 'Orders copy'), createQueryTab('three', 'Orders copy 2')];
+  assert.equal(duplicateQueryTab(source, 'four', copies).title, 'Orders copy 3');
+  assert.equal(duplicateQueryTab(source, 'four', copies).kind, 'query');
+  assert.equal(duplicateQueryTab(source, 'four', copies).connectionId, null);
+});
+
+test('duplicate editor positions are independent from the original tab', () => {
+  const source = createQueryTab('one', 'Orders');
+  source.viewState = { cursorState: [], viewState: { scrollTop: 20 } } as unknown as NonNullable<typeof source.viewState>;
+  const copy = duplicateQueryTab(source, 'two', [source]);
+  assert.deepEqual(copy.viewState, source.viewState);
+  assert.notEqual(copy.viewState, source.viewState);
+  assert.notEqual(copy.viewState?.viewState, source.viewState.viewState);
+});
 
 test('restored tabs retain their SQL and connection, including an intentionally empty draft', () => {
   const first = createQueryTab('one', 'Orders', 'select 1;', 'db-one');
