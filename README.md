@@ -91,4 +91,6 @@ SQL autocomplete resolves table aliases: `p.` offers only the source table's col
 
 Edit cells requires a complete primary key or usable unique key from one source table in the selected columns. The disabled control explains what is missing. Nullable unique keys require non-null values in every loaded row unless the index uses NULLS NOT DISTINCT; partial, expression, invalid and deferred indexes are not row identities. Updates use the original key plus stale-value checks for changed cells, not every selected column. Expressions, generated columns and unsupported value types remain read-only.
 
+The cell editor has a Set NULL shortcut next to Reset. It changes the draft only; Stage change is still required, and non-nullable columns disable the shortcut.
+
 Run (Cmd/Ctrl+Enter) executes selected SQL, or the statement under the cursor when nothing is selected. In addition to semicolons, the editor recognizes independent SELECTs separated by a blank line. CTEs stay attached to their main query, and nested queries and UNION/INTERSECT/EXCEPT operands stay together. Use semicolons for other statement boundaries; this editor convenience does not change PostgreSQL batch syntax.
