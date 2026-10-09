@@ -35,6 +35,13 @@ export function cellText(value: unknown, column?: ColumnMeta, jsonValuesAsText =
   return String(value);
 }
 
+// Typed drafts may encode numbers as exact text. Compare their cell values,
+// while keeping SQL NULL distinct from a literal "NULL" or JSON null.
+export function sameCellValue(left: unknown, right: unknown, column: ColumnMeta, leftJsonValuesAsText = false, rightJsonValuesAsText = false): boolean {
+  if (left == null || right == null) return left == null && right == null;
+  return cellText(left, column, leftJsonValuesAsText) === cellText(right, column, rightJsonValuesAsText);
+}
+
 // Format JSON tokens without parsing their numbers into JavaScript doubles.
 export function prettyCell(value: unknown, column: ColumnMeta, jsonValuesAsText = false): string {
   const text = cellText(value, column, jsonValuesAsText);

@@ -1,10 +1,13 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import Icon from './Icon.svelte';
+  import ForeignKeyPicker from './ForeignKeyPicker.svelte';
   import { copyText } from '../lib/clipboard';
-  import { cellKind, cellText, parseCellDraft, positionAfterReorder, prettyCell, selectionBounds, selectionText, sortedRows, visibleRowWindow } from '../lib/resultsGrid';
+  import { cellKind, cellText, parseCellDraft, positionAfterReorder, prettyCell, sameCellValue, selectionBounds, selectionText, sortedRows, visibleRowWindow } from '../lib/resultsGrid';
   import type { CellPosition, GridSort, IndexedRow } from '../lib/resultsGrid';
-  import type { QueryResult } from '../lib/types';
+  import { foreignKeyDraft, foreignKeyTargets } from '../lib/foreignKeyEditing';
+  import type { ForeignKeyTarget } from '../lib/foreignKeyEditing';
+  import type { ForeignKeyLookup, ForeignKeyValues, QueryResult, SchemaItem } from '../lib/types';
 
   export let result: QueryResult;
   export let editMode = false;
@@ -16,6 +19,11 @@
   export let canLoadMore = false;
   export let onLoadMore: () => Promise<void> = async () => {};
   export let onEdit: (rowIndex: number, column: string, newValue: unknown) => void = () => {};
+  export let onEditMany: (rowIndex: number, values: Record<string, unknown>) => void = (row, values) => { for (const [column, value] of Object.entries(values)) onEdit(row, column, value); };
+  export let schemaItems: SchemaItem[] = [];
+  export let resultContext = '';
+  export let onForeignKeyLookup: (request: ForeignKeyLookup, token: string) => Promise<ForeignKeyValues>;
+  export let onCancelLookup: (token: string) => void = () => {};
   export let onMessage: (message: string) => void = () => {};
 
   let root: HTMLDivElement;
@@ -34,6 +42,7 @@
   let draft = '';
   let draftNull = false;
   let draftError = '';
+  let foreignDraft: { target: ForeignKeyTarget; values: Record<string, string>; row: Record<string, string | null> } | null = null;
   let resize: { column: string; startX: number; startWidth: number } | null = null;
   let requestingMore = false;
   let requestedRows = -1;
@@ -51,6 +60,7 @@
   $: selectedValue = inspectorCell && selectedColumn ? result.rows[inspectorCell.originalIndex]?.[selectedColumn.name] : undefined;
   $: canEdit = Boolean(editMode && !readOnly && selectedColumn && editableColumns.includes(selectedColumn.name));
   $: kind = selectedColumn ? cellKind(selectedColumn) : 'text';
+  $: foreignTargets = canEdit ? foreignKeyTargets(selectedColumn, result.columns, schemaItems, editableColumns) : [];
   $: changed = new Set(changedCells.map((cell) => `${cell.rowIndex}\u001f${cell.column}`));
   $: totalWidth = 48 + result.columns.reduce((total, column) => total + columnWidth(column.name, widths), 0);
   $: resetDraft(result, inspectorCell, editMode);
@@ -175,7 +185,8 @@
     inspectorCell = { originalIndex: rows[row].originalIndex, column };
     if (focusPanel) {
       await tick();
-      const editor = inspectorElement?.querySelector<HTMLElement>('textarea:not(:disabled)')
+      const editor = inspectorElement?.querySelector<HTMLElement>('input[type="search"]:not(:disabled)')
+        ?? inspectorElement?.querySelector<HTMLElement>('textarea:not(:disabled)')
         ?? inspectorElement?.querySelector<HTMLElement>('input:not(:disabled)');
       (editor ?? inspectorElement?.querySelector<HTMLElement>('.close-inspector'))?.focus();
     }
@@ -205,6 +216,7 @@
   }
 
   function resetDraft(data: QueryResult, cell: typeof inspectorCell, _editMode: boolean) {
+    foreignDraft = null;
     if (!cell || !data.columns[cell.column]) return;
     const column = data.columns[cell.column];
     const value = data.rows[cell.originalIndex]?.[column.name];
@@ -216,8 +228,20 @@
   function stageEdit() {
     if (!canEdit || disabled || !inspectorCell || !selectedColumn) return;
     try {
+      if (foreignDraft) {
+        const values = Object.fromEntries(foreignDraft.target.mappings.map(({ column }) => [column.name, parseCellDraft(column, foreignDraft!.values[column.name], false)] as const)
+          .filter(([name, value]) => {
+            const column = result.columns.find((column) => column.name === name)!;
+            return !sameCellValue(value, result.rows[inspectorCell!.originalIndex][name], column, true, result.jsonValuesAsText);
+          }));
+        if (!Object.keys(values).length) { draftError = ''; onMessage('The value is unchanged.'); return; }
+        onEditMany(inspectorCell.originalIndex, values);
+        draftError = '';
+        onMessage('Foreign-key change staged. Review and apply your pending changes to save it.');
+        return;
+      }
       const next = parseCellDraft(selectedColumn, draft, draftNull);
-      if ((next == null && selectedValue == null) || (next != null && selectedValue != null && cellText(next, selectedColumn, true) === cellText(selectedValue, selectedColumn, result.jsonValuesAsText))) {
+      if (sameCellValue(next, selectedValue, selectedColumn, true, result.jsonValuesAsText)) {
         draftError = '';
         onMessage('The value is unchanged.');
         return;
@@ -228,6 +252,18 @@
     } catch (error) {
       draftError = error instanceof Error ? error.message : String(error);
     }
+  }
+
+  function chooseForeignKey(target: ForeignKeyTarget, row: Record<string, string | null>) {
+    if (disabled || !canEdit || !selectedColumn) return;
+    try {
+      const values = foreignKeyDraft(target, row);
+      for (const { column } of target.mappings) parseCellDraft(column, values[column.name], false);
+      draft = values[selectedColumn.name];
+      draftNull = false;
+      draftError = '';
+      foreignDraft = { target, values, row };
+    } catch (error) { draftError = error instanceof Error ? error.message : String(error); }
   }
 
   async function copySelection() {
@@ -376,27 +412,34 @@
       </table>
     </div>
     {#if inspectorCell && selectedColumn}
-      <aside class="cell-inspector" aria-label="Cell details" bind:this={inspectorElement}>
+      <aside class="cell-inspector" class:editable={canEdit} aria-label="Cell details" bind:this={inspectorElement}>
         <div class="inspector-title"><strong title={selectedColumn.name}>{selectedColumn.name}</strong><button class="close-inspector" aria-label="Close cell details" on:click={closeInspector}><Icon name="close" size={14} /></button></div>
         <p class="cell-meta">Row {inspectorCell.originalIndex + 1} · {selectedColumn.typeName}{selectedColumn.generated ? ' · generated' : ''}{selectedColumn.nullable === false ? ' · not nullable' : ''}</p>
         {#if canEdit}
-          <form on:submit|preventDefault={stageEdit}>
-            <div class="value-mode"><span>Value</span><label><input type="checkbox" bind:checked={draftNull} disabled={disabled || selectedColumn.nullable === false} on:change={() => (draftError = '')} /> Set NULL</label></div>
-            {#if draftNull}
-              <div class="null-preview">NULL <span>No value will be stored.</span></div>
-            {:else if kind === 'boolean'}
-              <div class="boolean-options" role="group" aria-label="Boolean value">
-                <label class:chosen={draft === 'true'}><input type="radio" bind:group={draft} value="true" {disabled} /> true</label>
-                <label class:chosen={draft === 'false'}><input type="radio" bind:group={draft} value="false" {disabled} /> false</label>
-              </div>
-            {:else}
-              <textarea aria-label={`New value for ${selectedColumn.name}`} aria-invalid={Boolean(draftError)} bind:value={draft} {disabled} spellcheck="false" inputmode={kind === 'integer' || kind === 'numeric' ? 'decimal' : 'text'} on:input={() => (draftError = '')} on:keydown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); stageEdit(); } }}></textarea>
-            {/if}
-            {#if draftError}<p class="draft-error" role="alert">{draftError}</p>{/if}
-            <p class="edit-hint">{kind === 'text' ? 'An empty value is an empty string. Select Set NULL to remove the value.' : kind === 'json' ? 'JSON is validated before staging. JSON null and SQL NULL are distinct.' : kind === 'numeric' || kind === 'integer' ? 'Numbers retain their full precision.' : 'Choose a value, then stage the change.'}</p>
+          <form class:foreign-key-form={foreignTargets.length > 0} on:submit|preventDefault={stageEdit}>
+            <div class="inspector-body">
+              {#if foreignTargets.length}
+                {#key `${resultContext}:${inspectorCell.originalIndex}:${selectedColumn.name}`}
+                  <ForeignKeyPicker targets={foreignTargets} {disabled} selectedRow={foreignDraft?.row ?? null} onLookup={onForeignKeyLookup} onCancel={onCancelLookup} onPick={chooseForeignKey} onTargetChange={() => { foreignDraft = null; }} />
+                {/key}
+              {/if}
+              <div class="value-mode"><span>Value</span><label><input type="checkbox" bind:checked={draftNull} disabled={disabled || selectedColumn.nullable === false} on:change={() => { draftError = ''; foreignDraft = null; }} /> Set NULL</label></div>
+              {#if draftNull}
+                <div class="null-preview">NULL <span>No value will be stored.</span></div>
+              {:else if kind === 'boolean'}
+                <div class="boolean-options" role="group" aria-label="Boolean value">
+                  <label class:chosen={draft === 'true'}><input type="radio" bind:group={draft} value="true" {disabled} on:change={() => { foreignDraft = null; }} /> true</label>
+                  <label class:chosen={draft === 'false'}><input type="radio" bind:group={draft} value="false" {disabled} on:change={() => { foreignDraft = null; }} /> false</label>
+                </div>
+              {:else}
+                <textarea aria-label={`New value for ${selectedColumn.name}`} aria-invalid={Boolean(draftError)} bind:value={draft} {disabled} spellcheck="false" inputmode={kind === 'integer' || kind === 'numeric' ? 'decimal' : 'text'} on:input={() => { draftError = ''; foreignDraft = null; }} on:keydown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); stageEdit(); } }}></textarea>
+              {/if}
+              {#if draftError}<p class="draft-error" role="alert">{draftError}</p>{/if}
+              <p class="edit-hint">{kind === 'text' ? 'An empty value is an empty string. Select Set NULL to remove the value.' : kind === 'json' ? 'JSON is validated before staging. JSON null and SQL NULL are distinct.' : kind === 'numeric' || kind === 'integer' ? 'Numbers retain their full precision.' : 'Choose a value, then stage the change.'}</p>
+            </div>
             <div class="inspector-actions">
               <button type="button" {disabled} on:click={() => resetDraft(result, inspectorCell, editMode)}>Reset</button>
-              <button type="button" disabled={disabled || selectedColumn.nullable === false} title={selectedColumn.nullable === false ? 'This column does not allow NULL.' : 'Use SQL NULL; stage the change to keep it.'} on:click={() => { draftNull = true; draftError = ''; }}>Set NULL</button>
+              <button type="button" disabled={disabled || selectedColumn.nullable === false} title={selectedColumn.nullable === false ? 'This column does not allow NULL.' : 'Use SQL NULL; stage the change to keep it.'} on:click={() => { draftNull = true; draftError = ''; foreignDraft = null; }}>Set NULL</button>
               <button class="stage-button" type="submit" {disabled}>Stage change</button>
             </div>
           </form>
@@ -451,6 +494,10 @@
   .cell.empty-value { font-size: 10px; }
   .resizing, .resizing .cell { cursor: col-resize; user-select: none; }
   .cell-inspector { flex: 0 0 330px; max-width: 46%; overflow: auto; padding: 12px; border-left: 1px solid #46546a; background: #1c2430; }
+  .cell-inspector.editable { display: flex; flex-direction: column; overflow: hidden; }
+  .cell-inspector form { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .inspector-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+  .inspector-title, .cell-meta { flex-shrink: 0; }
   .inspector-title { display: flex; align-items: center; gap: 8px; }
   .inspector-title strong { flex: 1; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
   .close-inspector { min-height: 24px; width: 24px; padding: 3px; background: transparent; border: none; }
@@ -469,10 +516,12 @@
   .boolean-options label.chosen { border-color: #8cb6f3; background: #293e5d; }
   .edit-hint { margin: 9px 0 11px; font-size: 11px; color: #b9c6d8; line-height: 1.5; }
   .draft-error { color: #ffb6b6; font-size: 11px; line-height: 1.5; margin: 8px 0; }
-  .inspector-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .inspector-actions { display: flex; flex-wrap: wrap; flex-shrink: 0; gap: 6px; padding-top: 8px; }
   .inspector-actions button { font-size: 11px; padding: 5px 8px; }
   .stage-button { flex-basis: 100%; background: #345684; border-color: #6c95cb; }
   .stage-button:hover:not(:disabled) { background: #436a9e; }
+  .foreign-key-form textarea { min-height: 54px; }
+  .foreign-key-form .stage-button { flex-basis: auto; margin-left: auto; }
   @media (max-width: 1000px) { .selection-label { max-width: 170px; overflow: hidden; text-overflow: ellipsis; } .grid-tools { gap: 5px; } .cell-inspector { flex-basis: 280px; } }
   @container (max-width: 640px) { .cell-inspector { position: absolute; z-index: 3; top: 0; bottom: 0; right: 0; width: min(330px, 100%); max-width: 100%; } .selection-label { max-width: 110px; } .sort-scope { display: none; } }
 </style>

@@ -134,6 +134,20 @@ export interface SchemaForeignKey {
   referencedColumns: string[];
 }
 
+export interface ForeignKeyLookup {
+  schema: string;
+  table: string;
+  constraint: string;
+  search: string;
+}
+
+export interface ForeignKeyValues {
+  foreignKey: SchemaForeignKey;
+  previewColumns: string[];
+  rows: Record<string, string | null>[];
+  hasMore: boolean;
+}
+
 export interface SchemaTree {
   schemas: SchemaItem[];
 }
