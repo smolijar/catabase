@@ -21,6 +21,7 @@
   import { createConnectionTester } from './lib/connectionTest';
   import type { ConnectionTestState } from './lib/connectionTest';
   import { parseConnectionReference, serializeConnectionReference } from './lib/connectionClipboard';
+  import { parseTabReference, serializeTabReference } from './lib/tabClipboard';
   import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, restoreSidebarWidth } from './lib/sidebarLayout';
   import { reorderTabs, tabDropTarget, tabScrollDelta } from './lib/tabDrag';
   import type { TabDrop } from './lib/tabDrag';
@@ -366,6 +367,29 @@
     displayTab(copy);
     focusTabLabel(copy.id);
     flash(`${copy.title} created.`);
+  }
+
+  async function copyTab(id: string) {
+    const tab = tabs.find((tab) => tab.id === id);
+    if (!tab || closingWorkspace) return;
+    try {
+      await writeText(serializeTabReference(tab)).catch(() => navigator.clipboard.writeText(serializeTabReference(tab)));
+      flash(`${tab.title} copied. Paste on a tab to duplicate.`);
+    } catch (error) {
+      flash(`Could not copy tab: ${errorMessage(error)}`, true);
+    }
+  }
+
+  async function pasteTab(text?: string) {
+    if (closingWorkspace || connectionMutation) return;
+    try {
+      const reference = text ?? await readText().catch(() => navigator.clipboard.readText());
+      const id = parseTabReference(reference);
+      if (!id) { flash('Copy an open tab first, then paste on a tab to duplicate.'); return; }
+      duplicateTab(id);
+    } catch (error) {
+      flash(`Could not paste tab: ${errorMessage(error)}`, true);
+    }
   }
 
   async function startRename(id = activeTab) {
@@ -1592,6 +1616,7 @@
             dragging={draggingTab === tab.id} dropSide={tabDrop?.id === tab.id ? tabDrop.side : null}
             onSelect={() => switchTab(tab.id)} onRename={() => startRename(tab.id)}
             onDuplicate={() => duplicateTab(tab.id)} onClose={() => closeTab(tab.id)}
+            onCopy={() => copyTab(tab.id)} onPaste={pasteTab}
             onRenameValue={(value) => { renameValue = value; }} onRenameKeydown={handleRenameKeydown} onRenameBlur={() => finishRename(false)}
             onDragStart={(x, y) => startTabDrag(tab.id, x, y)} onDragMove={updateTabDrag} onDragEnd={finishTabDrag}
             onReorder={(direction) => reorderTabWithKeyboard(tab.id, direction)}
