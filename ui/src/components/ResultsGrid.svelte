@@ -2,10 +2,11 @@
   import { tick } from 'svelte';
   import Icon from './Icon.svelte';
   import ForeignKeyPicker from './ForeignKeyPicker.svelte';
+  import CellValueEditor from './CellValueEditor.svelte';
   import { copyText } from '../lib/clipboard';
   import { cellKind, cellText, parseCellDraft, positionAfterReorder, prettyCell, sameCellValue, selectionBounds, selectionText, sortedRows, visibleRowWindow } from '../lib/resultsGrid';
   import type { CellPosition, GridSort, IndexedRow } from '../lib/resultsGrid';
-  import { foreignKeyDraft, foreignKeyTargets } from '../lib/foreignKeyEditing';
+  import { foreignKeyDraft, foreignKeyStageReason, foreignKeyTargets } from '../lib/foreignKeyEditing';
   import type { ForeignKeyTarget } from '../lib/foreignKeyEditing';
   import type { ForeignKeyLookup, ForeignKeyValues, QueryResult, SchemaItem } from '../lib/types';
 
@@ -59,11 +60,13 @@
   $: selectedColumn = inspectorCell ? result.columns[inspectorCell.column] : undefined;
   $: selectedValue = inspectorCell && selectedColumn ? result.rows[inspectorCell.originalIndex]?.[selectedColumn.name] : undefined;
   $: canEdit = Boolean(editMode && !readOnly && selectedColumn && editableColumns.includes(selectedColumn.name));
-  $: kind = selectedColumn ? cellKind(selectedColumn) : 'text';
+  // Reset writes draft state inside the function, so run it before draft-derived
+  // checks when the inspected cell or result changes.
+  $: resetDraft(result, inspectorCell, editMode);
   $: foreignTargets = canEdit ? foreignKeyTargets(selectedColumn, result.columns, schemaItems, editableColumns) : [];
+  $: stageReason = foreignKeyStageReason(foreignTargets, Boolean(foreignDraft), draftNull);
   $: changed = new Set(changedCells.map((cell) => `${cell.rowIndex}\u001f${cell.column}`));
   $: totalWidth = 48 + result.columns.reduce((total, column) => total + columnWidth(column.name, widths), 0);
-  $: resetDraft(result, inspectorCell, editMode);
 
   function nearBottom() {
     return scrollElement && scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight <= ROW_HEIGHT * 2;
@@ -227,6 +230,8 @@
 
   function stageEdit() {
     if (!canEdit || disabled || !inspectorCell || !selectedColumn) return;
+    const blockedReason = foreignKeyStageReason(foreignTargets, Boolean(foreignDraft), draftNull);
+    if (blockedReason) { draftError = blockedReason; return; }
     try {
       if (foreignDraft) {
         const values = Object.fromEntries(foreignDraft.target.mappings.map(({ column }) => [column.name, parseCellDraft(column, foreignDraft!.values[column.name], false)] as const)
@@ -412,40 +417,29 @@
       </table>
     </div>
     {#if inspectorCell && selectedColumn}
-      <aside class="cell-inspector" class:editable={canEdit} aria-label="Cell details" bind:this={inspectorElement}>
+      <aside class="cell-inspector" class:editable={canEdit} class:foreign-key={foreignTargets.length > 0} aria-label="Cell details" bind:this={inspectorElement}>
         <div class="inspector-title"><strong title={selectedColumn.name}>{selectedColumn.name}</strong><button class="close-inspector" aria-label="Close cell details" on:click={closeInspector}><Icon name="close" size={14} /></button></div>
         <p class="cell-meta">Row {inspectorCell.originalIndex + 1} · {selectedColumn.typeName}{selectedColumn.generated ? ' · generated' : ''}{selectedColumn.nullable === false ? ' · not nullable' : ''}</p>
         {#if canEdit}
           <form class:foreign-key-form={foreignTargets.length > 0} on:submit|preventDefault={stageEdit}>
             <div class="inspector-body">
+              <CellValueEditor column={selectedColumn} bind:draft bind:isNull={draftNull} pickerOnly={foreignTargets.length > 0} {disabled} error={draftError} onChange={() => { draftError = ''; foreignDraft = null; }} onStage={stageEdit} />
               {#if foreignTargets.length}
                 {#key `${resultContext}:${inspectorCell.originalIndex}:${selectedColumn.name}`}
-                  <ForeignKeyPicker targets={foreignTargets} {disabled} selectedRow={foreignDraft?.row ?? null} onLookup={onForeignKeyLookup} onCancel={onCancelLookup} onPick={chooseForeignKey} onTargetChange={() => { foreignDraft = null; }} />
+                  <ForeignKeyPicker targets={foreignTargets} {disabled} selectedRow={foreignDraft?.row ?? null} onLookup={onForeignKeyLookup} onCancel={onCancelLookup} onPick={chooseForeignKey} onTargetChange={() => resetDraft(result, inspectorCell, editMode)} />
                 {/key}
               {/if}
-              <div class="value-mode"><span>Value</span><label><input type="checkbox" bind:checked={draftNull} disabled={disabled || selectedColumn.nullable === false} on:change={() => { draftError = ''; foreignDraft = null; }} /> Set NULL</label></div>
-              {#if draftNull}
-                <div class="null-preview">NULL <span>No value will be stored.</span></div>
-              {:else if kind === 'boolean'}
-                <div class="boolean-options" role="group" aria-label="Boolean value">
-                  <label class:chosen={draft === 'true'}><input type="radio" bind:group={draft} value="true" {disabled} on:change={() => { foreignDraft = null; }} /> true</label>
-                  <label class:chosen={draft === 'false'}><input type="radio" bind:group={draft} value="false" {disabled} on:change={() => { foreignDraft = null; }} /> false</label>
-                </div>
-              {:else}
-                <textarea aria-label={`New value for ${selectedColumn.name}`} aria-invalid={Boolean(draftError)} bind:value={draft} {disabled} spellcheck="false" inputmode={kind === 'integer' || kind === 'numeric' ? 'decimal' : 'text'} on:input={() => { draftError = ''; foreignDraft = null; }} on:keydown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); stageEdit(); } }}></textarea>
-              {/if}
               {#if draftError}<p class="draft-error" role="alert">{draftError}</p>{/if}
-              <p class="edit-hint">{kind === 'text' ? 'An empty value is an empty string. Select Set NULL to remove the value.' : kind === 'json' ? 'JSON is validated before staging. JSON null and SQL NULL are distinct.' : kind === 'numeric' || kind === 'integer' ? 'Numbers retain their full precision.' : 'Choose a value, then stage the change.'}</p>
             </div>
             <div class="inspector-actions">
               <button type="button" {disabled} on:click={() => resetDraft(result, inspectorCell, editMode)}>Reset</button>
               <button type="button" disabled={disabled || selectedColumn.nullable === false} title={selectedColumn.nullable === false ? 'This column does not allow NULL.' : 'Use SQL NULL; stage the change to keep it.'} on:click={() => { draftNull = true; draftError = ''; foreignDraft = null; }}>Set NULL</button>
-              <button class="stage-button" type="submit" {disabled}>Stage change</button>
+              <button class="stage-button" type="submit" disabled={disabled || Boolean(stageReason)} title={stageReason || undefined}>Stage change</button>
             </div>
           </form>
         {:else}
           <pre class:null-preview={selectedValue == null} class="cell-value">{prettyCell(selectedValue, selectedColumn, result.jsonValuesAsText)}</pre>
-          {#if selectedValue === '' && kind !== 'json'}<p class="edit-hint">Empty string (0 characters)</p>{/if}
+          {#if selectedValue === '' && cellKind(selectedColumn) !== 'json'}<p class="edit-hint">Empty string (0 characters)</p>{/if}
           <button on:click={copyValue}><Icon name="copy" size={13} /> Copy full value</button>
           <p class="edit-hint">{selectedColumn.generated ? 'This value is generated by the database and cannot be edited.' : readOnly ? 'This result is read-only.' : !selectedColumn.sourceName ? 'Computed expressions are read-only.' : editDisabledReason || (!editableColumns.includes(selectedColumn.name) ? 'This source type cannot be safely edited.' : 'Enable Edit cells to change this value.')}</p>
         {/if}
@@ -503,25 +497,16 @@
   .close-inspector { min-height: 24px; width: 24px; padding: 3px; background: transparent; border: none; }
   .cell-meta { margin: 3px 0 13px; font-size: 11px; color: #adbed3; }
   .cell-value { margin: 0 0 10px; padding: 10px; min-height: 65px; max-height: 320px; overflow: auto; background: #131a23; border: 1px solid #36445a; border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .value-mode { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 11px; }
-  .value-mode label { display: flex; align-items: center; gap: 6px; color: #dae6f6; font-size: 11px; }
-  input[type='checkbox'], input[type='radio'] { appearance: auto; width: 14px; height: 14px; min-height: 0; padding: 0; margin: 0; accent-color: #8ab9fc; }
-  textarea { display: block; width: 100%; min-height: 100px; resize: vertical; padding: 9px; border: 1px solid #596d87; border-radius: 5px; background: #111a26; color: #eef4ff; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; box-sizing: border-box; }
-  textarea:focus { outline: 2px solid #86b1f1; outline-offset: 1px; }
-  textarea[aria-invalid='true'] { border-color: #f29292; }
   .null-preview { padding: 12px; border: 1px dashed #556a85; border-radius: 5px; color: #b5c5da; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .null-preview span { display: block; margin-top: 4px; font-family: inherit; font-size: 10px; }
-  .boolean-options { display: flex; gap: 8px; }
-  .boolean-options label { display: flex; align-items: center; gap: 8px; flex: 1; padding: 10px; border: 1px solid #425674; border-radius: 5px; background: #161e2b; font-size: 12px; }
-  .boolean-options label.chosen { border-color: #8cb6f3; background: #293e5d; }
   .edit-hint { margin: 9px 0 11px; font-size: 11px; color: #b9c6d8; line-height: 1.5; }
   .draft-error { color: #ffb6b6; font-size: 11px; line-height: 1.5; margin: 8px 0; }
   .inspector-actions { display: flex; flex-wrap: wrap; flex-shrink: 0; gap: 6px; padding-top: 8px; }
   .inspector-actions button { font-size: 11px; padding: 5px 8px; }
   .stage-button { flex-basis: 100%; background: #345684; border-color: #6c95cb; }
   .stage-button:hover:not(:disabled) { background: #436a9e; }
-  .foreign-key-form textarea { min-height: 54px; }
   .foreign-key-form .stage-button { flex-basis: auto; margin-left: auto; }
+  .foreign-key-form .inspector-body { display: flex; flex-direction: column; }
+  .cell-inspector.foreign-key .cell-meta { margin-bottom: 6px; }
   @media (max-width: 1000px) { .selection-label { max-width: 170px; overflow: hidden; text-overflow: ellipsis; } .grid-tools { gap: 5px; } .cell-inspector { flex-basis: 280px; } }
   @container (max-width: 640px) { .cell-inspector { position: absolute; z-index: 3; top: 0; bottom: 0; right: 0; width: min(330px, 100%); max-width: 100%; } .selection-label { max-width: 110px; } .sort-scope { display: none; } }
 </style>
