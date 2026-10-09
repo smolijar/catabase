@@ -731,7 +731,12 @@ button.chip {
 
 .tab-chip { flex: 0 0 auto; max-width: 270px; }
 .tab-chip.active { background: #1a2a40; border-color: #5ca9ca; }
+.tab-chip.dragging { opacity: .5; }
+.tab-chip.drop-before { box-shadow: -3px 0 0 #65c9df; }
+.tab-chip.drop-after { box-shadow: 3px 0 0 #65c9df; }
+.tabs.dragging, .tabs.dragging * { cursor: grabbing; }
 .tab-label { min-width: 0; max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8rem; }
+.tab-label { user-select: none; touch-action: none; }
 .tab-label small { color: #a2b0c5; font-size: 0.65rem; }
 .pending-dot { color: #f5ca80; }
 .new-tab { flex: 0 0 auto; border: 0; background: transparent; }
