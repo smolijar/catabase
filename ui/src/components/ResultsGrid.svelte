@@ -394,7 +394,11 @@
             {/if}
             {#if draftError}<p class="draft-error" role="alert">{draftError}</p>{/if}
             <p class="edit-hint">{kind === 'text' ? 'An empty value is an empty string. Select Set NULL to remove the value.' : kind === 'json' ? 'JSON is validated before staging. JSON null and SQL NULL are distinct.' : kind === 'numeric' || kind === 'integer' ? 'Numbers retain their full precision.' : 'Choose a value, then stage the change.'}</p>
-            <div class="inspector-actions"><button class="stage-button" type="submit" {disabled}>Stage change</button><button type="button" {disabled} on:click={() => resetDraft(result, inspectorCell, editMode)}>Reset</button></div>
+            <div class="inspector-actions">
+              <button type="button" {disabled} on:click={() => resetDraft(result, inspectorCell, editMode)}>Reset</button>
+              <button type="button" disabled={disabled || selectedColumn.nullable === false} title={selectedColumn.nullable === false ? 'This column does not allow NULL.' : 'Use SQL NULL; stage the change to keep it.'} on:click={() => { draftNull = true; draftError = ''; }}>Set NULL</button>
+              <button class="stage-button" type="submit" {disabled}>Stage change</button>
+            </div>
           </form>
         {:else}
           <pre class:null-preview={selectedValue == null} class="cell-value">{prettyCell(selectedValue, selectedColumn, result.jsonValuesAsText)}</pre>
@@ -465,8 +469,9 @@
   .boolean-options label.chosen { border-color: #8cb6f3; background: #293e5d; }
   .edit-hint { margin: 9px 0 11px; font-size: 11px; color: #b9c6d8; line-height: 1.5; }
   .draft-error { color: #ffb6b6; font-size: 11px; line-height: 1.5; margin: 8px 0; }
-  .inspector-actions { display: flex; gap: 8px; }
-  .stage-button { background: #345684; border-color: #6c95cb; }
+  .inspector-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .inspector-actions button { font-size: 11px; padding: 5px 8px; }
+  .stage-button { flex-basis: 100%; background: #345684; border-color: #6c95cb; }
   .stage-button:hover:not(:disabled) { background: #436a9e; }
   @media (max-width: 1000px) { .selection-label { max-width: 170px; overflow: hidden; text-overflow: ellipsis; } .grid-tools { gap: 5px; } .cell-inspector { flex-basis: 280px; } }
   @container (max-width: 640px) { .cell-inspector { position: absolute; z-index: 3; top: 0; bottom: 0; right: 0; width: min(330px, 100%); max-width: 100%; } .selection-label { max-width: 110px; } .sort-scope { display: none; } }
