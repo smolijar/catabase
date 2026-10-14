@@ -15,9 +15,9 @@ pub use foreign_key_values::{ForeignKeyLookup, ForeignKeyValues, lookup_foreign_
 pub use opencode::{AiCompletionRequest, AiHealth, OpenCodeClient};
 pub use pg::{
     ColumnMeta, CommandTimings, ConnectionStats, MetadataSource, PgCancelToken, PgClient, PgPool,
-    PooledPgClient, QueryResult, QueryTimings, SchemaColumn, SchemaForeignKey, SchemaItem,
-    SchemaTree, cancel_query_token, checkout_pool_client, connect_client, connection_stats,
-    create_pool, execute_on_client, execute_on_client_cancellable,
+    PooledPgClient, PrepareMode, QueryResult, QueryTimings, SchemaColumn, SchemaForeignKey,
+    SchemaItem, SchemaTree, cancel_query_token, checkout_pool_client, connect_client,
+    connection_stats, create_pool, execute_on_client, execute_on_client_cancellable,
     execute_on_client_with_reflection, execute_query, get_ddl, get_ddl_on_client,
     introspect_schema, introspect_schema_on_client, test_connection,
 };

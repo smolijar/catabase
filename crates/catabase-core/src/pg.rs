@@ -69,10 +69,20 @@ pub struct QueryTimings {
     pub execute_fetch_ms: f64,
     pub decode_ms: f64,
     pub total_ms: f64,
+    #[serde(default)]
+    pub prepare_mode: PrepareMode,
     pub metadata_source: MetadataSource,
     pub metadata_queries: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<CommandTimings>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PrepareMode {
+    #[default]
+    Separate,
+    Combined,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -272,31 +282,49 @@ async fn execute_reflected(
         return execute_simple(client, exec_sql, start).await;
     }
 
-    let statement = client.prepare(exec_sql).await?;
+    // Use a fresh unnamed Parse/Bind/Describe/Execute request for SELECT-like
+    // SQL. This saves a round trip without caching stale column origins after
+    // search_path/DDL changes. Never retry execution (WITH may perform writes).
+    let combined = crate::classify_statement(exec_sql) == crate::StatementKind::SelectLike;
+    let (mut columns, prefetched, statement, first_end, described_end) = if combined {
+        let rows = client.query_typed(exec_sql, &[]).await?;
+        if let Some(first) = rows.first() {
+            let columns = column_metadata(first.columns());
+            let end = Instant::now();
+            (columns, Some(rows), None, end, end)
+        } else {
+            // The driver's Vec<Row> API does not expose headers for zero rows.
+            // Describe with prepare only; do NOT execute SQL a second time.
+            let first_end = Instant::now();
+            check_query_cancelled(cancelled)?;
+            let description = client.prepare(exec_sql).await?;
+            let columns = column_metadata(description.columns());
+            (columns, Some(rows), None, first_end, Instant::now())
+        }
+    } else {
+        let statement = client.prepare(exec_sql).await?;
+        let columns = column_metadata(statement.columns());
+        let end = Instant::now();
+        (columns, None, Some(statement), end, end)
+    };
     check_query_cancelled(cancelled)?;
-    let mut columns = statement
-        .columns()
-        .iter()
-        .map(|column| ColumnMeta {
-            name: column.name().to_string(),
-            source_name: None,
-            type_oid: column.type_().oid(),
-            type_name: column.type_().name().to_string(),
-            table_oid: column.table_oid(),
-            column_id: column.column_id(),
-            table_schema: None,
-            table_name: None,
-            nullable: None,
-            generated: false,
-            primary_key: false,
-        })
-        .collect::<Vec<_>>();
-    let prepared_at = Instant::now();
     let enrichment = reflection.enrich(client, &mut columns, cancelled).await?;
     check_query_cancelled(cancelled)?;
     let enriched_at = Instant::now();
-    let mut rows = client.query(&statement, &[]).await?;
-    let fetched_at = Instant::now();
+    let (mut rows, fetched_at) = match prefetched {
+        Some(rows) => (rows, enriched_at),
+        None => {
+            let rows = client
+                .query(
+                    statement
+                        .as_ref()
+                        .expect("separate preparation has a statement"),
+                    &[],
+                )
+                .await?;
+            (rows, Instant::now())
+        }
+    };
     let mut has_more = false;
     if auto_limited && rows.len() > requested_page {
         has_more = true;
@@ -313,11 +341,28 @@ async fn execute_reflected(
         rows,
         duration_ms: total_ms as u128,
         timings: Some(QueryTimings {
-            prepare_ms: prepared_at.duration_since(start).as_secs_f64() * 1000.0,
-            metadata_ms: enriched_at.duration_since(prepared_at).as_secs_f64() * 1000.0,
-            execute_fetch_ms: fetched_at.duration_since(enriched_at).as_secs_f64() * 1000.0,
+            prepare_ms: if combined {
+                described_end.duration_since(first_end)
+            } else {
+                first_end.duration_since(start)
+            }
+            .as_secs_f64()
+                * 1000.0,
+            metadata_ms: enriched_at.duration_since(described_end).as_secs_f64() * 1000.0,
+            execute_fetch_ms: if combined {
+                first_end.duration_since(start)
+            } else {
+                fetched_at.duration_since(enriched_at)
+            }
+            .as_secs_f64()
+                * 1000.0,
             decode_ms: decoded_at.duration_since(fetched_at).as_secs_f64() * 1000.0,
             total_ms,
+            prepare_mode: if combined {
+                PrepareMode::Combined
+            } else {
+                PrepareMode::Separate
+            },
             metadata_source: enrichment.source,
             metadata_queries: enrichment.queries,
             command: None,
@@ -326,6 +371,25 @@ async fn execute_reflected(
         has_more,
         json_values_as_text: true,
     })
+}
+
+fn column_metadata(columns: &[tokio_postgres::Column]) -> Vec<ColumnMeta> {
+    columns
+        .iter()
+        .map(|column| ColumnMeta {
+            name: column.name().to_string(),
+            source_name: None,
+            type_oid: column.type_().oid(),
+            type_name: column.type_().name().to_string(),
+            table_oid: column.table_oid(),
+            column_id: column.column_id(),
+            table_schema: None,
+            table_name: None,
+            nullable: None,
+            generated: false,
+            primary_key: false,
+        })
+        .collect()
 }
 
 pub(crate) fn check_query_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), CoreError> {
@@ -630,6 +694,7 @@ async fn execute_simple(
             execute_fetch_ms: fetched_at.duration_since(start).as_secs_f64() * 1000.0,
             decode_ms: decoded_at.duration_since(fetched_at).as_secs_f64() * 1000.0,
             total_ms,
+            prepare_mode: PrepareMode::Separate,
             metadata_source: MetadataSource::NotNeeded,
             metadata_queries: 0,
             command: None,
@@ -1003,6 +1068,7 @@ mod numeric_tests {
             execute_fetch_ms: 3.5,
             decode_ms: 0.24,
             total_ms: 5.0,
+            prepare_mode: PrepareMode::Separate,
             metadata_source: MetadataSource::Cache,
             metadata_queries: 0,
             command: Some(CommandTimings {
@@ -1018,6 +1084,11 @@ mod numeric_tests {
         assert_eq!(encoded["command"]["historyMs"], 1.0);
         let restored: QueryTimings = serde_json::from_value(encoded).unwrap();
         assert_eq!(restored.total_ms, 5.0);
+        assert_eq!(restored.prepare_mode, PrepareMode::Separate);
+        let mut legacy = serde_json::to_value(&timing).unwrap();
+        legacy.as_object_mut().unwrap().remove("prepareMode");
+        let restored: QueryTimings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.prepare_mode, PrepareMode::Separate);
     }
 
     #[test]

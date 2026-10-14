@@ -68,6 +68,7 @@ export interface QueryTimings {
   executeFetchMs: number;
   decodeMs: number;
   totalMs: number;
+  prepareMode?: 'separate' | 'combined';
   metadataSource: 'cache' | 'refreshed' | 'notNeeded';
   metadataQueries: number;
   command?: { setupMs: number; historyMs: number; totalMs: number };

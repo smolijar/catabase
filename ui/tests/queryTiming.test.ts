@@ -45,3 +45,17 @@ test('IPC residual is marked estimated and never negative; durations preserve fr
   assert.equal(formatTiming(443.26), '443.3 ms');
   for (const ms of [-1, NaN, Infinity]) assert.equal(formatTiming(ms), '0.0 ms');
 });
+
+test('combined preparation explains the eliminated round trip and places metadata after fetching', () => {
+  const rows = timingRows({ ...result, timings: { ...timing, prepareMode: 'combined', prepareMs: 0 } }, client);
+  assert.equal(rows.find((row) => row.label === 'Prepare SQL')!.ms, 0);
+  assert.match(rows.find((row) => row.label === 'Prepare SQL')!.note, /share one database request/);
+  assert.match(rows.find((row) => row.label === 'Execute & fetch')!.note, /Includes SQL preparation/);
+  assert.ok(rows.findIndex((row) => row.label === 'Execute & fetch') < rows.findIndex((row) => row.label === 'Result metadata'));
+});
+
+test('empty results describe their headers without claiming the query was executed twice', () => {
+  const rows = timingRows({ ...result, timings: { ...timing, prepareMode: 'combined', prepareMs: 10 } }, client);
+  assert.equal(rows.find((row) => row.label === 'Describe empty result')!.ms, 10);
+  assert.match(rows.find((row) => row.label === 'Describe empty result')!.note, /not executed again/);
+});
