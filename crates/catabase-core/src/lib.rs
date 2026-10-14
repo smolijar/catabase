@@ -3,6 +3,7 @@ pub mod error;
 pub mod foreign_key_values;
 pub mod opencode;
 pub mod pg;
+pub mod reflection;
 pub mod row_keys;
 pub mod row_updates;
 pub mod sql;
@@ -16,9 +17,10 @@ pub use pg::{
     ColumnMeta, ConnectionStats, PgCancelToken, PgClient, PgPool, PooledPgClient, QueryResult,
     SchemaColumn, SchemaForeignKey, SchemaItem, SchemaTree, cancel_query_token,
     checkout_pool_client, connect_client, connection_stats, create_pool, execute_on_client,
-    execute_on_client_cancellable, execute_query, get_ddl, get_ddl_on_client, introspect_schema,
-    introspect_schema_on_client, test_connection,
+    execute_on_client_cancellable, execute_on_client_with_reflection, execute_query, get_ddl,
+    get_ddl_on_client, introspect_schema, introspect_schema_on_client, test_connection,
 };
+pub use reflection::ReflectionCache;
 pub use row_keys::RowKey;
 pub use row_updates::{ApplyUpdatesResult, RowUpdate, apply_row_updates};
 pub use sql::{
