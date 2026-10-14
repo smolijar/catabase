@@ -1,4 +1,5 @@
 use std::{
+    io::{self, Write},
     path::Path,
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -10,11 +11,104 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{ConnectionFields, CoreError};
+use crate::{ConnectionFields, CoreError, QueryResult};
 
 const KEYRING_SERVICE: &str = "catabase";
 const RESULT_JSON_CAP_BYTES: usize = 256 * 1024;
 const KEYRING_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Serialize once from borrowed data and stop immediately at the snapshot cap.
+/// Oversized entries retain query metadata, but have no snapshot or exact size.
+struct SnapshotWriter {
+    buffer: Vec<u8>,
+    exceeded: bool,
+}
+
+impl Write for SnapshotWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > RESULT_JSON_CAP_BYTES - self.buffer.len() {
+            self.exceeded = true;
+            return Err(io::Error::other("history snapshot exceeds size cap"));
+        }
+        self.buffer.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct HistorySnapshot {
+    json: Option<String>,
+    size: Option<i64>,
+}
+
+impl HistorySnapshot {
+    fn oversized() -> Self {
+        Self {
+            json: None,
+            size: None,
+        }
+    }
+}
+
+fn history_snapshot(result: &impl Serialize) -> Result<HistorySnapshot, CoreError> {
+    let mut writer = SnapshotWriter {
+        buffer: Vec::new(),
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, result) {
+        if writer.exceeded {
+            return Ok(HistorySnapshot::oversized());
+        }
+        return Err(error.into());
+    }
+    Ok(HistorySnapshot {
+        size: Some(writer.buffer.len() as i64),
+        json: Some(
+            String::from_utf8(writer.buffer)
+                .map_err(|error| CoreError::message(error.to_string()))?,
+        ),
+    })
+}
+
+// Raw UTF-8 lengths are a lower bound on encoded JSON. This preflight avoids
+// even scanning/escaping megabyte strings when they already exceed the cap.
+// It never rejects a snapshot that could fit, and stops once the bound is hit.
+fn payload_exceeds_cap(value: &serde_json::Value, remaining: &mut usize) -> bool {
+    let bytes = match value {
+        serde_json::Value::String(text) => text.len() + 2,
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(value) => {
+            if *value {
+                4
+            } else {
+                5
+            }
+        }
+        serde_json::Value::Number(_) => 1,
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => 2,
+    };
+    if bytes > *remaining {
+        return true;
+    }
+    *remaining -= bytes;
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| payload_exceeds_cap(value, remaining)),
+        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
+            let bytes = key.len() + 3;
+            if bytes > *remaining {
+                return true;
+            }
+            *remaining -= bytes;
+            payload_exceeds_cap(value, remaining)
+        }),
+        _ => false,
+    }
+}
 
 #[derive(Clone)]
 pub struct Storage {
@@ -371,12 +465,53 @@ impl Storage {
     }
 
     pub fn insert_history(&self, entry: NewHistoryEntry) -> Result<i64, CoreError> {
-        let serialized = entry
+        let snapshot = entry
             .result_json
-            .map(|value| serde_json::to_string(&value))
+            .as_ref()
+            .map(history_snapshot)
             .transpose()?;
-        let result_size = serialized.as_ref().map(|value| value.len() as i64);
-        let stored_result = serialized.filter(|value| value.len() <= RESULT_JSON_CAP_BYTES);
+        self.insert_history_snapshot(entry, snapshot)
+    }
+
+    /// Successful query history borrows the result instead of cloning it into
+    /// serde_json::Value before serializing a potentially discarded snapshot.
+    pub fn insert_query_history(
+        &self,
+        connection_id: Option<String>,
+        query: String,
+        result: &QueryResult,
+    ) -> Result<i64, CoreError> {
+        let mut remaining = RESULT_JSON_CAP_BYTES;
+        let snapshot = if result
+            .rows
+            .iter()
+            .any(|row| payload_exceeds_cap(row, &mut remaining))
+        {
+            HistorySnapshot::oversized()
+        } else {
+            history_snapshot(result)?
+        };
+        self.insert_history_snapshot(
+            NewHistoryEntry {
+                connection_id,
+                query,
+                duration_ms: result.duration_ms,
+                row_count: Some(result.row_count),
+                is_error: false,
+                error_message: None,
+                result_json: None,
+            },
+            Some(snapshot),
+        )
+    }
+
+    fn insert_history_snapshot(
+        &self,
+        entry: NewHistoryEntry,
+        snapshot: Option<HistorySnapshot>,
+    ) -> Result<i64, CoreError> {
+        let result_size = snapshot.as_ref().and_then(|snapshot| snapshot.size);
+        let stored_result = snapshot.and_then(|snapshot| snapshot.json);
         let conn = self.lock()?;
         conn.execute(
             "INSERT INTO query_history (
@@ -763,6 +898,110 @@ mod tests {
 
         assert_eq!(storage.history_page(None, 0, 20).unwrap().total, 1);
         assert!(storage.history_result(id).unwrap().is_some());
+    }
+
+    #[test]
+    fn snapshots_keep_the_inclusive_cap_and_stop_on_escaped_utf8_overflow() {
+        // JSON string adds two quotes. The exact cap is retained; one byte more
+        // stops encoding without allocating the full result.
+        for (length, stored) in [
+            (RESULT_JSON_CAP_BYTES - 2, true),
+            (RESULT_JSON_CAP_BYTES - 1, false),
+        ] {
+            let result = "x".repeat(length);
+            let snapshot = history_snapshot(&result).unwrap();
+            assert_eq!(snapshot.json.is_some(), stored);
+            assert_eq!(snapshot.size, stored.then_some((length + 2) as i64));
+        }
+        let result =
+            serde_json::json!({ "rows": [{"value": "žluťoučký\n\t\"\\\u{0000}".repeat(100_000)}] });
+        let snapshot = history_snapshot(&result).unwrap();
+        assert!(snapshot.json.is_none());
+        assert_eq!(snapshot.size, None);
+    }
+
+    #[test]
+    fn oversized_history_retains_sql_counts_without_a_result_snapshot_or_invented_size() {
+        let storage = Storage::in_memory().unwrap();
+        let result = serde_json::json!({"rows": [{"body": "x".repeat(RESULT_JSON_CAP_BYTES * 4)}]});
+        let id = storage
+            .insert_history(NewHistoryEntry {
+                connection_id: None,
+                query: "select body".into(),
+                duration_ms: 42,
+                row_count: Some(1),
+                is_error: false,
+                error_message: None,
+                result_json: Some(result),
+            })
+            .unwrap();
+        let page = storage.history_page(None, 0, 20).unwrap();
+        let entry = &page.entries[0];
+        assert_eq!(entry.id, id);
+        assert_eq!(entry.query, "select body");
+        assert_eq!(entry.duration_ms, 42);
+        assert_eq!(entry.row_count, Some(1));
+        assert_eq!(entry.result_size, None);
+        assert!(!entry.has_result);
+        assert!(storage.history_result(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn borrowed_query_history_round_trips_small_results_without_mutating_them() {
+        let storage = Storage::in_memory().unwrap();
+        let result: QueryResult = serde_json::from_value(serde_json::json!({
+            "columns": [], "rows": [{"payload": "null", "id": "9223372036854775807"}], "rowCount": 1,
+            "durationMs": 12, "autoLimited": false, "hasMore": false, "jsonValuesAsText": true
+        })).unwrap();
+        let original = serde_json::to_value(&result).unwrap();
+        let id = storage
+            .insert_query_history(None, "select payload".into(), &result)
+            .unwrap();
+        assert_eq!(storage.history_result(id).unwrap(), Some(original.clone()));
+        assert_eq!(serde_json::to_value(&result).unwrap(), original);
+        assert_eq!(
+            storage.history_page(None, 0, 20).unwrap().entries[0].result_size,
+            Some(serde_json::to_vec(&result).unwrap().len() as i64)
+        );
+    }
+
+    #[test]
+    fn large_borrowed_query_history_skips_the_payload_and_keeps_query_metadata() {
+        let storage = Storage::in_memory().unwrap();
+        let result: QueryResult = serde_json::from_value(serde_json::json!({
+            "columns": [], "rows": [{"body": "x".repeat(RESULT_JSON_CAP_BYTES * 4)}], "rowCount": 1,
+            "durationMs": 12, "autoLimited": false, "hasMore": false
+        }))
+        .unwrap();
+        let id = storage
+            .insert_query_history(None, "select body".into(), &result)
+            .unwrap();
+        let entry = &storage.history_page(None, 0, 20).unwrap().entries[0];
+        assert_eq!(entry.duration_ms, 12);
+        assert_eq!(entry.row_count, Some(1));
+        assert!(!entry.has_result);
+        assert_eq!(entry.result_size, None);
+        assert!(storage.history_result(id).unwrap().is_none());
+        assert_eq!(
+            result.rows[0]["body"].as_str().unwrap().len(),
+            RESULT_JSON_CAP_BYTES * 4
+        );
+    }
+
+    #[test]
+    fn payload_preflight_is_a_lower_bound_and_stops_at_the_budget() {
+        for value in [
+            serde_json::json!({"escaped\"": [null, true, false, 123.456, "ž\n\t\\\u{0000}"]}),
+            serde_json::json!("x".repeat(100)),
+        ] {
+            let exact_size = serde_json::to_vec(&value).unwrap().len();
+            let mut exact_budget = exact_size;
+            assert!(!payload_exceeds_cap(&value, &mut exact_budget));
+            assert!(exact_budget <= exact_size);
+        }
+        let value = serde_json::json!({"body": "x".repeat(RESULT_JSON_CAP_BYTES + 1)});
+        let mut budget = RESULT_JSON_CAP_BYTES;
+        assert!(payload_exceeds_cap(&value, &mut budget));
     }
 
     #[test]
