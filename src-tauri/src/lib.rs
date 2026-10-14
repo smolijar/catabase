@@ -313,15 +313,9 @@ async fn execute_query(
         match result {
             Ok(mut result) => {
                 let before_history_ms = command_start.elapsed().as_secs_f64() * 1000.0;
-                let _ = state.storage.insert_history(NewHistoryEntry {
-                    connection_id: Some(active.id),
-                    query: sql,
-                    duration_ms: result.duration_ms,
-                    row_count: Some(result.row_count),
-                    is_error: false,
-                    error_message: None,
-                    result_json: serde_json::to_value(&result).ok(),
-                });
+                let _ = state
+                    .storage
+                    .insert_query_history(Some(active.id), sql, &result);
                 let after_history_ms = command_start.elapsed().as_secs_f64() * 1000.0;
                 if let Some(timings) = result.timings.as_mut() {
                     timings.command = Some(CommandTimings {
