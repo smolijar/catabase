@@ -9,8 +9,8 @@ use std::{
 };
 
 use catabase_core::{
-    ConnectionFields, MetadataSource, QueryResult, ReflectionCache, RowUpdate, apply_row_updates,
-    connect_client, execute_on_client_with_reflection,
+    ConnectionFields, MetadataSource, PrepareMode, QueryResult, ReflectionCache, RowUpdate,
+    apply_row_updates, connect_client, execute_on_client_with_reflection,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -20,6 +20,8 @@ struct Requests {
     queries: usize,
     columns: usize,
     keys: usize,
+    syncs: usize,
+    executions: usize,
 }
 
 type CountedConnection = (ConnectionFields, Arc<Mutex<Requests>>);
@@ -122,6 +124,12 @@ fn counted_connection(fields: &ConnectionFields) -> Result<CountedConnection, Bo
                     counts.keys += 1;
                 }
             }
+            if header[0] == b'S' {
+                counted.lock().unwrap().syncs += 1;
+            }
+            if header[0] == b'E' {
+                counted.lock().unwrap().executions += 1;
+            }
             if upstream.write_all(&packet).is_err() {
                 break;
             }
@@ -169,11 +177,18 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
     );
     assert_eq!(warm.timings.as_ref().unwrap().metadata_queries, 0);
     assert_eq!(
+        warm.timings.as_ref().unwrap().prepare_mode,
+        PrepareMode::Combined
+    );
+    assert_eq!(warm.timings.as_ref().unwrap().prepare_ms, 0.0);
+    assert_eq!(
         *requests.lock().unwrap(),
         Requests {
             queries: 1,
             columns: 0,
-            keys: 0
+            keys: 0,
+            syncs: 1,
+            executions: 1
         }
     );
     assert!(
@@ -225,14 +240,9 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
         MetadataSource::Refreshed
     );
     assert_eq!(cold.timings.as_ref().unwrap().metadata_queries, 2);
-    assert_eq!(
-        *requests.lock().unwrap(),
-        Requests {
-            queries: 3,
-            columns: 1,
-            keys: 1
-        }
-    );
+    let counts = requests.lock().unwrap().clone();
+    assert_eq!((counts.queries, counts.columns, counts.keys), (3, 1, 1));
+    assert_eq!(counts.executions, 3);
     assert_eq!(
         serde_json::to_value(&warm.columns)?,
         serde_json::to_value(&cold.columns)?
@@ -254,6 +264,20 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
         timing.execute_fetch_ms >= 45.0,
         "server delay belongs to execute/fetch, not decoding"
     );
+    let empty = execute_on_client_with_reflection(
+        &client,
+        "SELECT n.id AS empty_id FROM public.notification_templates n WHERE false",
+        0,
+        200,
+        None,
+        &cache,
+    )
+    .await?;
+    assert_timing_totals(&empty);
+    assert_eq!(empty.row_count, 0);
+    assert_eq!(empty.columns[0].name, "empty_id");
+    assert_eq!(empty.columns[0].source_name.as_deref(), Some("id"));
+    assert!(empty.timings.as_ref().unwrap().prepare_ms > 0.0);
     let batch =
         execute_on_client_with_reflection(&client, "SELECT 1; SELECT 2", 0, 200, None, &cache)
             .await?;
@@ -269,9 +293,80 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
         .unwrap_err();
     assert_eq!(error.pg_info().unwrap().code.as_deref(), Some("57014"));
 
+    // Cancellation opens a second socket, so use the real docker endpoint
+    // rather than the single-connection protocol-counting proxy.
+    let cancellation_client = connect_client(&docker_fields()?).await?;
+    let in_flight_cancel = AtomicBool::new(false);
+    let (execution, cancellation) = tokio::join!(
+        execute_on_client_with_reflection(
+            &cancellation_client,
+            "SELECT pg_sleep(1)",
+            0,
+            200,
+            Some(&in_flight_cancel),
+            &cache
+        ),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            in_flight_cancel.store(true, std::sync::atomic::Ordering::Release);
+            cancellation_client
+                .cancel_token()
+                .cancel_query(tokio_postgres::NoTls)
+                .await
+        }
+    );
+    cancellation?;
+    let error = execution.unwrap_err();
+    assert!(
+        matches!(error, catabase_core::CoreError::Postgres(_)),
+        "the server must cancel the live query, not merely a post-query flag check"
+    );
+    assert_eq!(error.pg_info().unwrap().code.as_deref(), Some("57014"));
+    let recovered = execute_on_client_with_reflection(
+        &cancellation_client,
+        "SELECT 1 AS recovered",
+        0,
+        200,
+        None,
+        &cache,
+    )
+    .await?;
+    assert_eq!(recovered.rows[0]["recovered"], 1);
+
     // Dedicated transaction cache; every mutation below affects only pg_temp.
     let private = ReflectionCache::default();
     client.batch_execute("BEGIN").await?;
+    let same_sql = "SELECT * FROM notification_templates LIMIT 1";
+    let before =
+        execute_on_client_with_reflection(&client, same_sql, 0, 200, None, &private).await?;
+    // Emulate out-of-band session changes: no reflection invalidation callback.
+    // A cached Statement can otherwise keep the old table's column origins.
+    client.batch_execute("CREATE TEMP TABLE notification_templates (id text PRIMARY KEY); INSERT INTO pg_temp.notification_templates VALUES ('temporary-row'); SET LOCAL search_path = pg_temp, public, pg_catalog").await?;
+    let after =
+        execute_on_client_with_reflection(&client, same_sql, 0, 200, None, &private).await?;
+    assert_eq!(after.columns.len(), 1);
+    assert_eq!(after.rows[0]["id"], "temporary-row");
+    assert_ne!(after.columns[0].table_oid, before.columns[0].table_oid);
+    assert!(
+        after.columns[0]
+            .table_schema
+            .as_deref()
+            .unwrap()
+            .starts_with("pg_temp")
+    );
+    client.batch_execute("ALTER TABLE pg_temp.notification_templates RENAME COLUMN id TO key; ALTER TABLE pg_temp.notification_templates ADD COLUMN extra integer").await?;
+    let changed =
+        execute_on_client_with_reflection(&client, same_sql, 0, 200, None, &private).await?;
+    assert_eq!(
+        changed
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        ["key", "extra"]
+    );
+    assert_eq!(changed.columns[0].source_name.as_deref(), Some("key"));
+    assert_eq!(changed.rows[0]["key"], "temporary-row");
     let create = "CREATE TEMP TABLE catabase_reflection_probe (tenant int NOT NULL, id bigint NOT NULL, code text UNIQUE, label text, computed text GENERATED ALWAYS AS (upper(label)) STORED, CONSTRAINT reflection_probe_pk PRIMARY KEY(tenant,id))";
     execute_on_client_with_reflection(&client, create, 0, 200, None, &private).await?;
     client.batch_execute("CREATE UNIQUE INDEX reflection_probe_partial ON catabase_reflection_probe(id) WHERE id > 0; CREATE UNIQUE INDEX reflection_probe_expression ON catabase_reflection_probe(lower(code)); CREATE UNIQUE INDEX reflection_probe_nondefault ON catabase_reflection_probe(label text_pattern_ops); INSERT INTO catabase_reflection_probe(tenant,id,code,label) VALUES (1,9007199254740993,'a','first'),(2,2,'b','second')").await?;
@@ -287,6 +382,27 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
             .await?;
     }
     let fixture = execute_on_client_with_reflection(&client, "SELECT tenant AS tenant_alias, id AS key_alias, code, label, computed FROM catabase_reflection_probe", 0, 200, None, &private).await?;
+    client.simple_query("SELECT 1").await?;
+    *requests.lock().unwrap() = Requests::default();
+    let no_rows = execute_on_client_with_reflection(&client,
+        "WITH inserted AS (INSERT INTO catabase_reflection_probe(tenant,id,code,label) VALUES (9,999,'once','once') RETURNING tenant,id) SELECT tenant,id FROM inserted WHERE false",
+        0, 200, None, &private).await?;
+    assert_timing_totals(&no_rows);
+    assert_eq!(no_rows.row_count, 0);
+    assert_eq!(no_rows.columns.len(), 2);
+    assert_eq!(
+        requests.lock().unwrap().executions,
+        1,
+        "empty-result fallback only describes; it must not repeat a data-modifying WITH"
+    );
+    let inserted: i64 = client
+        .query_one(
+            "SELECT count(*) FROM catabase_reflection_probe WHERE tenant=9 AND id=999",
+            &[],
+        )
+        .await?
+        .get(0);
+    assert_eq!(inserted, 1);
     assert_eq!(fixture.rows[0]["key_alias"], "9007199254740993");
     assert!(fixture.columns[4].generated);
     assert!(
@@ -424,7 +540,9 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
         Requests {
             queries: 1,
             columns: 0,
-            keys: 0
+            keys: 0,
+            syncs: 1,
+            executions: 1,
         }
     );
     Ok(())

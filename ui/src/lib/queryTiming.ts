@@ -34,14 +34,23 @@ export function timingRows(result: QueryResult, client: ClientQueryTimings): Tim
   } else {
     const command = timing.command;
     if (command) rows.push({ label: 'Connection & setup', ms: command.setupMs, note: 'Connection lookup, pool checkout/recycling, transaction routing and cancellation bookkeeping.' });
-    rows.push({ label: 'Prepare SQL', ms: timing.prepareMs, note: 'Prepare the statement and obtain result-column types; includes a database round trip.' });
+    const combined = timing.prepareMode === 'combined';
+    rows.push({
+      label: combined && timing.prepareMs > 0 ? 'Describe empty result' : 'Prepare SQL', ms: timing.prepareMs,
+      note: combined
+        ? timing.prepareMs > 0
+          ? 'Description-only fallback to retain column headers for zero rows. The query is not executed again.'
+          : 'Included in Execute & fetch: fresh preparation and execution share one database request, with no cached column origins.'
+        : 'Prepare the statement and obtain result-column types; includes a database round trip.'
+    });
     const metadataNote = timing.metadataSource === 'refreshed'
       ? `Reflection refreshed · ${timing.metadataQueries} metadata queries. Cache entries expire after 60 seconds or are invalidated by schema refreshes, non-read-only SQL, or transaction completion.`
       : timing.metadataSource === 'cache'
         ? `Reflection cache hit · ${timing.metadataQueries} metadata queries. Includes any wait for a concurrent cache refresh.`
         : 'No source-table metadata needed for this result.';
-    rows.push({ label: 'Result metadata', ms: timing.metadataMs, note: metadataNote });
-    rows.push({ label: 'Execute & fetch', ms: timing.executeFetchMs, note: 'PostgreSQL execution/output serialization plus network transfer of all fetched rows. These cannot be separated by client timestamps.' });
+    const metadataRow = { label: 'Result metadata', ms: timing.metadataMs, note: metadataNote };
+    const executionRow = { label: 'Execute & fetch', ms: timing.executeFetchMs, note: `${combined ? 'Includes SQL preparation. ' : ''}PostgreSQL execution/output serialization plus network transfer of all fetched rows. These cannot be separated by client timestamps.` };
+    rows.push(...(combined ? [executionRow, metadataRow] : [metadataRow, executionRow]));
     rows.push({ label: 'Decode rows', ms: timing.decodeMs, note: 'Convert PostgreSQL values into application result rows.' });
     if (command) {
       rows.push({ label: 'Save history', ms: command.historyMs, note: 'Serialize the result snapshot and write query history.' });
