@@ -11,11 +11,17 @@ use std::{
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    ColumnMeta, CoreError, PgClient, RowKey, SchemaTree, pg::check_query_cancelled,
+    ColumnMeta, CoreError, MetadataSource, PgClient, RowKey, SchemaTree, pg::check_query_cancelled,
     row_keys::load_row_keys,
 };
 
 const MAX_AGE: Duration = Duration::from_secs(60);
+
+pub(crate) struct Enrichment {
+    pub keys: Vec<RowKey>,
+    pub source: MetadataSource,
+    pub queries: usize,
+}
 
 #[derive(Clone)]
 struct ReflectedColumn {
@@ -109,7 +115,7 @@ impl ReflectionCache {
         client: &PgClient,
         columns: &mut [ColumnMeta],
         cancelled: Option<&std::sync::atomic::AtomicBool>,
-    ) -> Result<Vec<RowKey>, CoreError> {
+    ) -> Result<Enrichment, CoreError> {
         let oids = columns
             .iter()
             .filter_map(|column| column.table_oid)
@@ -117,8 +123,13 @@ impl ReflectionCache {
             .into_iter()
             .collect::<Vec<_>>();
         if oids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Enrichment {
+                keys: Vec::new(),
+                source: MetadataSource::NotNeeded,
+                queries: 0,
+            });
         }
+        let mut queries = 0;
         let mut tables = self.available(&oids).await;
         if !missing_tables(columns, &tables).is_empty() {
             let _loading = self.loading.lock().await;
@@ -128,6 +139,7 @@ impl ReflectionCache {
             if !missing.is_empty() {
                 let generation = self.generation.load(Ordering::Acquire);
                 let fresh = load_tables(client, &missing, cancelled).await?;
+                queries = 2; // One batched columns query and one batched keys query.
                 // Apply this result even if invalidated concurrently, but never
                 // retain its metadata for subsequent queries in that case.
                 for (oid, table) in &fresh {
@@ -137,7 +149,15 @@ impl ReflectionCache {
             }
         }
         check_query_cancelled(cancelled)?;
-        Ok(apply_tables(columns, &tables))
+        Ok(Enrichment {
+            keys: apply_tables(columns, &tables),
+            source: if queries == 0 {
+                MetadataSource::Cache
+            } else {
+                MetadataSource::Refreshed
+            },
+            queries,
+        })
     }
 }
 

@@ -1087,6 +1087,19 @@ th small {
   white-space: nowrap;
 }
 
+.status-timing {
+  min-width: 0;
+  display: block;
+  border-color: transparent;
+  border-radius: 4px;
+  background: transparent;
+  padding: 0.15rem 0.35rem;
+  font-size: inherit;
+  text-align: right;
+  text-decoration: underline dotted #526582;
+  text-underline-offset: 3px;
+}
+
 .toast {
   position: fixed;
   z-index: 30;

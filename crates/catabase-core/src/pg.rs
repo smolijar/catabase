@@ -52,10 +52,45 @@ pub struct QueryResult {
     pub rows: Vec<Value>,
     pub row_count: usize,
     pub duration_ms: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timings: Option<QueryTimings>,
     pub auto_limited: bool,
     pub has_more: bool,
     #[serde(default)]
     pub json_values_as_text: bool,
+}
+
+/// Monotonic client-side spans, not PostgreSQL's EXPLAIN execution time.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryTimings {
+    pub prepare_ms: f64,
+    pub metadata_ms: f64,
+    pub execute_fetch_ms: f64,
+    pub decode_ms: f64,
+    pub total_ms: f64,
+    pub metadata_source: MetadataSource,
+    pub metadata_queries: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<CommandTimings>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MetadataSource {
+    Cache,
+    Refreshed,
+    NotNeeded,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandTimings {
+    /// Connection lookup/pool checkout, transaction routing and cancellation setup/cleanup.
+    pub setup_ms: f64,
+    pub history_ms: f64,
+    /// Excludes response serialization/IPC, which happens after the command returns.
+    pub total_ms: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -256,9 +291,12 @@ async fn execute_reflected(
             primary_key: false,
         })
         .collect::<Vec<_>>();
-    let row_keys = reflection.enrich(client, &mut columns, cancelled).await?;
+    let prepared_at = Instant::now();
+    let enrichment = reflection.enrich(client, &mut columns, cancelled).await?;
     check_query_cancelled(cancelled)?;
+    let enriched_at = Instant::now();
     let mut rows = client.query(&statement, &[]).await?;
+    let fetched_at = Instant::now();
     let mut has_more = false;
     if auto_limited && rows.len() > requested_page {
         has_more = true;
@@ -266,12 +304,24 @@ async fn execute_reflected(
     }
 
     let rows = rows.iter().map(row_to_json).collect::<Vec<_>>();
+    let decoded_at = Instant::now();
+    let total_ms = decoded_at.duration_since(start).as_secs_f64() * 1000.0;
     Ok(QueryResult {
         row_count: rows.len(),
         columns,
-        row_keys,
+        row_keys: enrichment.keys,
         rows,
-        duration_ms: start.elapsed().as_millis(),
+        duration_ms: total_ms as u128,
+        timings: Some(QueryTimings {
+            prepare_ms: prepared_at.duration_since(start).as_secs_f64() * 1000.0,
+            metadata_ms: enriched_at.duration_since(prepared_at).as_secs_f64() * 1000.0,
+            execute_fetch_ms: fetched_at.duration_since(enriched_at).as_secs_f64() * 1000.0,
+            decode_ms: decoded_at.duration_since(fetched_at).as_secs_f64() * 1000.0,
+            total_ms,
+            metadata_source: enrichment.source,
+            metadata_queries: enrichment.queries,
+            command: None,
+        }),
         auto_limited,
         has_more,
         json_values_as_text: true,
@@ -526,6 +576,7 @@ async fn execute_simple(
     start: Instant,
 ) -> Result<QueryResult, CoreError> {
     let messages = client.simple_query(sql).await?;
+    let fetched_at = Instant::now();
     let mut columns = Vec::new();
     let mut rows = Vec::new();
     for message in messages {
@@ -565,12 +616,24 @@ async fn execute_simple(
         }
     }
 
+    let decoded_at = Instant::now();
+    let total_ms = decoded_at.duration_since(start).as_secs_f64() * 1000.0;
     Ok(QueryResult {
         row_count: rows.len(),
         columns,
         row_keys: Vec::new(),
         rows,
-        duration_ms: start.elapsed().as_millis(),
+        duration_ms: total_ms as u128,
+        timings: Some(QueryTimings {
+            prepare_ms: 0.0,
+            metadata_ms: 0.0,
+            execute_fetch_ms: fetched_at.duration_since(start).as_secs_f64() * 1000.0,
+            decode_ms: decoded_at.duration_since(fetched_at).as_secs_f64() * 1000.0,
+            total_ms,
+            metadata_source: MetadataSource::NotNeeded,
+            metadata_queries: 0,
+            command: None,
+        }),
         auto_limited: false,
         has_more: false,
         json_values_as_text: false,
@@ -927,8 +990,34 @@ mod numeric_tests {
         }))
         .unwrap();
         assert!(!result.json_values_as_text);
+        assert!(result.timings.is_none());
         assert!(result.row_keys.is_empty());
         assert_eq!(result.rows[0]["payload"], "null");
+    }
+
+    #[test]
+    fn timing_details_keep_fractional_milliseconds_and_use_camel_case() {
+        let timing = QueryTimings {
+            prepare_ms: 1.25,
+            metadata_ms: 0.01,
+            execute_fetch_ms: 3.5,
+            decode_ms: 0.24,
+            total_ms: 5.0,
+            metadata_source: MetadataSource::Cache,
+            metadata_queries: 0,
+            command: Some(CommandTimings {
+                setup_ms: 2.0,
+                history_ms: 1.0,
+                total_ms: 8.0,
+            }),
+        };
+        let encoded = serde_json::to_value(&timing).unwrap();
+        assert_eq!(encoded["prepareMs"], 1.25);
+        assert_eq!(encoded["metadataSource"], "cache");
+        assert_eq!(encoded["metadataQueries"], 0);
+        assert_eq!(encoded["command"]["historyMs"], 1.0);
+        let restored: QueryTimings = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.total_ms, 5.0);
     }
 
     #[test]
