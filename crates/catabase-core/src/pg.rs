@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -16,7 +15,10 @@ use tokio_postgres::{
 use tokio_postgres_rustls::MakeRustlsConnect;
 use uuid::Uuid;
 
-use crate::{ConnectionFields, CoreError, RowKey, row_keys::load_row_keys, sql::auto_limit_sql};
+use crate::{
+    ConnectionFields, CoreError, ReflectionCache, RowKey, row_keys::load_row_keys,
+    sql::auto_limit_sql,
+};
 
 pub type PgClient = TokioPgClient;
 pub type PgPool = Pool;
@@ -76,7 +78,11 @@ pub struct SchemaItem {
     pub schema: String,
     pub name: String,
     pub kind: String,
+    #[serde(default)]
+    pub table_oid: u32,
     pub columns: Vec<SchemaColumn>,
+    #[serde(default)]
+    pub row_keys: Vec<RowKey>,
     #[serde(default)]
     pub foreign_keys: Vec<SchemaForeignKey>,
 }
@@ -95,6 +101,10 @@ pub struct SchemaForeignKey {
 #[serde(rename_all = "camelCase")]
 pub struct SchemaColumn {
     pub name: String,
+    #[serde(default)]
+    pub column_id: i16,
+    #[serde(default)]
+    pub type_oid: u32,
     pub type_name: String,
     pub nullable: bool,
     pub generated: bool,
@@ -174,6 +184,48 @@ pub async fn execute_on_client_cancellable(
     page_size: usize,
     cancelled: Option<&AtomicBool>,
 ) -> Result<QueryResult, CoreError> {
+    execute_on_client_with_reflection(
+        client,
+        sql,
+        offset,
+        page_size,
+        cancelled,
+        &ReflectionCache::default(),
+    )
+    .await
+}
+
+pub async fn execute_on_client_with_reflection(
+    client: &PgClient,
+    sql: &str,
+    offset: usize,
+    page_size: usize,
+    cancelled: Option<&AtomicBool>,
+    reflection: &ReflectionCache,
+) -> Result<QueryResult, CoreError> {
+    // Conservative for DDL, DO/CALL, savepoint rollbacks and compound batches.
+    // Invalidate before AND after, including failures/partial batch execution.
+    let invalidates = crate::split_statements(sql).iter().any(|statement| {
+        crate::classify_statement(&statement.text) != crate::StatementKind::SelectLike
+    });
+    if invalidates {
+        reflection.invalidate();
+    }
+    let result = execute_reflected(client, sql, offset, page_size, cancelled, reflection).await;
+    if invalidates {
+        reflection.invalidate();
+    }
+    result
+}
+
+async fn execute_reflected(
+    client: &PgClient,
+    sql: &str,
+    offset: usize,
+    page_size: usize,
+    cancelled: Option<&AtomicBool>,
+    reflection: &ReflectionCache,
+) -> Result<QueryResult, CoreError> {
     check_query_cancelled(cancelled)?;
     let requested_page = page_size.clamp(1, 10_000);
     let limited_sql = auto_limit_sql(sql, offset, requested_page);
@@ -187,15 +239,24 @@ pub async fn execute_on_client_cancellable(
 
     let statement = client.prepare(exec_sql).await?;
     check_query_cancelled(cancelled)?;
-    let columns = column_metas(client, statement.columns(), cancelled).await?;
-    check_query_cancelled(cancelled)?;
-    let table_oids = columns
+    let mut columns = statement
+        .columns()
         .iter()
-        .filter_map(|column| column.table_oid)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
+        .map(|column| ColumnMeta {
+            name: column.name().to_string(),
+            source_name: None,
+            type_oid: column.type_().oid(),
+            type_name: column.type_().name().to_string(),
+            table_oid: column.table_oid(),
+            column_id: column.column_id(),
+            table_schema: None,
+            table_name: None,
+            nullable: None,
+            generated: false,
+            primary_key: false,
+        })
         .collect::<Vec<_>>();
-    let row_keys = load_row_keys(client, &table_oids).await?;
+    let row_keys = reflection.enrich(client, &mut columns, cancelled).await?;
     check_query_cancelled(cancelled)?;
     let mut rows = client.query(&statement, &[]).await?;
     let mut has_more = false;
@@ -217,7 +278,7 @@ pub async fn execute_on_client_cancellable(
     })
 }
 
-fn check_query_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), CoreError> {
+pub(crate) fn check_query_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), CoreError> {
     if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
         return Err(CoreError::Cancelled(
             "Query cancelled before execution.".into(),
@@ -263,7 +324,8 @@ pub async fn introspect_schema_on_client(client: &PgClient) -> Result<SchemaTree
                     WHERE i.indrelid = c.oid
                       AND i.indisprimary
                       AND a.attnum = ANY(i.indkey)
-                ) AS primary_key
+                ) AS primary_key,
+                c.oid AS table_oid, a.attnum AS column_id, a.atttypid AS type_oid
              FROM pg_class c
              JOIN pg_namespace n ON n.oid = c.relnamespace
              JOIN pg_attribute a ON a.attrelid = c.oid
@@ -283,6 +345,8 @@ pub async fn introspect_schema_on_client(client: &PgClient) -> Result<SchemaTree
         let kind: String = row.get(2);
         let column = SchemaColumn {
             name: row.get(3),
+            column_id: row.get(9),
+            type_oid: row.get(10),
             type_name: row.get(4),
             nullable: row.get(5),
             generated: row.get(6),
@@ -299,7 +363,9 @@ pub async fn introspect_schema_on_client(client: &PgClient) -> Result<SchemaTree
                 schema,
                 name,
                 kind,
+                table_oid: row.get(8),
                 columns: vec![column],
+                row_keys: Vec::new(),
                 foreign_keys: Vec::new(),
             });
         }
@@ -343,6 +409,15 @@ pub async fn introspect_schema_on_client(client: &PgClient) -> Result<SchemaTree
                 columns: row.get(5),
                 referenced_columns: row.get(6),
             });
+        }
+    }
+    let table_oids = items.iter().map(|item| item.table_oid).collect::<Vec<_>>();
+    for key in load_row_keys(client, &table_oids).await? {
+        if let Some(item) = items
+            .iter_mut()
+            .find(|item| item.schema == key.schema && item.name == key.table)
+        {
+            item.row_keys.push(key);
         }
     }
     Ok(SchemaTree { schemas: items })
@@ -554,90 +629,6 @@ fn make_tls_connector() -> MakeRustlsConnect {
         .with_root_certificates(root_store)
         .with_no_client_auth();
     MakeRustlsConnect::new(tls_config)
-}
-
-async fn column_metas(
-    client: &PgClient,
-    columns: &[tokio_postgres::Column],
-    cancelled: Option<&AtomicBool>,
-) -> Result<Vec<ColumnMeta>, CoreError> {
-    let mut catalog = HashMap::new();
-    for column in columns {
-        check_query_cancelled(cancelled)?;
-        let Some(table_oid) = column.table_oid() else {
-            continue;
-        };
-        let Some(column_id) = column.column_id() else {
-            continue;
-        };
-        let key = (table_oid, column_id);
-        if catalog.contains_key(&key) {
-            continue;
-        }
-
-        if let Some(row) = client
-            .query_opt(
-                "SELECT
-                    n.nspname,
-                    c.relname,
-                    a.attname,
-                    NOT a.attnotnull,
-                    a.attgenerated <> '',
-                    EXISTS (
-                        SELECT 1
-                        FROM pg_index i
-                        WHERE i.indrelid = c.oid
-                          AND i.indisprimary
-                          AND a.attnum = ANY(i.indkey)
-                    )
-                 FROM pg_class c
-                 JOIN pg_namespace n ON n.oid = c.relnamespace
-                 JOIN pg_attribute a ON a.attrelid = c.oid
-                 WHERE c.oid = $1::oid
-                   AND a.attnum = $2
-                   AND NOT a.attisdropped",
-                &[&table_oid, &column_id],
-            )
-            .await?
-        {
-            catalog.insert(
-                key,
-                (
-                    row.get::<_, String>(0),
-                    row.get::<_, String>(1),
-                    row.get::<_, String>(2),
-                    row.get::<_, bool>(3),
-                    row.get::<_, bool>(4),
-                    row.get::<_, bool>(5),
-                ),
-            );
-        }
-    }
-
-    Ok(columns
-        .iter()
-        .map(|column| {
-            let key = column.table_oid().zip(column.column_id());
-            let catalog_entry = key.and_then(|key| catalog.get(&key));
-            ColumnMeta {
-                name: column.name().to_string(),
-                source_name: catalog_entry.map(|(_, _, source_name, _, _, _)| source_name.clone()),
-                type_oid: column.type_().oid(),
-                type_name: column.type_().name().to_string(),
-                table_oid: column.table_oid(),
-                table_schema: catalog_entry.map(|(schema, _, _, _, _, _)| schema.clone()),
-                table_name: catalog_entry.map(|(_, table, _, _, _, _)| table.clone()),
-                column_id: column.column_id(),
-                nullable: catalog_entry.map(|(_, _, _, nullable, _, _)| *nullable),
-                generated: catalog_entry
-                    .map(|(_, _, _, _, generated, _)| *generated)
-                    .unwrap_or(false),
-                primary_key: catalog_entry
-                    .map(|(_, _, _, _, _, primary_key)| *primary_key)
-                    .unwrap_or(false),
-            }
-        })
-        .collect())
 }
 
 fn row_to_json(row: &Row) -> Value {

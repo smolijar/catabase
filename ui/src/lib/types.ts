@@ -112,6 +112,8 @@ export interface HistoryStats {
 
 export interface SchemaColumn {
   name: string;
+  columnId?: number;
+  typeOid?: number;
   typeName: string;
   nullable: boolean;
   generated: boolean;
@@ -122,7 +124,9 @@ export interface SchemaItem {
   schema: string;
   name: string;
   kind: string;
+  tableOid?: number;
   columns: SchemaColumn[];
+  rowKeys?: RowKey[];
   foreignKeys?: SchemaForeignKey[];
 }
 

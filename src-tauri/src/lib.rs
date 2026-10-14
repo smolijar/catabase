@@ -11,14 +11,14 @@ use catabase_core::{
     AiCompletionRequest, AiHealth, ApplyUpdatesResult, ConnectionFields, ConnectionInput,
     ConnectionRecord, ConnectionStats, CoreError, ForeignKeyLookup, ForeignKeyValues, HistoryPage,
     HistoryStats, NewHistoryEntry, OpenCodeClient, PgCancelToken, PgClient, PgErrorInfo, PgPool,
-    PooledPgClient, QueryResult, RowUpdate, SchemaTree, Settings, StatementKind, StatementRange,
-    Storage, apply_row_updates as apply_rows, build_connection_url as build_url,
+    PooledPgClient, QueryResult, ReflectionCache, RowUpdate, SchemaTree, Settings, StatementKind,
+    StatementRange, Storage, apply_row_updates as apply_rows, build_connection_url as build_url,
     cancel_query_token, checkout_pool_client, classify_statement, connect_client,
     connection_stats as load_connection_stats, create_pool, execute_on_client,
-    execute_on_client_cancellable, get_ddl_on_client as load_ddl,
-    introspect_schema_on_client as load_schema, lookup_foreign_key_values as lookup_fk_values,
-    parse_connection_url as parse_url, split_editor_statements, split_statements,
-    test_connection as test_pg_connection, validate_transaction_sql,
+    execute_on_client_with_reflection, get_ddl_on_client as load_ddl,
+    lookup_foreign_key_values as lookup_fk_values, parse_connection_url as parse_url,
+    split_editor_statements, split_statements, test_connection as test_pg_connection,
+    validate_transaction_sql,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -35,10 +35,12 @@ struct AppState {
     exit_confirmed: AtomicBool,
 }
 
+#[derive(Clone)]
 struct ActivePool {
     connection_id: String,
     pool_size: u32,
     pool: PgPool,
+    reflection: Arc<ReflectionCache>,
 }
 
 struct TxSession {
@@ -46,6 +48,7 @@ struct TxSession {
     client: PooledPgClient,
     ssl: bool,
     started_at: String,
+    reflection: Arc<ReflectionCache>,
 }
 
 struct CancelEntry {
@@ -69,6 +72,7 @@ impl CancelEntry {
 struct QueryRun<'a> {
     active: &'a ConnectionRecord,
     pool: &'a PgPool,
+    reflection: &'a ReflectionCache,
     ssl: bool,
     sql: &'a str,
     query_token: &'a str,
@@ -293,7 +297,8 @@ async fn execute_query(
             &state,
             QueryRun {
                 active: &active,
-                pool: &pool,
+                pool: &pool.pool,
+                reflection: &pool.reflection,
                 ssl: active.ssl,
                 sql: &sql,
                 query_token: &query_token,
@@ -361,7 +366,9 @@ async fn apply_row_updates(
             // Hold the transaction-state lock so another request cannot begin a
             // manual transaction halfway through an independently committed batch.
             let pool = active_pool(&state, &active).await?;
-            let client = checkout_pool_client(&pool).await.map_err(AppError::from)?;
+            let client = checkout_pool_client(&pool.pool)
+                .await
+                .map_err(AppError::from)?;
             let cancelled = register_cancel(&state, &query_token, &client, active.ssl).await?;
             let result = apply_rows(&client, &updates, false, &cancelled)
                 .await
@@ -464,9 +471,25 @@ async fn introspect_schema(
     connection_id: Option<String>,
 ) -> Result<SchemaTree, AppError> {
     let active = requested_connection(&state, connection_id.as_deref()).await?;
+    // Reflect uncommitted DDL on the held transaction client, without borrowing
+    // its one-client pool or publishing private metadata to the shared cache.
+    let tx = state.tx.lock().await;
+    if let Some(session) = tx
+        .as_ref()
+        .filter(|session| session.connection_id == active.id)
+    {
+        return session
+            .reflection
+            .refresh(&session.client)
+            .await
+            .map_err(Into::into);
+    }
+    drop(tx);
     let pool = active_pool(&state, &active).await?;
-    let client = checkout_pool_client(&pool).await.map_err(AppError::from)?;
-    load_schema(&client).await.map_err(Into::into)
+    let client = checkout_pool_client(&pool.pool)
+        .await
+        .map_err(AppError::from)?;
+    pool.reflection.refresh(&client).await.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -508,7 +531,9 @@ async fn get_ddl(
 ) -> Result<String, AppError> {
     let active = requested_connection(&state, connection_id.as_deref()).await?;
     let pool = active_pool(&state, &active).await?;
-    let client = checkout_pool_client(&pool).await.map_err(AppError::from)?;
+    let client = checkout_pool_client(&pool.pool)
+        .await
+        .map_err(AppError::from)?;
     load_ddl(&client, &schema, &name).await.map_err(Into::into)
 }
 
@@ -627,9 +652,11 @@ async fn run_query_with_state(
             }
 
             let client = checkout_pool_client(run.pool).await?;
+            let reflection = Arc::new(ReflectionCache::default());
             let result = execute_with_cancel(
                 state,
                 &client,
+                &reflection,
                 run.ssl,
                 run.sql,
                 run.query_token,
@@ -643,6 +670,7 @@ async fn run_query_with_state(
                 client,
                 ssl: run.ssl,
                 started_at,
+                reflection,
             });
             drop(tx);
             let _ = app.emit("tx-changed", tx_status_inner(state).await);
@@ -682,6 +710,7 @@ async fn run_query_with_state(
                     return execute_with_cancel(
                         state,
                         &session.client,
+                        &session.reflection,
                         session.ssl,
                         run.sql,
                         run.query_token,
@@ -696,6 +725,7 @@ async fn run_query_with_state(
             execute_with_cancel(
                 state,
                 &client,
+                run.reflection,
                 run.ssl,
                 run.sql,
                 run.query_token,
@@ -737,12 +767,13 @@ async fn execute_read_only_replay(
             "Replay cancelled before execution.".into(),
         )),
         Ok(()) => {
-            execute_on_client_cancellable(
+            execute_on_client_with_reflection(
                 &client,
                 run.sql,
                 run.offset,
                 run.page_size,
                 Some(&cancelled),
+                run.reflection,
             )
             .await
         }
@@ -759,9 +790,11 @@ async fn execute_read_only_replay(
     result
 }
 
+#[allow(clippy::too_many_arguments)] // The cache must travel with the checked-out client.
 async fn execute_with_cancel(
     state: &State<'_, AppState>,
     client: &PgClient,
+    reflection: &ReflectionCache,
     ssl: bool,
     sql: &str,
     query_token: &str,
@@ -769,8 +802,15 @@ async fn execute_with_cancel(
     page_size: usize,
 ) -> Result<QueryResult, CoreError> {
     let cancelled = register_cancel(state, query_token, client, ssl).await?;
-    let result =
-        execute_on_client_cancellable(client, sql, offset, page_size, Some(&cancelled)).await;
+    let result = execute_on_client_with_reflection(
+        client,
+        sql,
+        offset,
+        page_size,
+        Some(&cancelled),
+        reflection,
+    )
+    .await;
     state.cancels.lock().await.remove(query_token);
     result
 }
@@ -794,6 +834,7 @@ async fn finish_tx_with_sql(
     let result = execute_with_cancel(
         state,
         &session.client,
+        &session.reflection,
         session.ssl,
         sql,
         query_token,
@@ -803,6 +844,7 @@ async fn finish_tx_with_sql(
     .await;
     if result.is_ok() {
         *tx = None;
+        invalidate_pool_reflection(state, connection_id).await;
     }
     drop(tx);
     let _ = app.emit("tx-changed", tx_status_inner(state).await);
@@ -821,6 +863,7 @@ async fn finish_tx(
     execute_on_client(&session.client, sql, 0, 1)
         .await
         .map_err(AppError::from)?;
+    invalidate_pool_reflection(state, &session.connection_id).await;
     *tx = None;
     drop(tx);
     let _ = app.emit("tx-changed", tx_status_inner(state).await);
@@ -920,14 +963,14 @@ async fn register_cancel(
 async fn active_pool(
     state: &State<'_, AppState>,
     active: &ConnectionRecord,
-) -> Result<PgPool, AppError> {
+) -> Result<ActivePool, AppError> {
     let settings = state.storage.get_settings().map_err(AppError::from)?;
 
     if let Some(pool_state) = state.pool.read().await.as_ref()
         && pool_state.connection_id == active.id
         && pool_state.pool_size == settings.pool_size
     {
-        return Ok(pool_state.pool.clone());
+        return Ok(pool_state.clone());
     }
 
     let mut pool_state = state.pool.write().await;
@@ -935,7 +978,7 @@ async fn active_pool(
         && existing.connection_id == active.id
         && existing.pool_size == settings.pool_size
     {
-        return Ok(existing.pool.clone());
+        return Ok(existing.clone());
     }
 
     let pool =
@@ -943,12 +986,26 @@ async fn active_pool(
     let client = checkout_pool_client(&pool).await.map_err(AppError::from)?;
     drop(client);
 
-    *pool_state = Some(ActivePool {
+    let active_pool = ActivePool {
         connection_id: active.id.clone(),
         pool_size: settings.pool_size,
         pool: pool.clone(),
-    });
-    Ok(pool)
+        reflection: Arc::new(ReflectionCache::default()),
+    };
+    *pool_state = Some(active_pool.clone());
+    Ok(active_pool)
+}
+
+async fn invalidate_pool_reflection(state: &State<'_, AppState>, connection_id: &str) {
+    if let Some(pool) = state
+        .pool
+        .read()
+        .await
+        .as_ref()
+        .filter(|pool| pool.connection_id == connection_id)
+    {
+        pool.reflection.invalidate();
+    }
 }
 
 async fn reset_pool(state: &State<'_, AppState>) {
@@ -1166,6 +1223,7 @@ mod tests {
             connection_id: "source".into(),
             pool_size: 5,
             pool,
+            reflection: Arc::new(ReflectionCache::default()),
         };
 
         let stats = cached_connection_stats(Some(&cached), "source").unwrap();

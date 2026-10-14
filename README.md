@@ -52,6 +52,12 @@ node --experimental-strip-types --test ui/tests/*.test.ts
 pnpm --dir ui run build
 ```
 
+Opt-in Docker reflection test (uses only the saved `zenbase docker` connection; all write fixtures are temporary and rolled back):
+
+```sh
+CATABASE_TEST_CONNECTION_STORE="/path/to/catabase.sqlite3" cargo test -p catabase-core --test reflection_docker -- --ignored --nocapture
+```
+
 ## Current Scope
 
 Implemented:
@@ -60,7 +66,7 @@ Implemented:
 - Rust core crate with SQLite persistence
 - connection CRUD, URL import/sync, password fallback/keyring attempt
 - PostgreSQL query execution and schema introspection
-- result column metadata enrichment from `pg_catalog`
+- result metadata resolved from connection-scoped schema reflection, with batched `pg_catalog` fallback
 - SQL splitting and simple auto-limit pagination
 - execution-target resolution from Monaco selection/cursor/current statement
 - transaction banner plus backend transaction connection routing
@@ -78,6 +84,8 @@ Implemented:
 - pnpm install age gate
 
 Query results and staged edits stay in memory only; restarting restores SQL drafts, not cached data. Sorting is limited to loaded rows. Loading more rows or requesting a larger export re-runs the original SQL in a read-only transaction, so it is unavailable while a manual transaction is open. Commit or roll back that transaction first. Cell edits made inside a manual transaction remain pending until you commit it.
+
+Schema reflection includes table OIDs, column IDs/types and complete usable primary/unique keys. The backend reuses it to map result columns (including aliases and joins) without per-column catalog queries. Missing or expired metadata is refreshed for all affected tables in a batch; cache entries expire after 60 seconds to bound external DDL staleness. Explicit schema refresh and pool/configuration changes replace the cache. Non-read statements conservatively invalidate it. Manual transactions have separate caches; their schema reflection uses the held client, and finishing a transaction invalidates shared metadata. Applying edits still validates fresh catalog columns and keys, never trusting the cache for writes.
 
 Connections are single-line rows showing the bold name followed by the username in parentheses; the list scrolls independently beneath its header. Option/Alt-click, right-click or Shift+F10 opens connection actions without a visible menu button. Double-click a connection or press Enter to select and immediately test it. The toolbar pill shows testing progress, turns green after success, or turns red with the error on failure without reverting the selection. Click the pill to retry. Testing the already-selected connection preserves its results, staged edits and transaction.
 
