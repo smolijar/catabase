@@ -54,10 +54,23 @@ export interface QueryResult {
   rows: Record<string, unknown>[];
   rowCount: number;
   durationMs: number;
+  /** Absent on results saved before timing instrumentation was added. */
+  timings?: QueryTimings;
   autoLimited: boolean;
   hasMore: boolean;
   /** New results preserve JSON/JSONB as raw text; older history contains decoded values. */
   jsonValuesAsText?: boolean;
+}
+
+export interface QueryTimings {
+  prepareMs: number;
+  metadataMs: number;
+  executeFetchMs: number;
+  decodeMs: number;
+  totalMs: number;
+  metadataSource: 'cache' | 'refreshed' | 'notNeeded';
+  metadataQueries: number;
+  command?: { setupMs: number; historyMs: number; totalMs: number };
 }
 
 export interface RowKey {

@@ -11,6 +11,7 @@
   import ConnectionPill from './components/ConnectionPill.svelte';
   import ResultsGrid from './components/ResultsGrid.svelte';
   import Modal from './components/Modal.svelte';
+  import QueryTimingDialog from './components/QueryTimingDialog.svelte';
   import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
   import SidebarResizer from './components/SidebarResizer.svelte';
@@ -18,6 +19,7 @@
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
+  import type { QueryTimingDetails } from './lib/queryTiming';
   import { createConnectionTester } from './lib/connectionTest';
   import type { ConnectionTestState } from './lib/connectionTest';
   import { parseConnectionReference, serializeConnectionReference } from './lib/connectionClipboard';
@@ -90,6 +92,8 @@
   let originalRows: Record<string, unknown>[] = [];
   let queryError: AppError | null = null;
   let statusFlash = 'Ready';
+  let statusTiming: QueryTimingDetails | null = null;
+  let timingDetails: QueryTimingDetails | null = null;
   let toastVisible = false;
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let toastError = false;
@@ -522,7 +526,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.defaultPrevented || closingWorkspace || showConnectionModal || showUpdatePreview || discardRunConfirmation) return;
+    if (event.defaultPrevented || closingWorkspace || showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails) return;
     const command = event.metaKey || event.ctrlKey;
     if (!command) return;
     if (event.key === 'Enter') {
@@ -664,18 +668,29 @@
       if (activeTab !== tabId || tabConnectionId !== connectionId || operation || connectionMutation || closingWorkspace) return;
     }
     const op = beginOperation('query', connectionId);
+    const timingStart = performance.now();
     let target: ExecutionTarget = { sql: sql.trim(), start: 0, end: sql.length };
     statusFlash = 'Running query...';
+    statusTiming = null;
     try {
       target = editor ? await editor.getExecutionTarget(api.splitSql) : target;
       if (!target.sql.trim()) throw new Error('No query to execute.');
       if (op.cancelling) { flash('Query cancelled before execution.'); return; }
       patchTab(op.tabId, { error: null });
       void loadConnectionStats();
+      const invokeStart = performance.now();
       const next = await api.executeQuery(target.sql, op.token, 0, PAGE_SIZE, op.connectionId);
+      const invokeEnd = performance.now();
       if (!isCurrentOperation(op)) return;
-      patchTab(op.tabId, resultPatch(makeSession(next, target, op.connectionId)));
-      flash(`${op.cancelling ? 'Query completed before cancellation. ' : ''}Loaded ${next.rowCount}${next.hasMore ? '+' : ''} ${next.rowCount === 1 ? 'row' : 'rows'} in ${next.durationMs} ms.`);
+      const session = makeSession(next, target, op.connectionId);
+      patchTab(op.tabId, resultPatch(session));
+      await tick();
+      const uiEnd = performance.now();
+      if (!isCurrentOperation(op)) return;
+      flash(`${op.cancelling ? 'Query completed before cancellation. ' : ''}Loaded ${next.rowCount}${next.hasMore ? '+' : ''} ${next.rowCount === 1 ? 'row' : 'rows'} in ${next.durationMs} ms.`, false, {
+        result: next, connectionName: session.connectionName, executedAt: session.executedAt, batch: false,
+        client: { targetMs: invokeStart - timingStart, invokeMs: invokeEnd - invokeStart, uiMs: uiEnd - invokeEnd, totalMs: uiEnd - timingStart }
+      });
     } catch (error) {
       if (!isCurrentOperation(op)) return;
       const normalized = normalizeAppError(error);
@@ -697,6 +712,7 @@
     op.cancelling = true;
     operation = op;
     statusFlash = 'Cancelling…';
+    statusTiming = null;
     try {
       await api.cancelQuery(op.token);
     } catch (error) {
@@ -709,8 +725,12 @@
     if (pendingChanges.length) { flash('Apply or discard staged edits before loading more rows.'); return; }
     const session = { ...resultSession, data: result };
     const op = beginOperation('load', tabConnectionId);
+    statusFlash = 'Loading more rows…';
+    statusTiming = null;
     try {
+      const invokeStart = performance.now();
       const next = await api.executeQuery(session.execution.sql, op.token, session.data.rows.length, PAGE_SIZE, session.connectionId!, true);
+      const invokeEnd = performance.now();
       if (!isCurrentOperation(op)) return;
       const merged = {
         ...next,
@@ -718,7 +738,14 @@
         rowCount: session.data.rows.length + next.rows.length
       };
       patchTab(op.tabId, resultPatch({ ...session, data: merged }));
+      await tick();
+      const uiEnd = performance.now();
+      if (!isCurrentOperation(op)) return;
       statusFlash = `Loaded ${merged.rowCount}${next.hasMore ? '+' : ''} rows.`;
+      statusTiming = {
+        result: next, connectionName: session.connectionName, executedAt: new Date().toISOString(), batch: true,
+        client: { targetMs: 0, invokeMs: invokeEnd - invokeStart, uiMs: uiEnd - invokeEnd, totalMs: uiEnd - invokeStart }
+      };
     } catch (error) {
       if (isCurrentOperation(op)) flash(normalizeAppError(error).code === '57014' ? 'Loading cancelled.' : `Load more failed: ${errorMessage(error)}`, normalizeAppError(error).code !== '57014');
     } finally {
@@ -1306,8 +1333,9 @@
     return { ...appError, message: appError?.message ?? errorMessage(error) };
   }
 
-  function flash(message: string, isError = false) {
+  function flash(message: string, isError = false, timings: QueryTimingDetails | null = null) {
     statusFlash = message;
+    statusTiming = timings;
     toastError = isError;
     toastVisible = true;
     if (toastTimer) clearTimeout(toastTimer);
@@ -1760,9 +1788,17 @@
     <span>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : ''}</span>
     <span>{!workspaceLoaded ? 'Restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'Saving drafts…' : draftStatus === 'pending' ? 'Unsaved draft changes' : draftStatus === 'error' ? 'Draft save failed' : 'Drafts saved'}</span>
     {#if running}<span>Running {runningDuration}</span>{/if}
-    <span class="status-flash">{statusFlash}</span>
+    {#if statusTiming}
+      <button class="status-flash status-timing" title="Show query timing breakdown" aria-haspopup="dialog" on:click={() => (timingDetails = statusTiming)}>{statusFlash}</button>
+    {:else}
+      <span class="status-flash">{statusFlash}</span>
+    {/if}
   </footer>
 </main>
+
+{#if timingDetails}
+  <QueryTimingDialog details={timingDetails} onClose={() => (timingDetails = null)} />
+{/if}
 
 {#if toastVisible}
   <div class="toast" class:error-toast={toastError} role="status">

@@ -9,8 +9,8 @@ use std::{
 };
 
 use catabase_core::{
-    ConnectionFields, ReflectionCache, RowUpdate, apply_row_updates, connect_client,
-    execute_on_client_with_reflection,
+    ConnectionFields, MetadataSource, QueryResult, ReflectionCache, RowUpdate, apply_row_updates,
+    connect_client, execute_on_client_with_reflection,
 };
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -23,6 +23,24 @@ struct Requests {
 }
 
 type CountedConnection = (ConnectionFields, Arc<Mutex<Requests>>);
+
+fn assert_timing_totals(result: &QueryResult) {
+    let timing = result
+        .timings
+        .as_ref()
+        .expect("new results include timings");
+    let sum = timing.prepare_ms + timing.metadata_ms + timing.execute_fetch_ms + timing.decode_ms;
+    assert!((sum - timing.total_ms).abs() < 0.000_001);
+    assert_eq!(result.duration_ms, timing.total_ms as u128);
+    for ms in [
+        timing.prepare_ms,
+        timing.metadata_ms,
+        timing.execute_fetch_ms,
+        timing.decode_ms,
+    ] {
+        assert!(ms.is_finite() && ms >= 0.0);
+    }
+}
 
 fn docker_fields() -> Result<ConnectionFields, Box<dyn Error>> {
     let path = std::env::var("CATABASE_TEST_CONNECTION_STORE")?;
@@ -144,6 +162,12 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
     *requests.lock().unwrap() = Requests::default();
     let sql = "SELECT * FROM public.notification_templates WHERE type = 2";
     let warm = execute_on_client_with_reflection(&client, sql, 0, 200, None, &cache).await?;
+    assert_timing_totals(&warm);
+    assert_eq!(
+        warm.timings.as_ref().unwrap().metadata_source,
+        MetadataSource::Cache
+    );
+    assert_eq!(warm.timings.as_ref().unwrap().metadata_queries, 0);
     assert_eq!(
         *requests.lock().unwrap(),
         Requests {
@@ -166,6 +190,15 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
         "Warm reflection: {} rows, {} ms, zero metadata requests",
         warm.row_count, warm.duration_ms
     );
+    let timing = warm.timings.as_ref().unwrap();
+    println!(
+        "Query spans: prepare {:.3} ms, metadata {:.3} ms, execute/fetch {:.3} ms, decode {:.3} ms; timing payload {} bytes",
+        timing.prepare_ms,
+        timing.metadata_ms,
+        timing.execute_fetch_ms,
+        timing.decode_ms,
+        serde_json::to_vec(timing)?.len()
+    );
 
     let aliases = execute_on_client_with_reflection(&client, "SELECT n.id AS renamed_key, n.tag AS label, upper(n.name) AS computed FROM public.notification_templates n WHERE type = 2", 0, 200, None, &cache).await?;
     assert_eq!(aliases.columns[0].source_name.as_deref(), Some("id"));
@@ -186,6 +219,12 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
     let cold =
         execute_on_client_with_reflection(&client, sql, 0, 200, None, &ReflectionCache::default())
             .await?;
+    assert_timing_totals(&cold);
+    assert_eq!(
+        cold.timings.as_ref().unwrap().metadata_source,
+        MetadataSource::Refreshed
+    );
+    assert_eq!(cold.timings.as_ref().unwrap().metadata_queries, 2);
     assert_eq!(
         *requests.lock().unwrap(),
         Requests {
@@ -203,6 +242,26 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
         serde_json::to_value(&cold.row_keys)?
     );
     assert_eq!(warm.rows, cold.rows);
+
+    let delayed =
+        execute_on_client_with_reflection(&client, "SELECT pg_sleep(0.05)", 0, 200, None, &cache)
+            .await?;
+    assert_timing_totals(&delayed);
+    let timing = delayed.timings.as_ref().unwrap();
+    assert_eq!(timing.metadata_source, MetadataSource::NotNeeded);
+    assert_eq!(timing.metadata_queries, 0);
+    assert!(
+        timing.execute_fetch_ms >= 45.0,
+        "server delay belongs to execute/fetch, not decoding"
+    );
+    let batch =
+        execute_on_client_with_reflection(&client, "SELECT 1; SELECT 2", 0, 200, None, &cache)
+            .await?;
+    assert_timing_totals(&batch);
+    let timing = batch.timings.as_ref().unwrap();
+    assert_eq!(timing.prepare_ms, 0.0);
+    assert_eq!(timing.metadata_ms, 0.0);
+    assert_eq!(timing.metadata_source, MetadataSource::NotNeeded);
 
     let cancelled = AtomicBool::new(true);
     let error = execute_on_client_with_reflection(&client, sql, 0, 200, Some(&cancelled), &cache)

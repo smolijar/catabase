@@ -8,14 +8,14 @@ use std::{
 };
 
 use catabase_core::{
-    AiCompletionRequest, AiHealth, ApplyUpdatesResult, ConnectionFields, ConnectionInput,
-    ConnectionRecord, ConnectionStats, CoreError, ForeignKeyLookup, ForeignKeyValues, HistoryPage,
-    HistoryStats, NewHistoryEntry, OpenCodeClient, PgCancelToken, PgClient, PgErrorInfo, PgPool,
-    PooledPgClient, QueryResult, ReflectionCache, RowUpdate, SchemaTree, Settings, StatementKind,
-    StatementRange, Storage, apply_row_updates as apply_rows, build_connection_url as build_url,
-    cancel_query_token, checkout_pool_client, classify_statement, connect_client,
-    connection_stats as load_connection_stats, create_pool, execute_on_client,
-    execute_on_client_with_reflection, get_ddl_on_client as load_ddl,
+    AiCompletionRequest, AiHealth, ApplyUpdatesResult, CommandTimings, ConnectionFields,
+    ConnectionInput, ConnectionRecord, ConnectionStats, CoreError, ForeignKeyLookup,
+    ForeignKeyValues, HistoryPage, HistoryStats, NewHistoryEntry, OpenCodeClient, PgCancelToken,
+    PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryResult, ReflectionCache, RowUpdate,
+    SchemaTree, Settings, StatementKind, StatementRange, Storage, apply_row_updates as apply_rows,
+    build_connection_url as build_url, cancel_query_token, checkout_pool_client,
+    classify_statement, connect_client, connection_stats as load_connection_stats, create_pool,
+    execute_on_client, execute_on_client_with_reflection, get_ddl_on_client as load_ddl,
     lookup_foreign_key_values as lookup_fk_values, parse_connection_url as parse_url,
     split_editor_statements, split_statements, test_connection as test_pg_connection,
     validate_transaction_sql,
@@ -287,6 +287,7 @@ async fn execute_query(
     connection_id: Option<String>,
     read_only_replay: Option<bool>,
 ) -> Result<QueryResult, AppError> {
+    let command_start = Instant::now();
     begin_operation(&state, &query_token).await;
     let outcome = async {
         let active = requested_connection(&state, connection_id.as_deref()).await?;
@@ -310,7 +311,8 @@ async fn execute_query(
         .await;
 
         match result {
-            Ok(result) => {
+            Ok(mut result) => {
+                let before_history_ms = command_start.elapsed().as_secs_f64() * 1000.0;
                 let _ = state.storage.insert_history(NewHistoryEntry {
                     connection_id: Some(active.id),
                     query: sql,
@@ -320,6 +322,14 @@ async fn execute_query(
                     error_message: None,
                     result_json: serde_json::to_value(&result).ok(),
                 });
+                let after_history_ms = command_start.elapsed().as_secs_f64() * 1000.0;
+                if let Some(timings) = result.timings.as_mut() {
+                    timings.command = Some(CommandTimings {
+                        setup_ms: (before_history_ms - timings.total_ms).max(0.0),
+                        history_ms: after_history_ms - before_history_ms,
+                        total_ms: after_history_ms,
+                    });
+                }
                 Ok(result)
             }
             Err(error) => {
@@ -339,7 +349,18 @@ async fn execute_query(
     }
     .await;
     state.cancels.lock().await.remove(&query_token);
-    outcome
+    outcome.map(|mut result| {
+        if let Some(command) = result
+            .timings
+            .as_mut()
+            .and_then(|timings| timings.command.as_mut())
+        {
+            let total_ms = command_start.elapsed().as_secs_f64() * 1000.0;
+            command.setup_ms += total_ms - command.total_ms;
+            command.total_ms = total_ms;
+        }
+        result
+    })
 }
 
 #[tauri::command]
