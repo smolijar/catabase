@@ -365,8 +365,10 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "deadpool-postgres",
+ "fallible-iterator 0.2.0",
  "keyring",
  "percent-encoding",
+ "postgres-protocol",
  "reqwest 0.12.28",
  "rusqlite",
  "rustls",

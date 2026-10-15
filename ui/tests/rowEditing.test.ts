@@ -54,6 +54,19 @@ test('expressions, generated values and unsupported placeholders are read-only',
   assert.match(assessRowEditing(result).reason, /type that cannot be safely edited/);
 });
 
+test('decoded arrays are editable with original literals; legacy placeholders stay read-only', () => {
+  const result = data([column('id'), column('tags', { typeName: '_text' }), column('numbers', { typeName: '_numeric' })], [key(['id'])], [{ id: 'one', tags: '[0:1]={"one",NULL}', numbers: '{"9007199254740993"}' }]);
+  const target = assessRowEditing(result).target!;
+  assert.deepEqual(target.editableColumns.map((column) => column.name), ['id', 'tags', 'numbers']);
+  assert.deepEqual(buildRowUpdates(target, result.rows, [{ rowIndex: 0, column: 'tags', oldValue: result.rows[0].tags, newValue: '{}' }])[0], {
+    schema: 'public', table: 'items', keyColumns: ['id'], values: { tags: '{}' }, original: { id: 'one', tags: '[0:1]={"one",NULL}' }
+  });
+  result.rows[0].tags = '<_text>';
+  assert.deepEqual(assessRowEditing(result).target!.editableColumns.map((column) => column.name), ['id', 'numbers']);
+  result.rows[0].tags = null;
+  assert.ok(assessRowEditing(result).target!.editableColumns.some((column) => column.name === 'tags'));
+});
+
 test('multi-table, no-key and legacy results fail closed rather than guessing uniqueness', () => {
   const result = data();
   result.columns[1].tableName = 'other';

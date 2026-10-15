@@ -30,6 +30,7 @@ pub struct ApplyUpdatesResult {
 struct EditableColumn {
     generated: bool,
     json_type: Option<&'static str>,
+    array: bool,
 }
 
 #[derive(Debug)]
@@ -125,10 +126,12 @@ async fn apply_batch(
             let rows = client
                 .query(
                     "SELECT a.attname, a.attgenerated <> '',
-                 a.atttypid = 'pg_catalog.json'::regtype, a.atttypid = 'pg_catalog.jsonb'::regtype, c.oid
+                 a.atttypid = 'pg_catalog.json'::regtype, a.atttypid = 'pg_catalog.jsonb'::regtype, c.oid,
+                 t.typelem <> 0 AND t.typlen = -1
                  FROM pg_class c
                  JOIN pg_namespace n ON n.oid = c.relnamespace
                  JOIN pg_attribute a ON a.attrelid = c.oid
+                 JOIN pg_type t ON t.oid = a.atttypid
                  WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')
                    AND a.attnum > 0 AND NOT a.attisdropped",
                     &[&update.schema, &update.table],
@@ -147,6 +150,7 @@ async fn apply_batch(
                         row.get::<_, String>(0),
                         EditableColumn {
                             generated: row.get(1),
+                            array: row.get(5),
                             json_type: if row.get(2) {
                                 Some("json")
                             } else if row.get(3) {
@@ -282,6 +286,10 @@ fn build_update_sql(
         // non-key cells need an optimistic stale-value check.
         if is_key {
             format!("target.{quoted} = original_values.{quoted}")
+        } else if columns[*name].array {
+            // JSON conversion omits array lower bounds. Check dimensions too
+            // so a concurrent change of bounds cannot be overwritten silently.
+            format!("(array_dims(target.{quoted}) IS NOT DISTINCT FROM array_dims(original_values.{quoted}) AND to_jsonb(target.{quoted}) IS NOT DISTINCT FROM to_jsonb(original_values.{quoted}))")
         } else {
             format!("to_jsonb(target.{quoted}) IS NOT DISTINCT FROM to_jsonb(original_values.{quoted})")
         }
@@ -329,6 +337,7 @@ mod tests {
                 EditableColumn {
                     generated,
                     json_type: None,
+                    array: false,
                 },
             )
         })
@@ -421,6 +430,7 @@ mod tests {
             EditableColumn {
                 generated: false,
                 json_type: Some("jsonb"),
+                array: false,
             },
         );
         let mut row = update();

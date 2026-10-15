@@ -1,5 +1,6 @@
 import type { ColumnMeta, QueryResult, RowKey, RowUpdate } from './types';
 import type { PendingChange } from './workspace';
+import { arrayElementType, parsePgArray } from './pgArray.ts';
 
 export interface EditTarget {
   schema: string;
@@ -9,9 +10,21 @@ export interface EditTarget {
   editableColumns: ColumnMeta[];
 }
 
-// Match the types decoded faithfully by pg::cell_to_json. Array/extension-type
-// placeholders cannot be used as a row identity or an original edit value.
+// Match the types decoded faithfully by pg::cell_to_json. Legacy array and
+// unsupported extension-type placeholders must never become original values.
 const EDIT_TYPES = new Set(['bool', 'int2', 'int4', 'int8', 'numeric', 'float4', 'float8', 'text', 'varchar', 'bpchar', 'name', 'uuid', 'json', 'jsonb', 'date', 'timestamp', 'timestamptz']);
+
+function supportedColumn(column: ColumnMeta, rows: Record<string, unknown>[]) {
+  const element = arrayElementType(column.typeName);
+  if (!element) return EDIT_TYPES.has(column.typeName);
+  if (!EDIT_TYPES.has(element)) return false;
+  return rows.every((row) => {
+    const value = row[column.name];
+    if (value === null) return true;
+    if (typeof value !== 'string') return false;
+    try { parsePgArray(value); return true; } catch { return false; }
+  });
+}
 
 export function assessRowEditing(result: QueryResult | null, rows = result?.rows ?? []): { target: EditTarget | null; reason: string } {
   const unavailable = (reason: string) => ({ target: null, reason });
@@ -30,7 +43,7 @@ export function assessRowEditing(result: QueryResult | null, rows = result?.rows
   let reason = 'The selected key contains NULL values and does not uniquely identify every row. Include a non-null key or a NULLS NOT DISTINCT unique key.';
   for (const key of keys) {
     const keyColumns = key.columns.map((name) => columns.find((column) => column.sourceName === name)!);
-    if (keyColumns.some((column) => !EDIT_TYPES.has(column.typeName))) {
+    if (keyColumns.some((column) => !supportedColumn(column, rows))) {
       reason = 'The selected key uses a type that cannot be safely edited.';
       continue;
     }
@@ -40,7 +53,7 @@ export function assessRowEditing(result: QueryResult | null, rows = result?.rows
       reason = 'The result repeats the same row key. Return each source row once before editing.';
       continue;
     }
-    const editableColumns = columns.filter((column) => !column.generated && EDIT_TYPES.has(column.typeName));
+    const editableColumns = columns.filter((column) => !column.generated && supportedColumn(column, rows));
     if (!editableColumns.length) return unavailable('The result has no supported, non-generated source columns to edit.');
     return { target: { schema: schema!, table: table!, key, keyColumns, editableColumns }, reason: '' };
   }

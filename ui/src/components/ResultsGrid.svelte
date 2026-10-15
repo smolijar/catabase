@@ -225,7 +225,7 @@
     const column = data.columns[cell.column];
     const value = data.rows[cell.originalIndex]?.[column.name];
     draftNull = value == null;
-    draft = value == null ? (cellKind(column) === 'boolean' ? 'false' : '') : prettyCell(value, column, data.jsonValuesAsText);
+    draft = value == null ? (cellKind(column) === 'boolean' ? 'false' : cellKind(column) === 'array' ? '{}' : '') : prettyCell(value, column, data.jsonValuesAsText);
     draftError = '';
   }
 
@@ -498,6 +498,7 @@
   .cell.value-boolean { --value-color: #8edbca; color: var(--value-color); font-weight: 600; }
   .cell.false-value { --value-color: #e3ba84; }
   .cell.value-json { --value-color: #bdcddd; color: var(--value-color); }
+  .cell.value-array { --value-color: #a9c9df; color: var(--value-color); }
   .cell:active:not(:disabled) { transform: none; }
   .cell.null-value, .cell.empty-value { --value-color: #a1b0c4; font-style: italic; color: var(--value-color); }
   .cell.empty-value { font-size: 10px; }
