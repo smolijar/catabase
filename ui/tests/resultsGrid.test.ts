@@ -1,10 +1,57 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cellText, parseCellDraft, positionAfterReorder, prettyCell, sameCellValue, selectionText, sortedRows, visibleRowWindow } from '../src/lib/resultsGrid.ts';
-import type { ColumnMeta, QueryResult } from '../src/lib/types.ts';
+import { cellDisplayType, cellText, columnHeaderInfo, parseCellDraft, positionAfterReorder, prettyCell, sameCellValue, selectionText, sortedRows, visibleRowWindow } from '../src/lib/resultsGrid.ts';
+import type { ColumnMeta, QueryResult, SchemaItem } from '../src/lib/types.ts';
 
 const column = (typeName = 'text', more: Partial<ColumnMeta> = {}): ColumnMeta => ({ name: 'value', typeName, typeOid: 0, nullable: true, generated: false, primaryKey: false, ...more });
 const result = (values: unknown[], typeName = 'text'): QueryResult => ({ columns: [column(typeName)], rows: values.map((value) => ({ value })), rowCount: values.length, durationMs: 1, autoLimited: false, hasMore: false });
+
+test('display types follow PostgreSQL metadata, preserving exact numbers and numeric-looking strings', () => {
+  for (const type of ['int8', 'numeric', 'numeric(20, 8)', 'pg_catalog.float8', 'double precision', 'oid']) assert.equal(cellDisplayType(column(type), '9007199254740993'), 'number');
+  for (const value of ['0123', 'false', '2026-10-15', 'NULL']) assert.equal(cellDisplayType(column('text'), value), 'string');
+  for (const type of ['date', 'time', 'timetz', 'timestamptz', 'timestamp(6) with time zone', 'time(3) without time zone', 'interval']) assert.equal(cellDisplayType(column(type), 'unchanged'), 'date');
+  for (const value of [true, false]) assert.equal(cellDisplayType(column('bool'), value), 'boolean');
+  assert.equal(cellDisplayType(column('jsonb'), 'null'), 'json');
+  for (const type of ['_date', 'timestamp[]', 'int4[]', 'bytea']) assert.equal(cellDisplayType(column(type), 'unchanged'), 'other');
+  for (const type of ['text', 'int8', 'date', 'bool', 'jsonb']) assert.equal(cellDisplayType(column(type), null), 'null');
+});
+
+const reflectedTable: SchemaItem = {
+  schema: 'public', name: 'children', kind: 'table',
+  columns: [
+    { name: 'id', typeName: 'int8', nullable: false, generated: false, primaryKey: true },
+    { name: 'tenant_id', typeName: 'text', nullable: false, generated: false, primaryKey: false },
+    { name: 'parent_id', typeName: 'int8', nullable: true, generated: false, primaryKey: false }
+  ],
+  rowKeys: [{ schema: 'public', table: 'children', columns: ['id', 'tenant_id'], primaryKey: true, nullsNotDistinct: false }],
+  foreignKeys: [{ name: 'parent_fk', columns: ['parent_id', 'tenant_id'], referencedSchema: 'public', referencedTable: 'parents', referencedColumns: ['id', 'tenant_id'] }]
+};
+
+test('header metadata uses reflected origins through aliases, including partially selected composite FKs', () => {
+  const info = columnHeaderInfo(column('int8', { name: 'parent', sourceName: 'parent_id', tableSchema: 'public', tableName: 'children' }), [reflectedTable]);
+  assert.equal(info.foreignKey, true);
+  assert.equal(info.primaryKey, false);
+  assert.match(info.tooltip, /Type: int8/);
+  assert.match(info.tooltip, /Source: public.children.parent_id/);
+  assert.match(info.tooltip, /Nullable/);
+  assert.match(info.tooltip, /Foreign key \(parent_id, tenant_id\) → public.parents \(id, tenant_id\)/);
+  const key = columnHeaderInfo(column('int8', { sourceName: 'id', tableSchema: 'public', tableName: 'children', nullable: false }), [reflectedTable]);
+  assert.equal(key.primaryKey, true);
+  assert.match(key.tooltip, /Primary key \(id, tenant_id\)/);
+  assert.match(key.tooltip, /NOT NULL/);
+});
+
+test('header metadata never guesses FK origins from aliases, a different schema, or malformed reflection', () => {
+  const alias = column('int8', { name: 'parent_id', tableSchema: 'public', tableName: 'children' });
+  assert.equal(columnHeaderInfo(alias, [reflectedTable]).foreignKey, false);
+  assert.equal(columnHeaderInfo({ ...alias, sourceName: 'parent_id', tableSchema: 'other' }, [reflectedTable]).foreignKey, false);
+  const malformed = { ...reflectedTable, foreignKeys: [{ ...reflectedTable.foreignKeys![0], referencedColumns: [] }] };
+  assert.equal(columnHeaderInfo({ ...alias, sourceName: 'parent_id' }, [malformed]).foreignKey, false);
+  const saved = columnHeaderInfo(column('int8', { sourceName: 'id', tableSchema: 'public', tableName: 'children', primaryKey: true, generated: true }), [], reflectedTable.rowKeys);
+  assert.equal(saved.primaryKey, true);
+  assert.match(saved.tooltip, /Primary key \(id, tenant_id\)/);
+  assert.match(saved.tooltip, /Generated — read-only/);
+});
 
 test('re-selecting an original FK clears the change without confusing exact text, SQL NULL or JSON null', () => {
   assert.ok(sameCellValue(42, '42', column('int4')));
