@@ -39,6 +39,15 @@ test('non-FK cells retain typed editing without a NULL checkbox', () => {
   assert.match(renderEditor({ error: 'Invalid' }), /aria-invalid="true"/);
 });
 
+test('array editors explain native array syntax, empty arrays and the different NULL forms', () => {
+  const html = renderEditor({ column: { ...column, typeName: '_text' }, draft: '{"one",NULL}' });
+  assert.match(html, /<textarea/);
+  assert.match(html, /PostgreSQL array/);
+  assert.match(html, /\{\} is empty/);
+  assert.match(html, /Dimensions and numeric precision are preserved/);
+  assert.doesNotMatch(html, /empty value is an empty string/);
+});
+
 test('non-FK NULL drafts have an Edit value action, including a disabled state', () => {
   const html = renderEditor({ isNull: true });
   assert.match(html, /No value will be stored/);

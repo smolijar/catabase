@@ -62,6 +62,161 @@ fn docker_fields() -> Result<ConnectionFields, Box<dyn Error>> {
     Ok(fields)
 }
 
+#[tokio::test]
+#[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE pointing at the saved zenbase docker connection"]
+async fn arrays_decode_and_edit_losslessly_on_docker() -> Result<(), Box<dyn Error>> {
+    let client = connect_client(&docker_fields()?).await?;
+    let cache = ReflectionCache::default();
+    // The reported real table is read-only. Never log its row payloads.
+    let actual = execute_on_client_with_reflection(
+        &client,
+        "SELECT * FROM pms.user_partner_property_manager LIMIT 3",
+        0,
+        200,
+        None,
+        &cache,
+    )
+    .await?;
+    let arrays = actual
+        .columns
+        .iter()
+        .filter(|column| column.type_name == "_text")
+        .collect::<Vec<_>>();
+    assert!(
+        !arrays.is_empty(),
+        "The reported table should include text arrays"
+    );
+    for column in arrays {
+        for row in &actual.rows {
+            assert!(
+                row[&column.name].is_null()
+                    || row[&column.name]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with('{') || value.starts_with('['))
+            );
+        }
+    }
+
+    // Check decoding against PostgreSQL's own array input function, not just
+    // expected UI strings. Includes non-default bounds, precision and infinity.
+    let sql = r#"SELECT ARRAY['',NULL,'NULL','a,b',E'quote"slash\\','žluťoučký'] AS texts,
+        '[0:1][3:4]={{1,2},{3,NULL}}'::int4[] AS matrix,
+        ARRAY[9007199254740993::bigint] AS bigints,
+        ARRAY[0.123456789012345678901::numeric, 'NaN'::numeric] AS decimals,
+        ARRAY[true,false,NULL] AS flags,
+        ARRAY['2026-10-15'::date,'infinity'::date] AS dates,
+        ARRAY['2026-10-15 12:34:56.123456'::timestamp,'-infinity'::timestamp] AS timestamps,
+        ARRAY['2026-10-15 12:34:56.123456+02'::timestamptz] AS zoned,
+        ARRAY['00000000-0000-4000-8000-000000000001'::uuid] AS ids,
+        ARRAY['{"n":9007199254740993}'::json,NULL] AS jsons,
+        ARRAY['{"n":9007199254740993}'::jsonb] AS jsonbs,
+        ARRAY[E'\\x0011ff'::bytea] AS bytes, '{}'::text[] AS empty, NULL::text[] AS missing"#;
+    let decoded = execute_on_client_with_reflection(&client, sql, 0, 200, None, &cache).await?;
+    let row = &decoded.rows[0];
+    for column in &decoded.columns {
+        if column.name == "missing" {
+            assert!(row[&column.name].is_null());
+            continue;
+        }
+        let literal = row[&column.name]
+            .as_str()
+            .expect("arrays must be lossless literals");
+        assert!(
+            !literal.starts_with('<'),
+            "{} was not decoded",
+            column.type_name
+        );
+        let check = format!(
+            "SELECT to_jsonb(source.{0}) = to_jsonb($1::text::{1}) AND array_dims(source.{0}) IS NOT DISTINCT FROM array_dims($1::text::{1}) FROM ({sql}) source",
+            column.name, column.type_name
+        );
+        let equal: bool = client.query_one(&check, &[&literal]).await?.get(0);
+        assert!(
+            equal,
+            "{} failed an array input/output round trip",
+            column.name
+        );
+    }
+    assert_eq!(row["bigints"], r#"{"9007199254740993"}"#);
+    assert!(
+        row["decimals"]
+            .as_str()
+            .unwrap()
+            .contains("0.123456789012345678901")
+    );
+
+    client.batch_execute("BEGIN; CREATE TEMP TABLE catabase_array_probe (id int PRIMARY KEY, tags text[], amounts numeric[]); INSERT INTO catabase_array_probe VALUES (1, '[0:1]={one,NULL}', '{0.123456789012345678901}');").await?;
+    let fixture = execute_on_client_with_reflection(
+        &client,
+        "SELECT * FROM catabase_array_probe",
+        0,
+        200,
+        None,
+        &cache,
+    )
+    .await?;
+    let schema = fixture.columns[0].table_schema.clone().unwrap();
+    let mut update = RowUpdate {
+        schema, table: "catabase_array_probe".into(), key_columns: vec!["id".into()],
+        values: json!({"tags": r#"[-1:1]={"NULL",NULL,"a,b"}"#, "amounts": r#"{"9007199254740993","0.123456789012345678901"}"#}).as_object().unwrap().clone(),
+        original: fixture.rows[0].as_object().unwrap().clone(),
+    };
+    let cancelled = AtomicBool::new(false);
+    assert_eq!(
+        apply_row_updates(&client, &[update.clone()], true, &cancelled)
+            .await?
+            .updated_rows,
+        1
+    );
+    let edited = execute_on_client_with_reflection(
+        &client,
+        "SELECT * FROM catabase_array_probe",
+        0,
+        200,
+        None,
+        &cache,
+    )
+    .await?;
+    assert_eq!(edited.rows[0]["tags"], update.values["tags"]);
+    assert_eq!(edited.rows[0]["amounts"], update.values["amounts"]);
+    // A concurrent bounds-only change is a stale original, even when JSON
+    // conversion of both arrays would otherwise be indistinguishable.
+    client
+        .batch_execute(r#"UPDATE catabase_array_probe SET tags = '[2:4]={"NULL",NULL,"a,b"}'"#)
+        .await?;
+    update.original = edited.rows[0].as_object().unwrap().clone();
+    update.values = json!({"tags": "{}"}).as_object().unwrap().clone();
+    assert!(
+        apply_row_updates(&client, &[update.clone()], true, &cancelled)
+            .await
+            .is_err()
+    );
+    let current = execute_on_client_with_reflection(
+        &client,
+        "SELECT * FROM catabase_array_probe",
+        0,
+        200,
+        None,
+        &cache,
+    )
+    .await?;
+    update.original = current.rows[0].as_object().unwrap().clone();
+    apply_row_updates(&client, &[update.clone()], true, &cancelled).await?;
+    update.original.insert("tags".into(), json!("{}"));
+    update.values.insert("tags".into(), json!(null));
+    apply_row_updates(&client, &[update], true, &cancelled).await?;
+    let missing: bool = client
+        .query_one("SELECT tags IS NULL FROM catabase_array_probe", &[])
+        .await?
+        .get(0);
+    assert!(missing);
+    client.batch_execute("ROLLBACK").await?;
+    println!(
+        "Docker arrays: reported table read, scalar/multidimensional round trips and safe edits passed; temporary fixture rolled back."
+    );
+    Ok(())
+}
+
 // Count Parse messages without storing SQL, credentials or row payloads.
 // This verifies absence of round trips, not a timing threshold that could flake.
 fn counted_connection(fields: &ConnectionFields) -> Result<CountedConnection, Box<dyn Error>> {

@@ -4,6 +4,8 @@
     "allowJs": true,
     "checkJs": true,
     "isolatedModules": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
     "moduleResolution": "bundler",
     "strict": true
   },

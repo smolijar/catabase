@@ -7,8 +7,10 @@ license.workspace = true
 [dependencies]
 chrono.workspace = true
 deadpool-postgres.workspace = true
+fallible-iterator.workspace = true
 keyring.workspace = true
 percent-encoding.workspace = true
+postgres-protocol.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
 rustls.workspace = true

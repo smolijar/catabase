@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tokio_postgres::{
     CancelToken, Client as TokioPgClient, Config as PgConfig, NoTls, Row, SimpleQueryMessage,
     config::SslMode,
-    types::{FromSql, Type},
+    types::{FromSql, Kind, Type},
 };
 use tokio_postgres_rustls::MakeRustlsConnect;
 use uuid::Uuid;
@@ -26,6 +26,8 @@ pub type PooledPgClient = deadpool_postgres::Client;
 pub type PgCancelToken = CancelToken;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
+mod arrays;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -771,6 +773,13 @@ fn row_to_json(row: &Row) -> Value {
 }
 
 fn cell_to_json(row: &Row, index: usize, ty: &Type) -> Value {
+    if matches!(ty.kind(), Kind::Array(_)) {
+        return match row.try_get::<_, Option<arrays::PgArray>>(index) {
+            Ok(Some(value)) => Value::String(value.0),
+            Ok(None) => Value::Null,
+            Err(_) => Value::String(format!("<{}>", ty.name())),
+        };
+    }
     macro_rules! get_optional {
         ($type:ty) => {
             row.try_get::<usize, Option<$type>>(index)

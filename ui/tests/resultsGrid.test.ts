@@ -12,7 +12,8 @@ test('display types follow PostgreSQL metadata, preserving exact numbers and num
   for (const type of ['date', 'time', 'timetz', 'timestamptz', 'timestamp(6) with time zone', 'time(3) without time zone', 'interval']) assert.equal(cellDisplayType(column(type), 'unchanged'), 'date');
   for (const value of [true, false]) assert.equal(cellDisplayType(column('bool'), value), 'boolean');
   assert.equal(cellDisplayType(column('jsonb'), 'null'), 'json');
-  for (const type of ['_date', 'timestamp[]', 'int4[]', 'bytea']) assert.equal(cellDisplayType(column(type), 'unchanged'), 'other');
+  for (const type of ['_date', 'timestamp[]', 'int4[]']) assert.equal(cellDisplayType(column(type), '{}'), 'array');
+  assert.equal(cellDisplayType(column('bytea'), 'unchanged'), 'other');
   for (const type of ['text', 'int8', 'date', 'bool', 'jsonb']) assert.equal(cellDisplayType(column(type), null), 'null');
 });
 
@@ -101,6 +102,20 @@ test('typed drafts distinguish empty text, SQL NULL, JSON null and preserve prec
   assert.equal(parseCellDraft(column('jsonb'), 'null', false), 'null');
   assert.equal(parseCellDraft(column('jsonb'), '{"n":9007199254740993}', false), '{"n":9007199254740993}');
   assert.equal(parseCellDraft(column('bool'), 'false', false), false);
+});
+
+test('array display, editing and copy preserve NULLs, bounds and exact element text', () => {
+  const array = column('_text');
+  const literal = '[0:3]={"",NULL,"NULL","9007199254740993"}';
+  assert.equal(cellText(literal, array), literal);
+  assert.match(prettyCell(literal, array), /^\[0:3\]=\{\n/);
+  assert.equal(parseCellDraft(array, prettyCell(literal, array), false), literal);
+  assert.equal(parseCellDraft(array, '{}', false), '{}');
+  assert.equal(parseCellDraft(array, '', true), null);
+  assert.throws(() => parseCellDraft(array, '', false), /Invalid PostgreSQL array/);
+  assert.throws(() => parseCellDraft(array, '<_text>', false), /Invalid PostgreSQL array/);
+  const data = result([literal], '_text');
+  assert.equal(selectionText(sortedRows(data, null), data.columns, { row: 0, column: 0 }, { row: 0, column: 0 }), literal);
 });
 
 test('invalid, generated and non-nullable edits are rejected', () => {

@@ -1,17 +1,19 @@
 import type { ColumnMeta, QueryResult, RowKey, SchemaItem } from './types';
+import { arrayElementType, parsePgArray } from './pgArray.ts';
 
 export type CellPosition = { row: number; column: number };
 export type GridSort = { column: string; direction: 'asc' | 'desc' } | null;
 export type IndexedRow = { row: Record<string, unknown>; originalIndex: number };
-export type CellKind = 'boolean' | 'integer' | 'numeric' | 'json' | 'text';
-export type CellDisplayType = 'number' | 'string' | 'date' | 'boolean' | 'json' | 'other' | 'null';
+export type CellKind = 'boolean' | 'integer' | 'numeric' | 'json' | 'array' | 'text';
+export type CellDisplayType = 'number' | 'string' | 'date' | 'boolean' | 'json' | 'array' | 'other' | 'null';
 
 // Use PostgreSQL types, not value guessing: numeric text must stay a string,
 // while int8/numeric values transported as exact strings are still numbers.
 export function cellDisplayType(column: ColumnMeta, value: unknown): CellDisplayType {
   if (value == null) return 'null';
   const type = column.typeName.toLowerCase().replace(/^pg_catalog\./, '').replace(/\(\d+(?:\s*,\s*\d+)?\)/g, '').trim();
-  if (type.startsWith('_') || type.endsWith('[]') || type === 'bytea') return 'other';
+  if (arrayElementType(type)) return 'array';
+  if (type === 'bytea') return 'other';
   const kind = cellKind({ ...column, typeName: type });
   if (kind === 'integer' || kind === 'numeric') return 'number';
   if (kind === 'boolean' || kind === 'json') return kind;
@@ -57,6 +59,7 @@ export function visibleRowWindow(total: number, scrollTop: number, viewportHeigh
 }
 
 export function cellKind(column: ColumnMeta): CellKind {
+  if (arrayElementType(column.typeName)) return 'array';
   const type = column.typeName.toLowerCase().replace(/^pg_catalog\./, '');
   if (type === 'bool' || type === 'boolean') return 'boolean';
   if (['int2', 'int4', 'int8', 'smallint', 'integer', 'bigint', 'oid'].includes(type)) return 'integer';
@@ -82,6 +85,9 @@ export function sameCellValue(left: unknown, right: unknown, column: ColumnMeta,
 // Format JSON tokens without parsing their numbers into JavaScript doubles.
 export function prettyCell(value: unknown, column: ColumnMeta, jsonValuesAsText = false): string {
   const text = cellText(value, column, jsonValuesAsText);
+  if (value != null && cellKind(column) === 'array') {
+    try { return parsePgArray(text).pretty; } catch { return text; }
+  }
   if (value == null || (cellKind(column) !== 'json' && typeof value !== 'object')) return text;
   try {
     JSON.parse(text);
@@ -205,6 +211,7 @@ export function parseCellDraft(column: ColumnMeta, draft: string, isNull: boolea
     return null;
   }
   const kind = cellKind(column);
+  if (kind === 'array') return parsePgArray(draft).literal;
   if (kind === 'boolean') {
     if (draft !== 'true' && draft !== 'false') throw new Error('Choose true or false.');
     return draft === 'true';

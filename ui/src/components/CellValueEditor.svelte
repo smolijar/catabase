@@ -26,9 +26,9 @@
   </div>
 {:else}
   <div class="value-mode">Value</div>
-  <textarea aria-label={`New value for ${column.name}`} aria-invalid={Boolean(error)} bind:value={draft} {disabled} spellcheck="false" inputmode={kind === 'integer' || kind === 'numeric' ? 'decimal' : 'text'} on:input={onChange} on:keydown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); onStage(); } }}></textarea>
+  <textarea aria-label={`New value for ${column.name}`} aria-invalid={Boolean(error)} placeholder={kind === 'array' ? '{"one","two",NULL}' : undefined} bind:value={draft} {disabled} spellcheck="false" inputmode={kind === 'integer' || kind === 'numeric' ? 'decimal' : 'text'} on:input={onChange} on:keydown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); onStage(); } }}></textarea>
 {/if}
-{#if !pickerOnly}<p class="edit-hint">{kind === 'text' ? 'An empty value is an empty string. Use Set NULL to remove the value.' : kind === 'json' ? 'JSON is validated before staging. JSON null and SQL NULL are distinct.' : kind === 'numeric' || kind === 'integer' ? 'Numbers retain their full precision.' : 'Choose a value, then stage the change.'}</p>{/if}
+{#if !pickerOnly}<p class="edit-hint">{kind === 'array' ? 'PostgreSQL array: {"one","two",NULL}. {} is empty; NULL is a null element; "NULL" is text. Use Set NULL for a SQL NULL array. Dimensions and numeric precision are preserved.' : kind === 'text' ? 'An empty value is an empty string. Use Set NULL to remove the value.' : kind === 'json' ? 'JSON is validated before staging. JSON null and SQL NULL are distinct.' : kind === 'numeric' || kind === 'integer' ? 'Numbers retain their full precision.' : 'Choose a value, then stage the change.'}</p>{/if}
 
 <style>
   .value-mode { flex-shrink: 0; margin-bottom: 5px; font-size: 11px; color: #adbed3; }
