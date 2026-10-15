@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  AiHealth,
-  AiCompletionRequest,
+  SupermavenStatus,
+  SupermavenRequest,
+  SupermavenCompletion,
   AppError,
   ApplyUpdatesResult,
   CancelResult,
@@ -32,7 +33,7 @@ export const api = {
   buildConnectionUrl: (fields: ConnectionFields) => invoke<string>('build_connection_url', { fields }),
   getSettings: () => invoke<Settings>('get_settings'),
   setPoolSize: (poolSize: number) => invoke<number>('set_pool_size', { poolSize }),
-  setAiModel: (model: string | null) => invoke<string | null>('set_ai_model', { model }),
+  setSupermavenEnabled: (enabled: boolean) => invoke<SupermavenStatus>('set_supermaven_enabled', { enabled }),
   splitSql: (sql: string) => invoke<StatementRange[]>('split_sql', { sql }),
   executeQuery: (sql: string, queryToken: string, offset = 0, pageSize = 200, connectionId?: string, readOnlyReplay = false) =>
     invoke<QueryResult>('execute_query', { sql, queryToken, offset, pageSize, connectionId, readOnlyReplay }),
@@ -57,9 +58,11 @@ export const api = {
   loadDraft: (tabKind: string) => invoke<string | null>('load_draft', { tabKind }),
   enableExitGuard: () => invoke<void>('enable_exit_guard'),
   finishExit: () => invoke<void>('finish_exit'),
-  aiHealth: () => invoke<AiHealth>('ai_health'),
-  aiModels: () => invoke<string[]>('ai_models'),
-  aiComplete: (request: AiCompletionRequest) => invoke<string | null>('ai_complete', { request }),
+  supermavenStatus: () => invoke<SupermavenStatus>('supermaven_status'),
+  supermavenComplete: (request: SupermavenRequest) => invoke<SupermavenCompletion | null>('supermaven_complete', { request }),
+  supermavenCancel: (requestId: string) => invoke<void>('supermaven_cancel', { requestId }),
+  supermavenUseFree: () => invoke<void>('supermaven_use_free'),
+  supermavenOpenActivation: () => invoke<void>('supermaven_open_activation'),
   exportWriteFile: (path: string, content: string) => invoke<void>('export_write_file', { path, content })
 };
 

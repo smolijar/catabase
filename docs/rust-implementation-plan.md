@@ -19,7 +19,7 @@ Implements [gui-app-spec.md](./gui-app-spec.md). Desktop PostgreSQL query worksp
 │  pg engine (pool, exec, cancel, tx, introspect, DDL)                     │
 │  sql analysis (split, classify, auto-limit)                              │
 │  storage (SQLite: settings, connections, drafts, history)                │
-│  secrets (keyring) · conn URL parse/format · OpenCode client             │
+│  secrets (keyring) · conn URL parse/format · Supermaven agent adapter    │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -38,7 +38,7 @@ Core logic lives in `catabase-core` (no Tauri dependency) so it is unit-testable
 | Local storage | `rusqlite` (`bundled`) + `rusqlite_migration` | Spec mandates SQLite; bundled avoids system dependency; migrations for the "Storage migration" scenario |
 | Password storage | `keyring` 3.x | Platform mechanism per spec: macOS Keychain / Windows Credential Manager / Secret Service. Graceful fallback to an SQLite column when unavailable (spec: "when available") |
 | URL handling | `url` + custom builder | Parse `postgres://`/`postgresql://` import (incl. `sslmode` query param); format fields → URL for the sync scenario |
-| OpenCode client | `reqwest` (rustls) | HTTP client to local OpenCode server: health, provider/model list, completion |
+| Supermaven adapter | `tokio::process`, `reqwest` (rustls), `sha2` | Persistent official `sm-agent stdio`; HTTPS binary download with SHA-256 verification; Neovim editor protocol |
 | Serialization | `serde`, `serde_json` | IPC payloads; JSONB/row value transport; stored history results |
 | Errors | `thiserror` in core, structured `AppError` serialized to frontend | PG errors must carry severity/detail/hint/code/position to the UI |
 | IDs / time | `uuid`, `chrono` | Query tokens for cancel; history timestamps |
@@ -57,7 +57,7 @@ crates/catabase-core/src/
   storage/
     mod.rs          # Storage handle: rusqlite on dedicated thread, channel-based API
     migrations.rs   # rusqlite_migration set; seeds default pool size
-    settings.rs     # get/set pool_size (normalized 1..=32), ai_model
+    settings.rs     # get/set pool_size (normalized 1..=32), supermaven_enabled (default false)
     connections.rs  # CRUD; active flag (single active enforced in one tx)
     drafts.rs       # script draft per tab-kind (playground)
     history.rs      # insert, page, search (LIKE), stats, delete, purge; capped result JSON
@@ -73,7 +73,7 @@ crates/catabase-core/src/
     introspect.rs   # schemas, tables/views/matviews, columns (type, not-null, generated, pk) from pg_catalog
     ddl.rs          # CREATE TABLE composed from catalog; views via pg_get_viewdef; indexes via pg_get_indexdef
     stats.rs        # pg_stat_activity idle/active counts for current db + pool status
-  opencode.rs       # health, models, complete(prefix, suffix, language, position, schema_context) → raw text
+  supermaven.rs     # opt-in agent lifecycle, activation/status, document/cursor updates, cancellable safe inline insertions
 ```
 
 ### 3.2 Query execution flow
@@ -135,18 +135,18 @@ CREATE INDEX idx_history_executed ON query_history(executed_at DESC);
 | Group | Commands |
 |---|---|
 | Connections | `list_connections`, `save_connection` (create/update; stores password via secrets), `delete_connection`, `activate_connection`, `test_connection`, `parse_connection_url`, `build_connection_url` |
-| Settings | `get_settings`, `set_pool_size`, `set_ai_model` |
+| Settings | `get_settings`, `set_pool_size`, `set_supermaven_enabled` |
 | Query | `execute_query`, `cancel_query`, `split_sql` (statement ranges for execution targeting), `connection_stats` |
 | Transaction | `tx_status`, `tx_commit`, `tx_rollback` |
 | Schema | `introspect_schema`, `get_ddl { schema, name }` |
 | History | `history_page { search, offset, limit }`, `history_stats`, `history_get_result { id }`, `history_delete { id }`, `history_purge` |
 | Drafts | `save_draft`, `load_draft` |
-| AI | `ai_health`, `ai_models`, `ai_complete` |
+| AI | `supermaven_status`, `supermaven_complete`, `supermaven_cancel`, `supermaven_open_activation`, `supermaven_use_free` |
 | Export | `export_write_file { path, content }` (paired with dialog plugin save-as) |
 
 Events (backend → frontend): `tx-changed { active, started_at }`, `pool-reset`.
 
-`AppState` (managed by Tauri): `Storage` handle, `RwLock<Option<ActivePool>>`, `TxManager`, cancel registry (`DashMap<Uuid, CancelToken>`), OpenCode client.
+`AppState` (managed by Tauri): `Storage` handle, `RwLock<Option<ActivePool>>`, `TxManager`, cancel registry (`DashMap<Uuid, CancelToken>`), shared Supermaven client.
 
 ## 4. Frontend design
 
@@ -202,7 +202,7 @@ Error position mapping: PG `position` is 1-based character offset into the *exec
 ### 4.5 Polling and health loops
 
 - Connection stats: 5 s interval while a connection is active; stopped on deactivate.
-- OpenCode health: on start + 30 s interval; drives AI on/error/off status chip; on transition to connected, fetch models and fill Settings select.
+- Supermaven: read local agent state on start + 2 s interval; Settings exposes opt-in enable/disable, retry and explicit account actions. No model selector or database requests.
 - Schema auto-refresh on activation; manual Refresh button; on failure/empty retry ≤ 3 times with 3 s delay.
 
 ## 5. Implementation phases
@@ -220,7 +220,7 @@ Each phase is demoable and roughly ordered by dependency.
 9. **Transactions** — TxManager, BEGIN/COMMIT/ROLLBACK detection, banner with timer, Commit/Rollback buttons, reset-on-activation semantics.
 10. **Export** — CSV/TSV/JSON serializers, clipboard copy, save-dialog download with timestamped filenames, full export via re-execution with large page size, no-data guards.
 11. **Inline editing** — edit mode, cell editors, pending-change tracking, UPDATE generation, preview tab, apply, discard, disable-confirmation.
-12. **AI** — OpenCode client (health/models/complete), model setting validation, inline completion provider with idle trigger, AI status chip.
+12. **AI** — Supermaven stdio adapter (official Neovim protocol), opt-in setting, verified binary download, safe activation, debounced/cancellable Monaco ghost text, Unicode offsets, stale-response rejection; local schema completion remains independent.
 13. **Drafts + polish** — draft autosave/load/close-save, tab lifecycle edge cases, `Cmd/Ctrl+Shift+L` clear-results, Clear button, empty states, packaging (`tauri bundler`; macOS signing/notarization if distributing).
 
 ## 6. Testing strategy
@@ -240,7 +240,7 @@ Each phase is demoable and roughly ordered by dependency.
 | Source-table detection for inline edit unreliable on joins/expressions | Use `table_oid` column metadata; require single table + PK for Apply, otherwise disable with explanation |
 | Webview differences (WKWebView vs WebView2) for Monaco, clipboard, beforeunload | Use Tauri plugins for clipboard/dialog instead of web APIs; `onCloseRequested` instead of `beforeunload`; test both platforms early (phase 1) |
 | Large result sets freeze the DOM table | Auto-limit default page (200–500 rows); virtualized table rows if profiling shows need |
-| OpenCode API surface changes | Thin client module, base URL configurable, health check degrades to "AI off" |
+| Supermaven protocol/service availability changes | Thin bounded stdio adapter, explicit retry/activation, fail closed for unsupported edits, opt-in live synthetic smoke test; local schema completion remains available |
 
 ## 8. Repository layout
 

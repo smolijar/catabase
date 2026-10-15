@@ -30,7 +30,7 @@ export interface ConnectionRecord extends ConnectionFields {
 
 export interface Settings {
   poolSize: number;
-  aiModel?: string | null;
+  supermavenEnabled: boolean;
 }
 
 export interface ColumnMeta {
@@ -170,9 +170,12 @@ export interface SchemaTree {
   schemas: SchemaItem[];
 }
 
-export interface AiHealth {
+export interface SupermavenStatus {
+  enabled: boolean;
   state: string;
-  message?: string | null;
+  message: string;
+  activationUrl?: string | null;
+  serviceTier?: string | null;
 }
 
 export interface StatementRange {
@@ -198,11 +201,14 @@ export interface ConnectionStats {
   poolSize: number;
 }
 
-export interface AiCompletionRequest {
-  prefix: string;
-  suffix: string;
-  language: string;
+export interface SupermavenRequest {
+  requestId: string;
+  documentId: string;
+  text: string;
   position: number;
-  schemaContext?: string | null;
-  model?: string | null;
+}
+
+export interface SupermavenCompletion {
+  text: string;
+  deleteBefore: number;
 }

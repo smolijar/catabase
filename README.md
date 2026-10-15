@@ -75,7 +75,7 @@ Implemented:
 - loaded-row exports and explicitly re-run, read-only exports up to 10,000 rows
 - atomic, parameterized cell edits with complete primary/unique-key validation and stale-cell detection
 - schema-aware Monaco completions
-- OpenCode-backed Monaco inline AI completions
+- opt-in Supermaven-backed Monaco ghost-text completions using the official Neovim agent protocol
 - Svelte/Monaco UI shell with sidebar, tabs, editor, results, history, settings
 - independent query tabs with saved drafts, connection choice, and editor position
 - virtualized result grid with column resizing, loaded-row sorting, range selection, and copying
@@ -85,6 +85,18 @@ Implemented:
 - pnpm install age gate
 
 Query results and staged edits stay in memory only; restarting restores SQL drafts, not cached data. Sorting is limited to loaded rows. Loading more rows or requesting a larger export re-runs the original SQL in a read-only transaction, so it is unavailable while a manual transaction is open. Commit or roll back that transaction first. Cell edits made inside a manual transaction remain pending until you commit it.
+
+### Supermaven autocomplete
+
+Enable Supermaven in Settings to download and launch the official `sm-agent`. The download manifest and newline-delimited stdio protocol follow the [official Neovim plugin](https://github.com/supermaven-inc/supermaven-nvim). Catabase verifies the manifest's SHA-256 checksum, runs the agent in an isolated non-project directory, and supplies only the active editable SQL draft (including comments and literals) and its UTF-8 cursor offset. It does not add connection credentials, query results, reflected schemas or unopened tabs. The official agent uses its own existing Supermaven authentication; if activation is required, Settings offers a user-initiated sign-in link and free-tier action. Supermaven has [sunset standalone subscriptions but continues autocomplete for existing customers](https://supermaven.com/blog/sunsetting-supermaven); a working account/service is required.
+
+Suggestions appear as Monaco ghost text; Tab accepts and Escape dismisses. Requests are debounced and cancelled on edits, cursor changes, tab switches and disable. Stale results are rejected, UTF-16/UTF-8 offsets are translated, and cross-file jumps/destructive agent edits are not applied. Disabling kills the process and clears pending suggestions. SQL drafts above 1 MiB are not submitted. Supermaven is off by default (including for existing OpenCode configurations), while local schema/foreign-key completion remains available independently. The old OpenCode HTTP endpoints and model selector have been removed.
+
+An opt-in live smoke test sends only synthetic SQL, never database data:
+
+```sh
+CATABASE_SUPERMAVEN_LIVE_TEST=1 cargo test -p catabase-core supermaven::tests::official_agent_synthetic_completion -- --ignored --nocapture
+```
 
 Schema reflection includes table OIDs, column IDs/types and complete usable primary/unique keys. The backend reuses it to map result columns (including aliases and joins) without per-column catalog queries. Missing or expired metadata is refreshed for all affected tables in a batch; cache entries expire after 60 seconds to bound external DDL staleness. Explicit schema refresh and pool/configuration changes replace the cache. Non-read statements conservatively invalidate it. Manual transactions have separate caches; their schema reflection uses the held client, and finishing a transaction invalidates shared metadata. Applying edits still validates fresh catalog columns and keys, never trusting the cache for writes.
 

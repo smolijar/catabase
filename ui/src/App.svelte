@@ -33,7 +33,7 @@
   import { canUseResult, createDraftWriter, createQueryTab, duplicateQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
   import type { PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
   import type {
-    AiHealth,
+    SupermavenStatus,
     AppError,
     ColumnMeta,
     ConnectionInput,
@@ -108,15 +108,14 @@
     (id, state) => { connectionTests = { ...connectionTests, [id]: state }; },
     errorMessage
   );
-  let settings: Settings = { poolSize: 5, aiModel: null };
+  let settings: Settings = { poolSize: 5, supermavenEnabled: false };
   let poolStats: ConnectionStats | null = null;
   let poolStatsConnectionId: string | null = null;
   let poolStatsRequest = 0;
   let poolSizeInput = 5;
-  let aiModels: string[] = [];
-  let aiHealth: AiHealth = { state: 'off', message: null };
+  let supermaven: SupermavenStatus = { enabled: false, state: 'off', message: 'Supermaven is disabled.' };
+  let supermavenBusy = false;
   let schemaItems: SchemaItem[] = [];
-  let schemaContext = '';
   let schemaSearch = '';
   let schemaGroups: SchemaGroup[] = [];
   let schemaLoading = false;
@@ -164,14 +163,7 @@
     : result && !resultUsable ? 'Re-run this query on its original connection before editing.'
     : editEligibility.reason;
   $: canLoadMore = Boolean(result?.autoLimited && result.hasMore && resultUsable && !running && !connectionMutation && !pendingChanges.length);
-  $: schemaContext = schemaItems
-    .map((item) => `${item.schema}.${item.name}(${item.columns.map((column) => column.name).join(', ')})`)
-    .join('\n');
   $: schemaGroups = groupSchemaItems(schemaItems, schemaSearch);
-  $: aiModelOptions = [
-    { value: '', label: 'Default' },
-    ...Array.from(new Set([...(settings.aiModel ? [settings.aiModel] : []), ...aiModels])).map((model) => ({ value: model, label: aiModels.includes(model) ? model : `${model} (unavailable)` }))
-  ];
   $: if (workspaceLoaded) scheduleDraftSave(sql, activeTab, tabConnectionId, tabs);
   $: if (workspaceLoaded) void refreshSchemaForConnection(tabConnectionId);
   $: if (workspaceLoaded) void loadConnectionStats(activeConnection?.id ?? null);
@@ -212,7 +204,7 @@
         void loadConnectionStats();
       }
     }, 100);
-    const aiInterval = window.setInterval(checkAiHealth, 30000);
+    const aiInterval = window.setInterval(checkSupermaven, 2000);
 
     return () => {
       flushDraftOnUnload();
@@ -236,7 +228,7 @@
       loadSettings(),
       loadConnections(),
       refreshHistory(),
-      checkAiHealth(),
+      checkSupermaven(),
       refreshTxStatus()
     ]);
     await loadDraft();
@@ -969,22 +961,34 @@
     }
   }
 
-  async function saveAiModel(model: string) {
+  async function setSupermaven(enabled: boolean) {
+    if (supermavenBusy) return;
+    supermavenBusy = true;
     try {
-      settings = { ...settings, aiModel: await api.setAiModel(model || null) };
-      flash(settings.aiModel ? `AI model: ${settings.aiModel}.` : 'AI model reset.');
+      supermaven = await api.setSupermavenEnabled(enabled);
+      settings = { ...settings, supermavenEnabled: enabled };
     } catch (error) {
-      flash(errorMessage(error));
+      flash(errorMessage(error), true);
+      await checkSupermaven();
+    } finally {
+      supermavenBusy = false;
     }
   }
 
-  async function checkAiHealth() {
+  async function checkSupermaven() {
     try {
-      aiHealth = await api.aiHealth();
-      if (aiHealth.state === 'on') aiModels = await api.aiModels();
+      supermaven = await api.supermavenStatus();
     } catch {
-      aiHealth = { state: 'off', message: 'OpenCode unavailable' };
+      supermaven = { enabled: false, state: 'error', message: 'Supermaven status is unavailable.' };
     }
+  }
+
+  async function supermavenAccount(action: 'activate' | 'free') {
+    try {
+      if (action === 'activate') await api.supermavenOpenActivation();
+      else await api.supermavenUseFree();
+      await checkSupermaven();
+    } catch (error) { flash(errorMessage(error), true); }
   }
 
   async function loadConnectionStats(connectionId: string | null = tabConnectionId) {
@@ -1626,18 +1630,18 @@
             <p>{currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle` : 'Pool statistics will appear when this connection is in use.'}</p>
           </section>
           <section class="settings-card">
-            <div class="settings-card-head"><strong>AI completion</strong><span class="ai-{aiHealth.state}">{aiHealth.state}</span></div>
-            <label>
-              OpenCode model
-              <Dropdown
-                value={settings.aiModel ?? ''}
-                options={aiModelOptions}
-                ariaLabel="OpenCode model"
-                onSelect={(model) => void saveAiModel(model)}
-              />
-            </label>
-            <p>{aiHealth.state === 'on' ? 'Inline SQL suggestions are available.' : 'OpenCode is unavailable. Start it to enable AI suggestions.'}</p>
-            {#if aiHealth.message}<details class="technical-detail"><summary>Connection details</summary><p>{aiHealth.message}</p></details>{/if}
+            <div class="settings-card-head"><strong>Supermaven autocomplete</strong><span>{supermavenBusy ? 'starting…' : supermaven.state}</span></div>
+            <p>{supermaven.message}</p>
+            <p>Enabling sends the active SQL draft, including comments and literals, to Supermaven. Connection credentials, result rows, other tabs and reflected schema are not added. Built-in schema suggestions stay local and always available.</p>
+            <div class="row-actions">
+              <button disabled={supermavenBusy} on:click={() => setSupermaven(!supermaven.enabled)}>{supermaven.enabled ? 'Disable Supermaven' : 'Enable Supermaven'}</button>
+              {#if supermaven.enabled && supermaven.state !== 'ready'}<button disabled={supermavenBusy} on:click={() => setSupermaven(true)}>Retry</button>{/if}
+              {#if supermaven.activationUrl}
+                <button on:click={() => supermavenAccount('activate')}>Sign in to Supermaven</button>
+                <button on:click={() => supermavenAccount('free')}>Use free tier</button>
+              {/if}
+            </div>
+            <p>Tab accepts a suggestion; Escape dismisses it. Supermaven currently provides legacy access for existing customers.</p>
           </section>
         {/if}
       </aside>
@@ -1682,11 +1686,10 @@
             tabId={activeTab}
             readOnly={tabKind !== 'query'}
             viewState={editorViewState}
-            aiEnabled={aiHealth.state === 'on' && tabKind === 'query'}
-            aiModel={settings.aiModel}
-            {schemaContext}
+            supermavenEnabled={supermaven.state === 'ready' && tabKind === 'query'}
             {schemaItems}
-            aiComplete={api.aiComplete}
+            supermavenComplete={api.supermavenComplete}
+            supermavenCancel={api.supermavenCancel}
           />
         {/key}
         {/if}

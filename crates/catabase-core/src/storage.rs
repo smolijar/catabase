@@ -119,7 +119,7 @@ pub struct Storage {
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub pool_size: u32,
-    pub ai_model: Option<String>,
+    pub supermaven_enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -217,10 +217,11 @@ impl Storage {
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(5)
             .clamp(1, 32);
-        let ai_model = setting_value(&conn, "ai_model")?.filter(|value| !value.is_empty());
+        let supermaven_enabled =
+            setting_value(&conn, "supermaven_enabled")?.as_deref() == Some("true");
         Ok(Settings {
             pool_size,
-            ai_model,
+            supermaven_enabled,
         })
     }
 
@@ -235,25 +236,10 @@ impl Storage {
         Ok(normalized)
     }
 
-    pub fn set_ai_model(&self, model: Option<String>) -> Result<Option<String>, CoreError> {
-        let normalized = model.and_then(|value| {
-            let trimmed = value.trim().to_string();
-            (!trimmed.is_empty()).then_some(trimmed)
-        });
+    pub fn set_supermaven_enabled(&self, enabled: bool) -> Result<(), CoreError> {
         let conn = self.lock()?;
-        match &normalized {
-            Some(model) => {
-                conn.execute(
-                    "INSERT INTO settings (key, value) VALUES ('ai_model', ?1)
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    params![model],
-                )?;
-            }
-            None => {
-                conn.execute("DELETE FROM settings WHERE key = 'ai_model'", [])?;
-            }
-        }
-        Ok(normalized)
+        conn.execute("INSERT INTO settings (key, value) VALUES ('supermaven_enabled', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![enabled.to_string()])?;
+        Ok(())
     }
 
     pub fn list_connections(&self) -> Result<Vec<ConnectionRecord>, CoreError> {
@@ -864,7 +850,7 @@ mod tests {
         let settings = storage.get_settings().unwrap();
 
         assert_eq!(settings.pool_size, 5);
-        assert_eq!(settings.ai_model, None);
+        assert!(!settings.supermaven_enabled);
     }
 
     #[test]
@@ -873,6 +859,24 @@ mod tests {
 
         assert_eq!(storage.set_pool_size(0).unwrap(), 1);
         assert_eq!(storage.set_pool_size(999).unwrap(), 32);
+    }
+
+    #[test]
+    fn supermaven_is_opt_in_and_legacy_model_settings_never_enable_it() {
+        let storage = Storage::in_memory().unwrap();
+        storage
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO settings(key,value) VALUES ('ai_model','legacy-model')",
+                [],
+            )
+            .unwrap();
+        assert!(!storage.get_settings().unwrap().supermaven_enabled);
+        storage.set_supermaven_enabled(true).unwrap();
+        assert!(storage.get_settings().unwrap().supermaven_enabled);
+        storage.set_supermaven_enabled(false).unwrap();
+        assert!(!storage.get_settings().unwrap().supermaven_enabled);
     }
 
     #[test]
