@@ -1,6 +1,6 @@
 //! Editor protocol adapter for the official Supermaven sm-agent. Protocol source:
 //! https://github.com/supermaven-inc/supermaven-nvim (MIT; see third_party license).
-//! Only the requested SQL document is supplied; no result rows or DB credentials.
+//! Only the requested SQL document and schema definitions are supplied; no rows or credentials.
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -19,6 +19,7 @@ use tokio::{
 };
 
 const MAX_DOCUMENT: usize = 1024 * 1024;
+const MAX_SCHEMA_CONTEXT: usize = 128 * 1024;
 const MAX_LINE: usize = 256 * 1024;
 const MAX_COMPLETION: usize = 16 * 1024;
 const MAX_BINARY: usize = 100 * 1024 * 1024;
@@ -51,6 +52,8 @@ pub struct SupermavenRequest {
     pub request_id: String,
     pub document_id: String,
     pub text: String,
+    #[serde(default)]
+    pub schema_context: String,
     /// Monaco offset in UTF-16 code units; the agent expects UTF-8 bytes.
     pub position: usize,
 }
@@ -198,7 +201,7 @@ impl SupermavenClient {
         .await?;
         // Like Neovim's initial document event, prime the connection without
         // exposing any draft. Some agent versions authenticate lazily.
-        let initial = workspace.join("initial.sql").to_string_lossy().into_owned();
+        let initial = workspace.join("query.sql").to_string_lossy().into_owned();
         write_message(
             &mut stdin,
             &json!({"kind":"inform_file_changed","path":initial}),
@@ -334,6 +337,7 @@ impl SupermavenClient {
         }
         let offset = utf16_byte_offset(&request.text, request.position)
             .ok_or_else(|| CoreError::message("Invalid completion cursor"))?;
+        let (document, agent_offset) = agent_document(&request, offset)?;
         let mut updates = self.changed.subscribe();
         {
             let mut state = self.state.lock().await;
@@ -371,7 +375,10 @@ impl SupermavenClient {
         let path = self
             .root
             .join("context")
-            .join(format!("{}.sql", request.document_id))
+            // A UUID filename biases the model toward inventing a UUID table.
+            // Reuse one neutral virtual document; replace, don't accumulate,
+            // context when switching tabs or database connections.
+            .join("query.sql")
             .to_string_lossy()
             .into_owned();
         let sent = async {
@@ -383,8 +390,8 @@ impl SupermavenClient {
             write_message(
                 &mut agent.stdin,
                 &json!({"kind":"state_update","newId":state_id.to_string(),"updates":[
-                    {"kind":"cursor_update","path":path,"offset":offset},
-                    {"kind":"file_update","path":path,"content":request.text}
+                    {"kind":"cursor_update","path":path,"offset":agent_offset},
+                    {"kind":"file_update","path":path,"content":document}
                 ]}),
             )
             .await
@@ -401,7 +408,9 @@ impl SupermavenClient {
             return Err(error);
         }
         drop(run);
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // Match the Neovim plugin's five-second polling window. A cold model
+        // request can take longer than two seconds, especially with schema context.
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             {
                 let state = self.state.lock().await;
@@ -657,6 +666,34 @@ fn utf16_byte_offset(text: &str, position: usize) -> Option<usize> {
     (units == position).then_some(text.len())
 }
 
+fn agent_document(
+    request: &SupermavenRequest,
+    offset: usize,
+) -> Result<(String, usize), CoreError> {
+    if request.schema_context.len() > MAX_SCHEMA_CONTEXT {
+        return Err(CoreError::message(
+            "Completion schema context exceeds the limit",
+        ));
+    }
+    let mut document = String::new();
+    if !request.schema_context.is_empty() {
+        document.push_str(
+            "-- PostgreSQL schema reference. Use only these existing relations/columns.\n",
+        );
+        // Every line is commented, including catalog names containing newlines.
+        // This virtual preamble is never inserted in the editor or run on PostgreSQL.
+        for line in request.schema_context.lines() {
+            document.push_str("-- ");
+            document.push_str(line);
+            document.push('\n');
+        }
+        document.push_str("-- SQL query:\n");
+    }
+    let agent_offset = document.len() + offset;
+    document.push_str(&request.text);
+    Ok((document, agent_offset))
+}
+
 fn derive_completion(items: &[Value], prefix: &str) -> Option<SupermavenCompletion> {
     let mut text = String::new();
     let mut dedent = String::new();
@@ -671,10 +708,21 @@ fn derive_completion(items: &[Value], prefix: &str) -> Option<SupermavenCompleti
         }
     }
     let line_prefix = prefix.rsplit('\n').next()?;
-    if text.trim().is_empty()
-        || !dedent.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
-        || !line_prefix.ends_with(&dedent)
-    {
+    if !line_prefix.ends_with(&dedent) {
+        return None;
+    }
+    // Neovim strips an unchanged common prefix from replacement-style edits.
+    // Completing `prop` by replacing `prop` with `properties` is just inserting
+    // `erties`, not a destructive edit. Compare Unicode characters, trim bytes.
+    let shared: usize = dedent
+        .chars()
+        .zip(text.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(character, _)| character.len_utf8())
+        .sum();
+    dedent.drain(..shared);
+    text.drain(..shared);
+    if text.trim().is_empty() || !dedent.bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
         return None;
     }
     Some(SupermavenCompletion {
@@ -795,6 +843,7 @@ mod tests {
             request_id: id.into(),
             document_id: "test-tab".into(),
             text: text.into(),
+            schema_context: String::new(),
             position: text.encode_utf16().count(),
         }
     }
@@ -811,6 +860,20 @@ mod tests {
             Some(text.len())
         );
         assert_eq!(utf16_byte_offset(text, 999), None);
+    }
+
+    #[test]
+    fn virtual_schema_is_commented_and_offsets_still_point_into_the_real_draft() {
+        let mut request = request("test", "select 'ž😀', ");
+        request.schema_context = "CREATE TABLE \"public\".\"properties\" (\"id\" text PRIMARY KEY);\nSELECT 'not executable';".into();
+        let (document, offset) = agent_document(&request, request.text.len()).unwrap();
+        assert!(document.contains("-- CREATE TABLE \"public\".\"properties\""));
+        assert!(document.contains("\n-- SELECT 'not executable';\n"));
+        assert!(document.ends_with(&request.text));
+        assert_eq!(offset, document.len());
+        assert!(!document.contains(&request.document_id));
+        request.schema_context = "x".repeat(MAX_SCHEMA_CONTEXT + 1);
+        assert!(agent_document(&request, 0).is_err());
     }
 
     #[test]
@@ -842,6 +905,23 @@ mod tests {
             )
             .is_none()
         );
+        for (prefix, suggested, expected) in
+            [("prop", "properties", "erties"), ("č", "číslo", "íslo")]
+        {
+            assert_eq!(
+                derive_completion(
+                    &[
+                        json!({"kind":"dedent","text":prefix}),
+                        json!({"kind":"text","text":suggested}),
+                    ],
+                    prefix
+                ),
+                Some(SupermavenCompletion {
+                    text: expected.into(),
+                    delete_before: 0
+                })
+            );
+        }
     }
 
     #[test]
@@ -982,6 +1062,23 @@ mod tests {
                 ),
                 Some("state_update") => {
                     let text = message["updates"][1]["content"].as_str().unwrap();
+                    assert!(
+                        message["updates"][1]["path"]
+                            .as_str()
+                            .unwrap()
+                            .ends_with("/query.sql")
+                            || message["updates"][1]["path"]
+                                .as_str()
+                                .unwrap()
+                                .ends_with("\\query.sql")
+                    );
+                    if text.contains("context_probe") {
+                        assert!(text.contains("-- CREATE TABLE properties (id text);"));
+                        assert_eq!(
+                            message["updates"][0]["offset"].as_u64().unwrap() as usize,
+                            text.len()
+                        );
+                    }
                     if text.contains("slow") {
                         std::thread::sleep(Duration::from_millis(150));
                     }
@@ -1021,6 +1118,9 @@ mod tests {
     async fn process_protocol_completes_and_disable_kills_pending_work() {
         let directory = tempfile::tempdir().unwrap();
         let client = mock_client(directory.path()).await;
+        let mut probe = request("context", "select 'ž😀' /* context_probe */ ");
+        probe.schema_context = "CREATE TABLE properties (id text);".into();
+        assert!(client.complete(probe).await.unwrap().is_some());
         assert_eq!(
             client
                 .complete(request("first", "select "))
@@ -1101,17 +1201,36 @@ mod tests {
                 // asserting readiness, not just the first connection event.
                 tokio::time::sleep(Duration::from_millis(750)).await;
                 assert_eq!(client.status().await.state, "ready");
-                let text =
-                    "-- Synthetic integration test; no database data.\nselect 1 as example, ";
-                let result = client
-                    .complete(request("synthetic-live-test", text))
-                    .await?;
+                let mut probe = request("synthetic-live-test", "select * from prop");
+                probe.document_id = "00000000-1111-2222-3333-444444444444".into();
+                probe.schema_context = "CREATE TABLE public.properties (id text PRIMARY KEY, landlord_id text, address text);\nCREATE TABLE public.landlords (id text PRIMARY KEY, name text);".into();
+                let result = client.complete(probe).await?;
+                let diagnostic = client.state.lock().await.pending.as_ref().map(|pending| {
+                    pending
+                        .items
+                        .iter()
+                        .map(|item| {
+                            (
+                                item["kind"].as_str().unwrap_or("").to_owned(),
+                                item["text"].as_str().map_or(0, str::len),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                });
                 client.set_enabled(false).await?;
                 assert!(
                     result.is_some(),
-                    "authenticated agent did not return a synthetic completion"
+                    "authenticated agent did not return a synthetic completion; response item kinds/lengths {diagnostic:?}"
                 );
-                println!("Official Supermaven agent returned a synthetic SQL completion.");
+                let result = result.unwrap();
+                assert!(
+                    result.text.starts_with("erties"),
+                    "agent did not complete the reflected synthetic table: {}",
+                    result.text
+                );
+                println!(
+                    "Official Supermaven agent completed the synthetic properties table using schema context."
+                );
                 return Ok(());
             }
             if matches!(status.state.as_str(), "activation" | "error") {

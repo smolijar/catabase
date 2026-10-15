@@ -355,9 +355,10 @@ GUI MUST provide local schema-aware SQL completions and opt-in Supermaven inline
 #### Scenario: AI completion request
 - **WHEN** an enabled, focused, editable SQL tab triggers inline completion
 - **THEN** GUI debounces the active draft and translates the UTF-16 cursor offset to agent UTF-8 bytes
-- **AND** no connection credentials, result rows, reflected schema or other tabs are added
+- **AND** a bounded active-connection schema reference supplies table/column types, primary/unique keys and foreign keys in a neutral virtual document, never executed SQL
+- **AND** no connection credentials, result rows or other tabs are added
 - **AND** Tab accepts ghost text and Escape dismisses it
-- **AND** cancelled, stale and unsupported destructive edits are ignored; local schema completion remains independent.
+- **AND** cancelled, stale, unsupported destructive edits and provably unknown new table/column references are ignored; local schema completion remains independent.
 
 ### Requirement: Keyboard shortcuts and commands
 GUI MUST support primary keyboard shortcuts.
