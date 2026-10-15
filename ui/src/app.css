@@ -315,14 +315,6 @@ button.chip {
   background: transparent;
 }
 
-.ai-on {
-  color: #9ee493;
-}
-
-.ai-error {
-  color: #fbbf24;
-}
-
 .running-chip {
   border-color: #fbbf24;
   color: #fde68a;

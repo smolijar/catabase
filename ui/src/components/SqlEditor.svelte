@@ -3,23 +3,24 @@
   import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
   import 'monaco-editor/esm/vs/editor/contrib/snippet/browser/snippetController2';
   import 'monaco-editor/esm/vs/editor/contrib/suggest/browser/suggestController';
+  import 'monaco-editor/esm/vs/editor/contrib/inlineCompletions/browser/inlineCompletions.contribution';
   // editor.api omits the standard word movement, selection and deletion commands.
   import 'monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations';
   import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
   import { onDestroy, onMount } from 'svelte';
   import { sqlCompletionContext, sqlJoinSuggestions } from '../lib/sqlCompletion';
   import type { SqlCompletionContext } from '../lib/sqlCompletion';
-  import type { AiCompletionRequest, ExecutionTarget, SchemaItem, StatementRange } from '../lib/types';
+  import { createInlineRequester, inlineEdit } from '../lib/supermavenInline';
+  import type { SupermavenCompletion, SupermavenRequest, ExecutionTarget, SchemaItem, StatementRange } from '../lib/types';
 
   export let value = '';
   export let readOnly = false;
-  export let aiEnabled = false;
-  export let aiModel: string | null | undefined = null;
-  export let schemaContext = '';
+  export let supermavenEnabled = false;
   export let schemaItems: SchemaItem[] = [];
   export let viewState: monaco.editor.ICodeEditorViewState | null = null;
   export let tabId: string;
-  export let aiComplete: ((request: AiCompletionRequest) => Promise<string | null>) | undefined = undefined;
+  export let supermavenComplete: ((request: SupermavenRequest) => Promise<SupermavenCompletion | null>) | undefined = undefined;
+  export let supermavenCancel: ((requestId: string) => Promise<void>) | undefined = undefined;
 
   const SQL_KEYWORDS = [
     'SELECT',
@@ -85,6 +86,10 @@
   let highlights: monaco.editor.IEditorDecorationsCollection | undefined;
   let keydownHandler: ((event: KeyboardEvent) => void) | undefined;
   const ownerTabId = tabId;
+  const inlineRequester = createInlineRequester(
+    (request) => supermavenComplete?.(request) ?? Promise.resolve(null),
+    (requestId) => supermavenCancel?.(requestId) ?? Promise.resolve()
+  );
 
   onMount(() => {
     (window as unknown as { MonacoEnvironment: unknown }).MonacoEnvironment = {
@@ -114,7 +119,7 @@
       fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize: 14,
       minimap: { enabled: false },
-      inlineSuggest: { enabled: true },
+      inlineSuggest: { enabled: supermavenEnabled },
       quickSuggestions: { other: true, comments: false, strings: false },
       readOnly,
       suggestOnTriggerCharacters: true,
@@ -181,37 +186,30 @@
     });
 
     inlineProvider = monaco.languages.registerInlineCompletionsProvider('sql', {
-      provideInlineCompletions: async (model, position) => {
-        if (!aiEnabled || readOnly || !aiComplete) return { items: [] };
+      provideInlineCompletions: async (model, position, _context, token) => {
+        if (!supermavenEnabled || readOnly || !supermavenComplete || model !== editor?.getModel() || !editor.hasTextFocus()) return { items: [] };
         const offset = model.getOffsetAt(position);
         const text = model.getValue();
-        const prefix = text.slice(0, offset);
-        if (!prefix.trim()) return { items: [] };
-
-        const completion = await aiComplete({
-          prefix,
-          suffix: text.slice(offset),
-          language: 'sql',
-          position: offset,
-          schemaContext,
-          model: aiModel ?? null
-        }).catch(() => null);
-        if (!completion) return { items: [] };
-
-        return {
-          items: [
-            {
-              insertText: completion,
-              range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column)
-            }
-          ]
-        };
+        if (!text.slice(0, offset).trim() || token.isCancellationRequested) return { items: [] };
+        const version = model.getVersionId();
+        const abort = new AbortController();
+        const cancellation = token.onCancellationRequested(() => abort.abort());
+        try {
+          const completion = await inlineRequester.request({ documentId: ownerTabId, text, position: offset }, abort.signal);
+          const current = editor?.getPosition();
+          if (!completion || abort.signal.aborted || !supermavenEnabled || readOnly || model.isDisposed() || model !== editor?.getModel()
+            || version !== model.getVersionId() || current?.lineNumber !== position.lineNumber || current.column !== position.column) return { items: [] };
+          const edit = inlineEdit(completion, model.getLineContent(position.lineNumber), position.column);
+          if (!edit) return { items: [] };
+          return { items: [{ insertText: edit.text, range: new monaco.Range(position.lineNumber, edit.startColumn, position.lineNumber, edit.endColumn) }], enableForwardStability: true };
+        } finally { cancellation.dispose(); }
       },
       freeInlineCompletions: () => undefined
     });
   });
 
   onDestroy(() => {
+    inlineRequester.cancel();
     subscription?.dispose();
     completionProvider?.dispose();
     inlineProvider?.dispose();
@@ -229,6 +227,13 @@
   }
 
   $: if (editor) editor.updateOptions({ readOnly });
+  $: if (editor) {
+    editor.updateOptions({ inlineSuggest: { enabled: supermavenEnabled && !readOnly } });
+    if (!supermavenEnabled || readOnly) {
+      inlineRequester.cancel();
+      editor.trigger('catabase', 'editor.action.inlineSuggest.hide', {});
+    }
+  }
 
   function triggerSuggest() {
     if (!editor || readOnly) return;

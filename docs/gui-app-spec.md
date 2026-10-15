@@ -336,25 +336,28 @@ GUI MUST manage Playground, DDL, update-preview, and history tabs with Monaco mo
 - **THEN** GUI sends current Playground content to draft save endpoint.
 
 ### Requirement: SQL completions and AI completion
-GUI MUST provide schema-aware SQL completions and optional OpenCode AI completion.
+GUI MUST provide local schema-aware SQL completions and opt-in Supermaven inline completion using the official Neovim agent protocol.
 
 #### Scenario: Schema completion update
 - **WHEN** schema refresh succeeds
 - **THEN** GUI updates Monaco SQL completions from cached schemas.
 
-#### Scenario: AI health check
-- **WHEN** app starts and every 30 seconds after
-- **THEN** GUI checks OpenCode health
-- **AND** status bar shows AI on, AI error, or AI off.
+#### Scenario: AI status check
+- **WHEN** app starts and every 2 seconds after
+- **THEN** GUI reads local agent status without making a database request
+- **AND** Settings shows off, starting/connecting, activation, ready or error.
 
-#### Scenario: AI models available
-- **WHEN** OpenCode is connected
-- **THEN** GUI loads connected provider models and populates AI model select.
+#### Scenario: Explicit enable and activation
+- **WHEN** the user enables Supermaven in Settings (off by default)
+- **THEN** the backend downloads the official agent, verifies its SHA-256 checksum and starts it outside project directories
+- **AND** any required sign-in or free-tier action is user initiated.
 
 #### Scenario: AI completion request
-- **WHEN** Monaco AI completion triggers on idle
-- **THEN** GUI sends text before cursor, text after cursor, language, cursor position, and schema context to backend
-- **AND** inserts returned raw completion when present.
+- **WHEN** an enabled, focused, editable SQL tab triggers inline completion
+- **THEN** GUI debounces the active draft and translates the UTF-16 cursor offset to agent UTF-8 bytes
+- **AND** no connection credentials, result rows, reflected schema or other tabs are added
+- **AND** Tab accepts ghost text and Escape dismisses it
+- **AND** cancelled, stale and unsupported destructive edits are ignored; local schema completion remains independent.
 
 ### Requirement: Keyboard shortcuts and commands
 GUI MUST support primary keyboard shortcuts.

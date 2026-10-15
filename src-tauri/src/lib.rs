@@ -8,14 +8,15 @@ use std::{
 };
 
 use catabase_core::{
-    AiCompletionRequest, AiHealth, ApplyUpdatesResult, CommandTimings, ConnectionFields,
-    ConnectionInput, ConnectionRecord, ConnectionStats, CoreError, ForeignKeyLookup,
-    ForeignKeyValues, HistoryPage, HistoryStats, NewHistoryEntry, OpenCodeClient, PgCancelToken,
-    PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryResult, ReflectionCache, RowUpdate,
-    SchemaTree, Settings, StatementKind, StatementRange, Storage, apply_row_updates as apply_rows,
-    build_connection_url as build_url, cancel_query_token, checkout_pool_client,
-    classify_statement, connect_client, connection_stats as load_connection_stats, create_pool,
-    execute_on_client, execute_on_client_with_reflection, get_ddl_on_client as load_ddl,
+    ApplyUpdatesResult, CommandTimings, ConnectionFields, ConnectionInput, ConnectionRecord,
+    ConnectionStats, CoreError, ForeignKeyLookup, ForeignKeyValues, HistoryPage, HistoryStats,
+    NewHistoryEntry, PgCancelToken, PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryResult,
+    ReflectionCache, RowUpdate, SchemaTree, Settings, StatementKind, StatementRange, Storage,
+    SupermavenClient, SupermavenCompletion, SupermavenRequest, SupermavenStatus,
+    apply_row_updates as apply_rows, build_connection_url as build_url, cancel_query_token,
+    checkout_pool_client, classify_statement, connect_client,
+    connection_stats as load_connection_stats, create_pool, execute_on_client,
+    execute_on_client_with_reflection, get_ddl_on_client as load_ddl,
     lookup_foreign_key_values as lookup_fk_values, parse_connection_url as parse_url,
     split_editor_statements, split_statements, test_connection as test_pg_connection,
     validate_transaction_sql,
@@ -30,7 +31,7 @@ struct AppState {
     pool: RwLock<Option<ActivePool>>,
     tx: Mutex<Option<TxSession>>,
     cancels: Mutex<HashMap<String, CancelEntry>>,
-    opencode: OpenCodeClient,
+    supermaven: Arc<SupermavenClient>,
     exit_guard_enabled: AtomicBool,
     exit_confirmed: AtomicBool,
 }
@@ -255,11 +256,17 @@ async fn set_pool_size(
 }
 
 #[tauri::command]
-async fn set_ai_model(
+async fn set_supermaven_enabled(
     state: State<'_, AppState>,
-    model: Option<String>,
-) -> Result<Option<String>, AppError> {
-    state.storage.set_ai_model(model).map_err(Into::into)
+    enabled: bool,
+) -> Result<SupermavenStatus, AppError> {
+    if !enabled {
+        let status = state.supermaven.set_enabled(false).await?;
+        state.storage.set_supermaven_enabled(false)?;
+        return Ok(status);
+    }
+    state.storage.set_supermaven_enabled(true)?;
+    state.supermaven.set_enabled(true).await.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -624,21 +631,36 @@ fn finish_exit(app: AppHandle, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-async fn ai_health(state: State<'_, AppState>) -> Result<AiHealth, AppError> {
-    Ok(state.opencode.health().await)
+async fn supermaven_status(state: State<'_, AppState>) -> Result<SupermavenStatus, AppError> {
+    Ok(state.supermaven.status().await)
 }
 
 #[tauri::command]
-async fn ai_models(state: State<'_, AppState>) -> Result<Vec<String>, AppError> {
-    state.opencode.models().await.map_err(Into::into)
+async fn supermaven_use_free(state: State<'_, AppState>) -> Result<(), AppError> {
+    state
+        .supermaven
+        .use_free_version()
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
-async fn ai_complete(
+async fn supermaven_complete(
     state: State<'_, AppState>,
-    request: AiCompletionRequest,
-) -> Result<Option<String>, AppError> {
-    state.opencode.complete(request).await.map_err(Into::into)
+    request: SupermavenRequest,
+) -> Result<Option<SupermavenCompletion>, AppError> {
+    state.supermaven.complete(request).await.map_err(Into::into)
+}
+
+#[tauri::command]
+async fn supermaven_cancel(state: State<'_, AppState>, request_id: String) -> Result<(), AppError> {
+    state.supermaven.cancel(&request_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn supermaven_open_activation(state: State<'_, AppState>) -> Result<(), AppError> {
+    state.supermaven.open_activation().await.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1095,13 +1117,21 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let storage = Storage::open(data_dir.join("catabase.sqlite3"))?;
             let active = storage.active_connection()?;
+            let enabled = storage.get_settings()?.supermaven_enabled;
+            let supermaven = Arc::new(SupermavenClient::new(data_dir.join("supermaven")));
+            if enabled {
+                let client = supermaven.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = client.set_enabled(true).await;
+                });
+            }
             app.manage(AppState {
                 storage,
                 active: RwLock::new(active),
                 pool: RwLock::new(None),
                 tx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
-                opencode: OpenCodeClient::default(),
+                supermaven,
                 exit_guard_enabled: AtomicBool::new(false),
                 exit_confirmed: AtomicBool::new(false),
             });
@@ -1110,9 +1140,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             activate_connection,
             apply_row_updates,
-            ai_complete,
-            ai_health,
-            ai_models,
+            supermaven_complete,
+            supermaven_status,
+            supermaven_use_free,
+            supermaven_cancel,
+            supermaven_open_activation,
             build_connection_url,
             cancel_query,
             connection_stats,
@@ -1136,7 +1168,7 @@ pub fn run() {
             parse_connection_url,
             save_connection,
             save_draft,
-            set_ai_model,
+            set_supermaven_enabled,
             set_pool_size,
             split_sql,
             test_connection,
