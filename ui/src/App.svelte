@@ -1632,7 +1632,7 @@
           <section class="settings-card">
             <div class="settings-card-head"><strong>Supermaven autocomplete</strong><span>{supermavenBusy ? 'starting…' : supermaven.state}</span></div>
             <p>{supermaven.message}</p>
-            <p>Enabling sends the active SQL draft, including comments and literals, to Supermaven. Connection credentials, result rows, other tabs and reflected schema are not added. Built-in schema suggestions stay local and always available.</p>
+            <p>Enabling sends the active SQL draft (including comments and literals) and reflected table, column and key definitions to Supermaven. Connection credentials, result rows and other tabs are not added. Built-in schema suggestions stay local.</p>
             <div class="row-actions">
               <button disabled={supermavenBusy} on:click={() => setSupermaven(!supermaven.enabled)}>{supermaven.enabled ? 'Disable Supermaven' : 'Enable Supermaven'}</button>
               {#if supermaven.enabled && supermaven.state !== 'ready'}<button disabled={supermavenBusy} on:click={() => setSupermaven(true)}>Retry</button>{/if}
@@ -1641,7 +1641,7 @@
                 <button on:click={() => supermavenAccount('free')}>Use free tier</button>
               {/if}
             </div>
-            <p>Tab accepts a suggestion; Escape dismisses it. Supermaven currently provides legacy access for existing customers.</p>
+            <p>Tab accepts a suggestion; Escape dismisses it. Option/Alt+\ requests one explicitly. Supermaven currently provides legacy access for existing customers.</p>
           </section>
         {/if}
       </aside>

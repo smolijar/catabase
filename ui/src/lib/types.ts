@@ -205,6 +205,7 @@ export interface SupermavenRequest {
   requestId: string;
   documentId: string;
   text: string;
+  schemaContext?: string;
   position: number;
 }
 

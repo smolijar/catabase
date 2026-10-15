@@ -8,7 +8,7 @@
   import 'monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations';
   import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
   import { onDestroy, onMount } from 'svelte';
-  import { sqlCompletionContext, sqlJoinSuggestions } from '../lib/sqlCompletion';
+  import { schemaGroundedSql, schemaInlineIdentifierEnd, sqlCompletionContext, sqlJoinSuggestions, supermavenSchemaContext } from '../lib/sqlCompletion';
   import type { SqlCompletionContext } from '../lib/sqlCompletion';
   import { createInlineRequester, inlineEdit } from '../lib/supermavenInline';
   import type { SupermavenCompletion, SupermavenRequest, ExecutionTarget, SchemaItem, StatementRange } from '../lib/types';
@@ -86,8 +86,10 @@
   let highlights: monaco.editor.IEditorDecorationsCollection | undefined;
   let keydownHandler: ((event: KeyboardEvent) => void) | undefined;
   const ownerTabId = tabId;
+  let previousSchemaItems = schemaItems;
   const inlineRequester = createInlineRequester(
-    (request) => supermavenComplete?.(request) ?? Promise.resolve(null),
+    // Build the bounded schema only after the cancellable typing debounce.
+    (request) => supermavenComplete?.({ ...request, schemaContext: supermavenSchemaContext(request.text, request.position, schemaItems) }) ?? Promise.resolve(null),
     (requestId) => supermavenCancel?.(requestId) ?? Promise.resolve()
   );
 
@@ -148,6 +150,11 @@
 
     editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.Escape, triggerSuggest);
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Space, triggerSuggest);
+    editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.Backslash, () => {
+      if (!supermavenEnabled || readOnly) return;
+      editor?.trigger('catabase', 'hideSuggestWidget', {});
+      editor?.trigger('catabase', 'editor.action.inlineSuggest.trigger', {});
+    });
     keydownHandler = (event) => {
       if (!editor?.hasTextFocus()) return;
       const isSuggestShortcut = (event.altKey && event.key === 'Escape') || ((event.metaKey || event.ctrlKey) && event.code === 'Space');
@@ -192,15 +199,28 @@
         const text = model.getValue();
         if (!text.slice(0, offset).trim() || token.isCancellationRequested) return { items: [] };
         const version = model.getVersionId();
+        const reflected = schemaItems;
         const abort = new AbortController();
         const cancellation = token.onCancellationRequested(() => abort.abort());
         try {
           const completion = await inlineRequester.request({ documentId: ownerTabId, text, position: offset }, abort.signal);
           const current = editor?.getPosition();
-          if (!completion || abort.signal.aborted || !supermavenEnabled || readOnly || model.isDisposed() || model !== editor?.getModel()
+          if (!completion || abort.signal.aborted || !supermavenEnabled || readOnly || schemaItems !== reflected || model.isDisposed() || model !== editor?.getModel() || !editor?.hasTextFocus()
             || version !== model.getVersionId() || current?.lineNumber !== position.lineNumber || current.column !== position.column) return { items: [] };
           const edit = inlineEdit(completion, model.getLineContent(position.lineNumber), position.column);
           if (!edit) return { items: [] };
+          const start = offset - completion.deleteBefore;
+          const end = model.getOffsetAt({ lineNumber: position.lineNumber, column: edit.endColumn });
+          let proposed = text.slice(0, start) + edit.text + text.slice(end);
+          if (!text.slice(offset, end).trim()) {
+            const identifierEnd = schemaInlineIdentifierEnd(proposed, start, reflected);
+            if (identifierEnd !== undefined && identifierEnd < start + edit.text.length) {
+              edit.text = edit.text.slice(0, identifierEnd - start);
+              proposed = text.slice(0, start) + edit.text + text.slice(end);
+            }
+          }
+          if (!edit.text.trim()) return { items: [] };
+          if (!schemaGroundedSql(proposed, start, start + edit.text.length, reflected)) return { items: [] };
           return { items: [{ insertText: edit.text, range: new monaco.Range(position.lineNumber, edit.startColumn, position.lineNumber, edit.endColumn) }], enableForwardStability: true };
         } finally { cancellation.dispose(); }
       },
@@ -227,6 +247,11 @@
   }
 
   $: if (editor) editor.updateOptions({ readOnly });
+  $: if (schemaItems !== previousSchemaItems) {
+    previousSchemaItems = schemaItems;
+    inlineRequester.cancel();
+    editor?.trigger('catabase', 'editor.action.inlineSuggest.hide', {});
+  }
   $: if (editor) {
     editor.updateOptions({ inlineSuggest: { enabled: supermavenEnabled && !readOnly } });
     if (!supermavenEnabled || readOnly) {

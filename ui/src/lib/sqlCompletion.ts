@@ -37,6 +37,8 @@ type Relation = {
   end: number;
   joinable: boolean;
   aliased: boolean;
+  virtual: boolean;
+  source?: { name: string[]; start: number; end: number };
 };
 
 const RESERVED = new Set(`select from where join left right full inner outer cross natural on using
@@ -53,6 +55,102 @@ const RESERVED_IDENTIFIERS = new Set([...RESERVED, ...`all analyse analyze array
 function sqlIdentifier(name: string, quoted = false): string {
   return !quoted && /^[a-z_][a-z0-9_$]*$/.test(name) && !RESERVED_IDENTIFIERS.has(name)
     ? name : `"${name.replaceAll('"', '""')}"`;
+}
+
+/** Compact definitions only, never row data/default expressions/connection details. */
+export function supermavenSchemaContext(sql: string, offset: number, items: SchemaItem[], budget = 96 * 1024): string {
+  const { tokens } = tokenize(sql, offset);
+  const names = new Set(tokens.filter((token) => token.kind === 'identifier').map((token) => token.value));
+  const word = tokens.find((token) => token.kind === 'identifier' && token.start < offset && token.end >= offset);
+  const partial = word ? sql.slice(word.start, offset).replace(/^"/, '') : '';
+  const priority = (item: SchemaItem) => (names.has(item.name) ? 4 : 0) + (partial && item.name.startsWith(partial) ? 2 : 0);
+  const ordered = [...items].sort((a, b) => priority(b) - priority(a) || `${a.schema}.${a.name}`.localeCompare(`${b.schema}.${b.name}`));
+  const encoder = new TextEncoder();
+  const definitions: string[] = [];
+  let size = 0;
+  for (const item of ordered) {
+    const columns = item.columns.map((column) => `  ${sqlIdentifier(column.name, true)} ${column.typeName}${column.nullable ? '' : ' NOT NULL'}`);
+    for (const key of item.rowKeys ?? []) {
+      columns.push(`  ${key.primaryKey ? 'PRIMARY KEY' : 'UNIQUE'} (${key.columns.map((name) => sqlIdentifier(name, true)).join(', ')})`);
+    }
+    if (!item.rowKeys?.length) {
+      const primary = item.columns.filter((column) => column.primaryKey);
+      if (primary.length) columns.push(`  PRIMARY KEY (${primary.map((column) => sqlIdentifier(column.name, true)).join(', ')})`);
+    }
+    for (const fk of item.foreignKeys ?? []) columns.push(`  FOREIGN KEY (${fk.columns.map((name) => sqlIdentifier(name, true)).join(', ')}) REFERENCES ${sqlIdentifier(fk.referencedSchema, true)}.${sqlIdentifier(fk.referencedTable, true)} (${fk.referencedColumns.map((name) => sqlIdentifier(name, true)).join(', ')})`);
+    const definition = `CREATE TABLE ${sqlIdentifier(item.schema, true)}.${sqlIdentifier(item.name, true)} (\n${columns.join(',\n')}\n);\n`;
+    const bytes = encoder.encode(definition).length;
+    if (size + bytes > budget) continue; // Never cut a name/definition midway.
+    definitions.push(definition);
+    size += bytes;
+  }
+  return definitions.join('');
+}
+
+/** A grounding check, not a SQL parser: reject provably unknown new references. */
+export function schemaGroundedSql(sql: string, start: number, end: number, items: SchemaItem[]): boolean {
+  const { tokens } = tokenize(sql, start);
+  const added = tokens.filter((token) => token.kind === 'identifier' && token.end > start && token.start < end);
+  if (added.length > 256 || tokens.length > 20000) return false;
+  for (const token of added) {
+    const statement = currentStatement(tokens, sql, token.start);
+    const visible = statement.filter((candidate) => candidate.kind !== 'opaque' && sameScope(candidate.scope, token.scope));
+    const relations = visible.some((candidate) => ['select', 'insert', 'update', 'delete'].some((word) => isWord(candidate, word)))
+      ? relationDefinitions(visible, items, token.start) : [];
+    const ctes = new Set<string>();
+    for (let depth = 0; depth <= token.scope.length; depth++) {
+      for (const name of cteNames(statement.filter((candidate) => candidate.kind !== 'opaque' && sameScope(candidate.scope, token.scope.slice(0, depth))))) ctes.add(name);
+    }
+    for (const relation of relations) {
+      const source = relation.source;
+      if (source && source.end > start && source.start < end && !relation.virtual && !relation.items.length
+        && !(source.name.length === 1 && ctes.has(source.name[0]))) return false;
+    }
+    // Source names and aliases are declarations, not column references.
+    if (relations.some((relation) => token.start > relation.introducer.start && token.end <= relation.end)) continue;
+    const index = visible.indexOf(token);
+    const previous = visible[index - 1];
+    const next = visible[index + 1];
+    if (isSymbol(next, '.') || isWord(previous, 'as') || isSymbol(next, '(')
+      || (!token.quoted && RESERVED_IDENTIFIERS.has(token.value))) continue;
+    const context = completionContext(sql, token.end, items, tokens, token.scope);
+    if (context.kind === 'qualified') {
+      // CTE/derived-table output is not fully reflected, so don't guess its columns.
+      const sources = visibleRelations(statement, items, token.end, token.scope, tokens);
+      const qualifier = visible[index - 2];
+      if (sources.some((source) => source.alias === qualifier?.value && !source.items.length)) continue;
+      if (!context.tables.some((table) => table.name === token.value)
+        && !context.columns.some((table) => table.columns.some((column) => column.name === token.value))) return false;
+    } else if (context.kind === 'expression') {
+      const sources = visibleRelations(statement, items, token.end, token.scope, tokens);
+      if (!sources.length || sources.some((source) => source.virtual || !source.items.length)) continue;
+      // Function/type names and SELECT output aliases need not be catalog columns.
+      if (isSymbol(previous, ':') || /\d/.test(sql[token.start - 1] ?? '')
+        || (next?.kind === 'opaque' && next.start === token.end)
+        || ['date', 'interval', 'timestamp', 'timestamptz', 'year', 'month', 'day', 'hour', 'minute', 'second', 'epoch'].includes(token.value)
+        || visible.some((candidate, i) => isWord(visible[i - 1], 'as') && candidate.value === token.value)) continue;
+      const identifier = sqlIdentifier(token.value, token.quoted);
+      if (!context.references.some((reference) => reference.insertText === identifier)) return false;
+    }
+  }
+  return true;
+}
+
+/** Name completion should finish the known identifier, not invent filters/values. */
+export function schemaInlineIdentifierEnd(sql: string, cursor: number, items: SchemaItem[]): number | undefined {
+  const { tokens, scope } = tokenize(sql, cursor);
+  const statement = currentStatement(tokens, sql, cursor);
+  const visible = statement.filter((token) => token.kind !== 'opaque' && sameScope(token.scope, scope));
+  const bareSelect = isWord(visible.filter((token) => token.end <= cursor).at(-1), 'select');
+  for (const relation of relationDefinitions(visible, items, cursor)) {
+    const source = relation.source;
+    if (source && relation.items.length && source.end >= cursor && (source.start <= cursor || bareSelect)) return source.end;
+  }
+  const token = visible.find((token) => token.kind === 'identifier' && token.start <= cursor && token.end >= cursor);
+  if (!token) return;
+  const context = completionContext(sql, token.end, items, tokens, scope);
+  if (context.kind === 'qualified' && context.columns.some((table) => table.columns.some((column) => column.name === token.value))) return token.end;
+  if (context.kind === 'expression' && context.references.some((reference) => reference.kind === 'column' && reference.insertText === sqlIdentifier(token.value, token.quoted))) return token.end;
 }
 
 /** Offer complete predicates only for catalog-declared foreign keys, never naming heuristics. */
@@ -128,6 +226,10 @@ export function sqlJoinSuggestions(sql: string, offset: number, items: SchemaIte
 export function sqlCompletionContext(sql: string, offset: number, items: SchemaItem[]): SqlCompletionContext {
   const cursor = Math.max(0, Math.min(offset, sql.length));
   const { tokens, scope } = tokenize(sql, cursor);
+  return completionContext(sql, cursor, items, tokens, scope);
+}
+
+function completionContext(sql: string, cursor: number, items: SchemaItem[], tokens: Token[], scope: number[]): SqlCompletionContext {
   if (tokens.some((token) => token.kind === 'opaque' && token.start < cursor && cursor <= token.end)) {
     return { kind: 'none' };
   }
@@ -299,8 +401,7 @@ function relationBindings(tokens: Token[], items: SchemaItem[], cursor: number):
   return bindings;
 }
 
-function relationDefinitions(tokens: Token[], items: SchemaItem[], cursor: number): Relation[] {
-  const relations: Relation[] = [];
+function cteNames(tokens: Token[]): Set<string> {
   const ctes = new Set<string>();
   if (isWord(tokens[0], 'with')) {
     for (let i = 1; i < tokens.length; i++) {
@@ -311,6 +412,12 @@ function relationDefinitions(tokens: Token[], items: SchemaItem[], cursor: numbe
       }
     }
   }
+  return ctes;
+}
+
+function relationDefinitions(tokens: Token[], items: SchemaItem[], cursor: number): Relation[] {
+  const relations: Relation[] = [];
+  const ctes = cteNames(tokens);
   // Each arm of a compound query has its own FROM bindings.
   const compounds = tokens.filter((token) => ['union', 'intersect', 'except'].some((word) => isWord(token, word)));
   const start = compounds.filter((token) => token.end <= cursor).at(-1)?.end ?? 0;
@@ -327,6 +434,7 @@ function relationDefinitions(tokens: Token[], items: SchemaItem[], cursor: numbe
     let next = i + 1;
     while (isWord(tokens[next], 'only') || isWord(tokens[next], 'lateral')) next++;
     const name: string[] = [];
+    const sourceStart = tokens[next]?.start ?? 0;
     let tableToken: Token | undefined;
     if (tokens[next]?.kind === 'identifier') {
       tableToken = tokens[next];
@@ -363,6 +471,8 @@ function relationDefinitions(tokens: Token[], items: SchemaItem[], cursor: numbe
         items: renamedColumns ? [] : matches,
         introducer: token,
         aliased: !!hasAlias,
+        virtual: derived || (name.length === 1 && ctes.has(table!)),
+        source: name.length && tableToken ? { name, start: sourceStart, end: tableToken.end } : undefined,
         end: hasAlias ? alias.end : tokens[next - 1].end,
         joinable: isWord(token, 'join') && !tokens.slice(Math.max(0, i - 3), i)
           .some((modifier) => isWord(modifier, 'cross') || isWord(modifier, 'natural'))
