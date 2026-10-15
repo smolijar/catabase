@@ -1765,7 +1765,7 @@
         {/if}
         {#if result && result.rows.length}
           {#key `${activeTab}:${resultSession?.executedAt}`}
-            <ResultsGrid {result} {editMode} {editableColumns} {editDisabledReason} {schemaItems} {canLoadMore} resultContext={`${activeTab}:${resultSession?.executedAt ?? ''}`} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onEditMany={updateCells} onForeignKeyLookup={lookupForeignKey} onCancelLookup={(token) => { void api.cancelQuery(token).catch(() => {}); }} onMessage={flash} />
+            <ResultsGrid {result} {editMode} {editableColumns} {editDisabledReason} schemaItems={resultSession?.connectionId === tabConnectionId ? schemaItems : []} {canLoadMore} resultContext={`${activeTab}:${resultSession?.executedAt ?? ''}`} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onEditMany={updateCells} onForeignKeyLookup={lookupForeignKey} onCancelLookup={(token) => { void api.cancelQuery(token).catch(() => {}); }} onMessage={flash} />
           {/key}
           <footer class="results-foot">
             <span>{result.rows.length} loaded {result.hasMore ? '· more available' : ''}</span>

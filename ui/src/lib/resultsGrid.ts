@@ -1,9 +1,46 @@
-import type { ColumnMeta, QueryResult } from './types';
+import type { ColumnMeta, QueryResult, RowKey, SchemaItem } from './types';
 
 export type CellPosition = { row: number; column: number };
 export type GridSort = { column: string; direction: 'asc' | 'desc' } | null;
 export type IndexedRow = { row: Record<string, unknown>; originalIndex: number };
 export type CellKind = 'boolean' | 'integer' | 'numeric' | 'json' | 'text';
+export type CellDisplayType = 'number' | 'string' | 'date' | 'boolean' | 'json' | 'other' | 'null';
+
+// Use PostgreSQL types, not value guessing: numeric text must stay a string,
+// while int8/numeric values transported as exact strings are still numbers.
+export function cellDisplayType(column: ColumnMeta, value: unknown): CellDisplayType {
+  if (value == null) return 'null';
+  const type = column.typeName.toLowerCase().replace(/^pg_catalog\./, '').replace(/\(\d+(?:\s*,\s*\d+)?\)/g, '').trim();
+  if (type.startsWith('_') || type.endsWith('[]') || type === 'bytea') return 'other';
+  const kind = cellKind({ ...column, typeName: type });
+  if (kind === 'integer' || kind === 'numeric') return 'number';
+  if (kind === 'boolean' || kind === 'json') return kind;
+  if (['date', 'time', 'timetz', 'timestamp', 'timestamptz', 'interval', 'time with time zone', 'time without time zone', 'timestamp with time zone', 'timestamp without time zone'].includes(type)) return 'date';
+  return 'string';
+}
+
+export function columnHeaderInfo(column: ColumnMeta, schemaItems: SchemaItem[] = [], rowKeys: RowKey[] = []) {
+  // Resolve origin metadata, never the display alias (or a similarly named
+  // column in another table). No catalog requests are needed for tooltips.
+  const table = column.sourceName && schemaItems.find((item) => item.schema === column.tableSchema && item.name === column.tableName);
+  const source = table && table.columns.find((item) => item.name === column.sourceName);
+  const keys = [...rowKeys, ...(table ? table.rowKeys ?? [] : [])].filter((key) => key.schema === column.tableSchema && key.table === column.tableName && key.columns.includes(column.sourceName ?? ''));
+  const primaryKey = column.primaryKey || Boolean(source && source.primaryKey) || keys.some((key) => key.primaryKey);
+  const foreignKeys = table ? (table.foreignKeys ?? []).filter((key) => key.columns.length > 0 && key.columns.length === key.referencedColumns.length && key.columns.includes(column.sourceName!)) : [];
+  const details = [column.name, `Type: ${column.typeName}`];
+  if (column.sourceName && column.tableSchema && column.tableName) details.push(`Source: ${column.tableSchema}.${column.tableName}.${column.sourceName}`);
+  const nullable = column.nullable ?? (source ? source.nullable : undefined);
+  if (nullable != null) details.push(nullable ? 'Nullable' : 'NOT NULL');
+  if (primaryKey) {
+    const key = keys.find((key) => key.primaryKey);
+    details.push(`Primary key${key ? ` (${key.columns.join(', ')})` : ''}`);
+  }
+  for (const key of keys.filter((key) => !key.primaryKey)) details.push(`Unique (${key.columns.join(', ')})`);
+  for (const key of foreignKeys) details.push(`Foreign key (${key.columns.join(', ')}) → ${key.referencedSchema}.${key.referencedTable} (${key.referencedColumns.join(', ')})`);
+  if (column.generated || (source && source.generated)) details.push('Generated — read-only');
+  details.push('Sort loaded rows: ascending → descending → original order');
+  return { primaryKey, foreignKey: foreignKeys.length > 0, tooltip: [...new Set(details)].join('\n') };
+}
 
 export function positionAfterReorder(previousRows: IndexedRow[], nextRows: IndexedRow[], position: CellPosition | null): CellPosition | null {
   if (!position) return null;
@@ -12,7 +49,7 @@ export function positionAfterReorder(previousRows: IndexedRow[], nextRows: Index
   return row < 0 ? null : { row, column: position.column };
 }
 
-export function visibleRowWindow(total: number, scrollTop: number, viewportHeight: number, rowHeight = 33, headerHeight = 49, overscan = 10) {
+export function visibleRowWindow(total: number, scrollTop: number, viewportHeight: number, rowHeight = 33, headerHeight = 33, overscan = 10) {
   const visibleStart = Math.floor(Math.max(0, scrollTop - headerHeight) / rowHeight);
   const first = Math.min(Math.max(0, total - 1), Math.max(0, visibleStart - overscan));
   const last = Math.min(total, Math.max(first, Math.ceil(Math.max(0, scrollTop + viewportHeight - headerHeight) / rowHeight) + overscan));
