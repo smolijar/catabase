@@ -205,6 +205,7 @@
       }
     }, 100);
     const aiInterval = window.setInterval(checkSupermaven, 2000);
+    const healthInterval = window.setInterval(() => { nowMs = Date.now(); }, 1000);
 
     return () => {
       flushDraftOnUnload();
@@ -216,6 +217,7 @@
       window.clearInterval(statsInterval);
       window.clearInterval(runningInterval);
       window.clearInterval(aiInterval);
+      window.clearInterval(healthInterval);
       if (toastTimer) window.clearTimeout(toastTimer);
       if (draftTimer) window.clearTimeout(draftTimer);
       if (historyTimer) window.clearTimeout(historyTimer);
@@ -671,7 +673,7 @@
       patchTab(op.tabId, { error: null });
       void loadConnectionStats();
       const invokeStart = performance.now();
-      const next = await api.executeQuery(target.sql, op.token, 0, PAGE_SIZE, op.connectionId);
+      const next = await connectionTester.query(op.connectionId, () => api.executeQuery(target.sql, op.token, 0, PAGE_SIZE, op.connectionId));
       const invokeEnd = performance.now();
       if (!isCurrentOperation(op)) return;
       const session = makeSession(next, target, op.connectionId);
@@ -721,7 +723,7 @@
     statusTiming = null;
     try {
       const invokeStart = performance.now();
-      const next = await api.executeQuery(session.execution.sql, op.token, session.data.rows.length, PAGE_SIZE, session.connectionId!, true);
+      const next = await connectionTester.query(op.connectionId, () => api.executeQuery(session.execution.sql, op.token, session.data.rows.length, PAGE_SIZE, session.connectionId!, true));
       const invokeEnd = performance.now();
       if (!isCurrentOperation(op)) return;
       const merged = {
@@ -1178,7 +1180,7 @@
         op = beginOperation('export', session.connectionId);
         op.tabId = sourceTabId;
         flash('Preparing export…');
-        exportResult = await api.executeQuery(session.execution.sql, op.token, 0, 10_000, session.connectionId, true);
+        exportResult = await connectionTester.query(op.connectionId, () => api.executeQuery(session.execution.sql, op!.token, 0, 10_000, session.connectionId!, true));
         if (!isCurrentOperation(op)) return;
       }
       await api.exportWriteFile(path, serializeRows(exportResult, format));
@@ -1462,6 +1464,7 @@
     <ConnectionPill
       connection={activeConnection}
       state={activeConnection ? connectionTests[activeConnection.id] ?? null : null}
+      now={nowMs}
       disabled={Boolean(connectionMutation)}
       onTest={testCurrentConnection}
       onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }}
@@ -1786,9 +1789,9 @@
   </section>
 
   <footer class="status-bar">
-    <span class="status-connection"><span class:connected={Boolean(activeConnection)} class="status-dot"></span>{activeConnection ? `${activeConnection.host}/${activeConnection.database}` : 'No connection'}</span>
-    {#if activeConnection}<span title={`Connection pool for ${activeConnection.name}${currentPoolStats ? '' : ': statistics are not currently available'}`}>Pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</span>{/if}
-    <span>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : ''}</span>
+    <ConnectionPill connection={activeConnection} state={activeConnection ? connectionTests[activeConnection.id] ?? null : null} now={nowMs} compact disabled={Boolean(connectionMutation)} onTest={testCurrentConnection} onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }} />
+    {#if activeConnection}<button class="status-link" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>Pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
+    <button class="status-link" title="Open schema browser" on:click={() => { sidebar = 'schema'; sidebarOpen = true; }}>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : 'Schema'}</button>
     <span>{!workspaceLoaded ? 'Restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'Saving drafts…' : draftStatus === 'pending' ? 'Unsaved draft changes' : draftStatus === 'error' ? 'Draft save failed' : 'Drafts saved'}</span>
     {#if running}<span>Running {runningDuration}</span>{/if}
     {#if statusTiming}

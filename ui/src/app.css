@@ -1071,6 +1071,10 @@ th small {
   gap: 0.4rem;
 }
 
+.status-link { min-height: 23px; padding: 2px 5px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: inherit; font-size: inherit; white-space: nowrap; box-shadow: none; }
+.status-link:hover:not(:disabled) { background: #172337; border-color: #35465f; color: #e2ecfa; }
+.status-link:focus-visible { outline: 2px solid #73c9ef; outline-offset: -2px; }
+
 .status-flash {
   overflow: hidden;
   margin-left: auto;
