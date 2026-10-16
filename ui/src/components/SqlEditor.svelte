@@ -122,6 +122,8 @@
       automaticLayout: true,
       fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize,
+      // Keep Find/Replace over the text instead of inserting a top view zone.
+      find: { addExtraSpaceOnTop: false },
       minimap: { enabled: false },
       inlineSuggest: { enabled: supermavenEnabled },
       quickSuggestions: { other: true, comments: false, strings: false },
