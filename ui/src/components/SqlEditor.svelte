@@ -16,6 +16,7 @@
 
   export let value = '';
   export let readOnly = false;
+  export let fontSize = 14;
   export let supermavenEnabled = false;
   export let schemaItems: SchemaItem[] = [];
   export let viewState: monaco.editor.ICodeEditorViewState | null = null;
@@ -120,7 +121,7 @@
       theme: 'catabase-dark',
       automaticLayout: true,
       fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, Consolas, monospace',
-      fontSize: 14,
+      fontSize,
       minimap: { enabled: false },
       inlineSuggest: { enabled: supermavenEnabled },
       quickSuggestions: { other: true, comments: false, strings: false },
@@ -247,7 +248,7 @@
     if (position) editor.setPosition(position);
   }
 
-  $: if (editor) editor.updateOptions({ readOnly });
+  $: if (editor) editor.updateOptions({ readOnly, fontSize });
   $: if (schemaItems !== previousSchemaItems) {
     previousSchemaItems = schemaItems;
     inlineRequester.cancel();
