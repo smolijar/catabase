@@ -20,6 +20,7 @@
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
   import { editorSearchShortcut } from './lib/editorSearch';
+  import { DEFAULT_EDITOR_FONT_SIZE, EDITOR_FONT_STORAGE_KEY, fontSizeShortcut, resizeEditorFont, restoreEditorFontSize } from './lib/editorFont';
   import type { QueryTimingDetails } from './lib/queryTiming';
   import { createConnectionTester } from './lib/connectionTest';
   import type { ConnectionTestState } from './lib/connectionTest';
@@ -86,6 +87,7 @@
   let tabDragFrame = 0;
   let workspaceLoaded = false;
   let editorRef: EditorHandle | undefined;
+  let editorFontSize = DEFAULT_EDITOR_FONT_SIZE;
   let running = false;
   let nowMs = Date.now();
   let operation: Operation | null = null;
@@ -182,6 +184,7 @@
 
   onMount(() => {
     mounted = true;
+    try { editorFontSize = restoreEditorFontSize(localStorage.getItem(EDITOR_FONT_STORAGE_KEY)); } catch { /* Font controls still work without storage. */ }
     const savedResultsHeight = Number(localStorage.getItem('catabase.resultsHeight'));
     if (Number.isFinite(savedResultsHeight) && savedResultsHeight >= 180) resultsHeight = savedResultsHeight;
     sidebarWidth = restoreSidebarWidth(localStorage.getItem('catabase.sidebarWidth'));
@@ -522,7 +525,15 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.defaultPrevented || closingWorkspace || showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails) return;
+    if (event.defaultPrevented || closingWorkspace) return;
+    const fontAction = fontSizeShortcut(event);
+    if (fontAction) {
+      event.preventDefault();
+      editorFontSize = resizeEditorFont(editorFontSize, fontAction);
+      try { localStorage.setItem(EDITOR_FONT_STORAGE_KEY, String(editorFontSize)); } catch { /* Keep the current session's preference. */ }
+      return;
+    }
+    if (showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails) return;
     const command = event.metaKey || event.ctrlKey;
     if (!command) return;
     const searchAction = editorSearchShortcut(event);
@@ -1698,6 +1709,7 @@
             bind:value={sql}
             tabId={activeTab}
             readOnly={tabKind !== 'query'}
+            fontSize={editorFontSize}
             viewState={editorViewState}
             supermavenEnabled={supermaven.state === 'ready' && tabKind === 'query'}
             {schemaItems}
