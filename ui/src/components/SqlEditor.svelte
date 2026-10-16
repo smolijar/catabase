@@ -6,6 +6,7 @@
   import 'monaco-editor/esm/vs/editor/contrib/inlineCompletions/browser/inlineCompletions.contribution';
   // editor.api omits the standard word movement, selection and deletion commands.
   import 'monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations';
+  import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController';
   import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
   import { onDestroy, onMount } from 'svelte';
   import { schemaGroundedSql, schemaInlineIdentifierEnd, sqlCompletionContext, sqlJoinSuggestions, supermavenSchemaContext } from '../lib/sqlCompletion';
@@ -263,6 +264,12 @@
   function triggerSuggest() {
     if (!editor || readOnly) return;
     editor.trigger('catabase', 'editor.action.triggerSuggest', {});
+  }
+
+  export function find(replace = false) {
+    if (!editor) return;
+    editor.focus();
+    editor.trigger('catabase', replace && !readOnly ? 'editor.action.startFindReplaceAction' : 'actions.find', {});
   }
 
   function shouldTriggerSuggest(text: string): boolean {

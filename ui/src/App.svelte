@@ -19,6 +19,7 @@
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
+  import { editorSearchShortcut } from './lib/editorSearch';
   import type { QueryTimingDetails } from './lib/queryTiming';
   import { createConnectionTester } from './lib/connectionTest';
   import type { ConnectionTestState } from './lib/connectionTest';
@@ -54,6 +55,7 @@
 
   type SidebarTab = 'connections' | 'schema' | 'history' | 'settings';
   type EditorHandle = {
+    find: (replace?: boolean) => void;
     getExecutionTarget: (splitSql: typeof api.splitSql) => Promise<ExecutionTarget>;
     clearHighlights: () => void;
     markError: (offset: number, message: string) => void;
@@ -523,8 +525,15 @@
     if (event.defaultPrevented || closingWorkspace || showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails) return;
     const command = event.metaKey || event.ctrlKey;
     if (!command) return;
+    const searchAction = editorSearchShortcut(event);
+    if (searchAction) {
+      event.preventDefault();
+      editorRef?.find(searchAction === 'replace');
+      return;
+    }
     if (event.key === 'Enter') {
       const target = event.target;
+      if (target instanceof Element && target.closest('.find-widget')) return;
       if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') && !target.closest('.monaco-editor')) return;
       event.preventDefault();
       void runQuery();
@@ -1670,6 +1679,7 @@
           />
         {/each}
         <button class="new-tab" aria-label="New query tab" title="New query tab (Cmd/Ctrl+T)" on:click={() => newQuery()}><Icon name="plus" size={16} /></button>
+        <button class="new-tab" aria-label="Find in SQL editor" title="Find in SQL editor (Cmd/Ctrl+F)" disabled={!workspaceLoaded} on:click={() => editorRef?.find()}><Icon name="search" size={16} /></button>
       </nav>
 
       <div class="editor-pane">
