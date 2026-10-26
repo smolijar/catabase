@@ -129,6 +129,8 @@ pub struct ConnectionInput {
     pub username: String,
     pub password: Option<String>,
     pub ssl: bool,
+    #[serde(default)]
+    pub options: crate::ConnectionOptions,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -142,6 +144,8 @@ pub struct ConnectionRecord {
     pub username: String,
     pub password: Option<String>,
     pub ssl: bool,
+    #[serde(default)]
+    pub options: crate::ConnectionOptions,
     pub is_active: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -326,7 +330,7 @@ impl Storage {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, host, port, database, username, password_fallback, ssl,
-                    is_active, created_at, updated_at
+                    is_active, created_at, updated_at, options_json
              FROM connections
              ORDER BY is_active DESC, updated_at DESC, name ASC",
         )?;
@@ -341,7 +345,7 @@ impl Storage {
         let record = conn
             .query_row(
                 "SELECT id, name, host, port, database, username, password_fallback, ssl,
-                        is_active, created_at, updated_at
+                        is_active, created_at, updated_at, options_json
                  FROM connections WHERE is_active = 1 LIMIT 1",
                 [],
                 row_to_connection,
@@ -441,8 +445,8 @@ impl Storage {
             tx.execute(
                 "INSERT INTO connections (
                     id, name, host, port, database, username, ssl, password_fallback,
-                    is_active, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    is_active, created_at, updated_at, options_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     host = excluded.host,
@@ -450,6 +454,7 @@ impl Storage {
                     database = excluded.database,
                     username = excluded.username,
                     ssl = excluded.ssl,
+                    options_json = excluded.options_json,
                     password_fallback = excluded.password_fallback,
                     is_active = excluded.is_active,
                     updated_at = excluded.updated_at",
@@ -465,6 +470,7 @@ impl Storage {
                     bool_to_i64(is_active),
                     created_at,
                     now,
+                    serde_json::to_string(&input.options)?,
                 ],
             )?;
             tx.commit()?;
@@ -479,7 +485,7 @@ impl Storage {
         let record = conn
             .query_row(
                 "SELECT id, name, host, port, database, username, password_fallback, ssl,
-                        is_active, created_at, updated_at
+                        is_active, created_at, updated_at, options_json
                  FROM connections WHERE id = ?1",
                 params![id],
                 row_to_connection,
@@ -784,6 +790,15 @@ impl Storage {
                 updated_at TEXT NOT NULL
              );",
         )?;
+        let has_options: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('connections') WHERE name = 'options_json')",
+            [], |row| row.get(0),
+        )?;
+        if !has_options {
+            conn.execute_batch(
+                "ALTER TABLE connections ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'",
+            )?;
+        }
         migrate_history(&mut conn)?;
         conn.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('pool_size', '5')",
@@ -809,6 +824,7 @@ impl From<&ConnectionRecord> for ConnectionFields {
             username: record.username.clone(),
             password: record.password.clone(),
             ssl: record.ssl,
+            options: record.options.clone(),
         }
     }
 }
@@ -823,6 +839,7 @@ impl From<&ConnectionInput> for ConnectionFields {
             username: input.username.clone(),
             password: input.password.clone(),
             ssl: input.ssl,
+            options: input.options.clone(),
         }
     }
 }
@@ -918,6 +935,7 @@ fn setting_value(conn: &Connection, key: &str) -> Result<Option<String>, rusqlit
 }
 
 fn validate_connection(input: &ConnectionInput) -> Result<(), CoreError> {
+    input.options.validate()?;
     if input.name.trim().is_empty() {
         return Err(CoreError::message("connection name is required"));
     }
@@ -949,6 +967,13 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> Result<ConnectionRecord, rusqli
         is_active: row.get::<_, i64>(8)? == 1,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+        options: serde_json::from_str(&row.get::<_, String>(11)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                11,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
     })
 }
 
@@ -1048,6 +1073,7 @@ fn connection_copy_input(source: &ConnectionRecord) -> ConnectionInput {
         username: source.username.clone(),
         password: source.password.clone(),
         ssl: source.ssl,
+        options: source.options.clone(),
     }
 }
 
@@ -1483,6 +1509,7 @@ mod tests {
                 username: "postgres".to_string(),
                 password: None,
                 ssl: false,
+                options: Default::default(),
             })
             .unwrap();
         let second = storage
@@ -1495,6 +1522,7 @@ mod tests {
                 username: "postgres".to_string(),
                 password: None,
                 ssl: false,
+                options: Default::default(),
             })
             .unwrap();
 
@@ -1515,6 +1543,49 @@ mod tests {
     }
 
     #[test]
+    fn migrates_connection_options_without_changing_existing_connections() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE connections (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL,
+          database TEXT NOT NULL, username TEXT NOT NULL, ssl INTEGER NOT NULL,
+          password_fallback TEXT, is_active INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+          INSERT INTO connections VALUES ('legacy', 'Legacy', 'localhost', 5432, 'db', 'user', 0, NULL, 1, 'created', 'updated');").unwrap();
+        let storage = Storage {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        storage.migrate().unwrap();
+        storage.migrate().unwrap();
+        let record = storage.get_connection("legacy").unwrap().unwrap();
+        assert_eq!(record.options, crate::ConnectionOptions::default());
+        assert_eq!(record.created_at, "created");
+        assert_eq!(record.updated_at, "updated");
+        assert!(record.is_active);
+        let mut input = connection_copy_input(&record);
+        input.id = Some(record.id.clone());
+        input.options = crate::ConnectionOptions {
+            read_only: true,
+            query_timeout_seconds: 30,
+            ..Default::default()
+        };
+        storage.save_connection(input.clone()).unwrap();
+        assert_eq!(
+            storage.list_connections().unwrap()[0].options,
+            input.options
+        );
+        assert_eq!(ConnectionFields::from(&input).options, input.options);
+        input.options.connect_timeout_seconds = 0;
+        assert!(storage.save_connection(input).is_err());
+        assert!(
+            storage
+                .get_connection("legacy")
+                .unwrap()
+                .unwrap()
+                .options
+                .read_only
+        );
+    }
+
+    #[test]
     fn copies_connection_fields_and_resolved_password_without_reusing_identity() {
         let source = ConnectionRecord {
             id: "source-id".to_string(),
@@ -1525,6 +1596,10 @@ mod tests {
             username: "zenbase".to_string(),
             password: Some("synthetic-test-secret".to_string()),
             ssl: true,
+            options: crate::ConnectionOptions {
+                read_only: true,
+                ..Default::default()
+            },
             is_active: true,
             created_at: "original-created-at".to_string(),
             updated_at: "original-updated-at".to_string(),
@@ -1538,6 +1613,7 @@ mod tests {
         assert_eq!(input.username, source.username);
         assert_eq!(input.password, source.password);
         assert_eq!(input.ssl, source.ssl);
+        assert_eq!(input.options, source.options);
     }
 
     #[test]
@@ -1553,6 +1629,11 @@ mod tests {
                 username: "zenbase".to_string(),
                 password: None,
                 ssl: true,
+                options: crate::ConnectionOptions {
+                    query_timeout_seconds: 20,
+                    read_only: true,
+                    ..Default::default()
+                },
             })
             .unwrap();
         let active = storage
@@ -1565,6 +1646,7 @@ mod tests {
                 username: "postgres".to_string(),
                 password: None,
                 ssl: false,
+                options: Default::default(),
             })
             .unwrap();
         let first = storage.duplicate_connection(&source.id).unwrap();
@@ -1579,6 +1661,7 @@ mod tests {
         assert_eq!(first.database, source.database);
         assert_eq!(first.username, source.username);
         assert_eq!(first.ssl, source.ssl);
+        assert_eq!(first.options, source.options);
         assert_eq!(storage.active_connection().unwrap().unwrap().id, active.id);
         let original = storage.get_connection(&source.id).unwrap().unwrap();
         assert_eq!(original.name, source.name);

@@ -15,6 +15,68 @@ use catabase_core::{
 
 #[tokio::test]
 #[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE pointing at the saved zenbase docker connection"]
+async fn connection_options_apply_to_direct_and_pooled_docker_sessions()
+-> Result<(), Box<dyn Error>> {
+    use catabase_core::{ConnectionOptions, checkout_pool_client, create_pool};
+    let mut fields = docker_fields()?;
+    fields.options = ConnectionOptions {
+        connect_timeout_seconds: 2,
+        query_timeout_seconds: 1,
+        lock_timeout_seconds: 1,
+        read_only: true,
+    };
+    let direct = connect_client(&fields).await?;
+    let settings = direct.query_one("SELECT current_setting('statement_timeout'), current_setting('lock_timeout'), current_setting('transaction_read_only')", &[]).await?;
+    assert_eq!(settings.get::<_, String>(0), "1s");
+    assert_eq!(settings.get::<_, String>(1), "1s");
+    assert_eq!(settings.get::<_, String>(2), "on");
+    direct.batch_execute("BEGIN").await?;
+    // Always roll back, even if the guard fails; never leave a test table behind.
+    let denied = direct
+        .batch_execute("CREATE TABLE public.catabase_read_only_probe (id int)")
+        .await;
+    direct.batch_execute("ROLLBACK").await?;
+    assert_eq!(denied.unwrap_err().code().unwrap().code(), "25006");
+
+    let pool = create_pool(&fields, 1)?;
+    let client = checkout_pool_client(&pool).await?;
+    let start = std::time::Instant::now();
+    let timed_out = client.simple_query("SELECT pg_sleep(5)").await.unwrap_err();
+    assert_eq!(timed_out.code().unwrap().code(), "57014");
+    assert!(start.elapsed() < std::time::Duration::from_secs(4));
+    client
+        .batch_execute(
+            "SET statement_timeout=0; SET lock_timeout=0; SET default_transaction_read_only=off",
+        )
+        .await?;
+    drop(client);
+    let recycled = checkout_pool_client(&pool).await?;
+    let settings = recycled.query_one("SELECT current_setting('statement_timeout'), current_setting('lock_timeout'), current_setting('transaction_read_only')", &[]).await?;
+    assert_eq!(settings.get::<_, String>(0), "1s");
+    assert_eq!(settings.get::<_, String>(1), "1s");
+    assert_eq!(settings.get::<_, String>(2), "on");
+
+    // A transaction-scoped advisory lock tests lock_timeout without data writes.
+    let key = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos()
+        % i64::MAX as u128) as i64;
+    direct.batch_execute("BEGIN").await?;
+    direct
+        .query_one("SELECT pg_advisory_xact_lock($1)", &[&key])
+        .await?;
+    recycled.batch_execute("SET statement_timeout=0").await?;
+    let locked = recycled
+        .query_one("SELECT pg_advisory_xact_lock($1)", &[&key])
+        .await;
+    direct.batch_execute("ROLLBACK").await?;
+    assert_eq!(locked.unwrap_err().code().unwrap().code(), "55P03");
+    recycled.simple_query("SELECT 1").await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE pointing at the saved zenbase docker connection"]
 async fn cancellation_and_unacknowledged_cancel_recover_on_docker() -> Result<(), Box<dyn Error>> {
     use catabase_core::{
         CoreError, PooledPgClient, QueryCancellation, checkout_pool_client, create_pool,
@@ -130,7 +192,7 @@ fn docker_fields() -> Result<ConnectionFields, Box<dyn Error>> {
     let storage = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let fields = storage.query_row(
         "SELECT name,host,port,database,username,password_fallback,ssl FROM connections WHERE name = 'zenbase docker'",
-        [], |row| Ok(ConnectionFields { name: row.get(0)?, host: row.get(1)?, port: row.get(2)?, database: row.get(3)?, username: row.get(4)?, password: row.get(5)?, ssl: row.get(6)? }))?;
+        [], |row| Ok(ConnectionFields { name: row.get(0)?, host: row.get(1)?, port: row.get(2)?, database: row.get(3)?, username: row.get(4)?, password: row.get(5)?, ssl: row.get(6)?, options: Default::default() }))?;
     assert_eq!(fields.name, "zenbase docker");
     assert!(matches!(fields.host.as_str(), "localhost" | "127.0.0.1"));
     assert_eq!(fields.port, 5432);

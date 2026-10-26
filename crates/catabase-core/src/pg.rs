@@ -25,8 +25,6 @@ pub type PgPool = Pool;
 pub type PooledPgClient = deadpool_postgres::Client;
 pub type PgCancelToken = CancelToken;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
-
 mod arrays;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -172,12 +170,14 @@ pub async fn checkout_pool_client(pool: &PgPool) -> Result<PooledPgClient, CoreE
 }
 
 pub fn create_pool(fields: &ConnectionFields, pool_size: u32) -> Result<PgPool, CoreError> {
+    fields.options.validate()?;
+    let connect_timeout = Duration::from_secs(fields.options.connect_timeout_seconds.into());
     let mut config = postgres_config(fields);
     let max_size = pool_size.clamp(1, 32) as usize;
     let manager_config = ManagerConfig {
         // A held manual transaction is never returned to the pool. Any client
         // that is returned must shed an abandoned/failed transaction before reuse.
-        recycling_method: RecyclingMethod::Custom("ROLLBACK".to_string()),
+        recycling_method: RecyclingMethod::Custom("ROLLBACK; RESET statement_timeout; RESET lock_timeout; RESET default_transaction_read_only".to_string()),
     };
 
     if fields.ssl {
@@ -186,9 +186,9 @@ pub fn create_pool(fields: &ConnectionFields, pool_size: u32) -> Result<PgPool, 
         Pool::builder(manager)
             .max_size(max_size)
             .runtime(Runtime::Tokio1)
-            .wait_timeout(Some(CONNECT_TIMEOUT))
-            .create_timeout(Some(CONNECT_TIMEOUT))
-            .recycle_timeout(Some(CONNECT_TIMEOUT))
+            .wait_timeout(Some(connect_timeout))
+            .create_timeout(Some(connect_timeout))
+            .recycle_timeout(Some(connect_timeout))
             .build()
             .map_err(|error| CoreError::message(format!("postgres pool error: {error}")))
     } else {
@@ -197,9 +197,9 @@ pub fn create_pool(fields: &ConnectionFields, pool_size: u32) -> Result<PgPool, 
         Pool::builder(manager)
             .max_size(max_size)
             .runtime(Runtime::Tokio1)
-            .wait_timeout(Some(CONNECT_TIMEOUT))
-            .create_timeout(Some(CONNECT_TIMEOUT))
-            .recycle_timeout(Some(CONNECT_TIMEOUT))
+            .wait_timeout(Some(connect_timeout))
+            .create_timeout(Some(connect_timeout))
+            .recycle_timeout(Some(connect_timeout))
             .build()
             .map_err(|error| CoreError::message(format!("postgres pool error: {error}")))
     }
@@ -708,18 +708,25 @@ async fn execute_simple(
 }
 
 pub async fn connect_client(fields: &ConnectionFields) -> Result<PgClient, CoreError> {
+    fields.options.validate()?;
     let mut config = postgres_config(fields);
+    let timeout = Duration::from_secs(fields.options.connect_timeout_seconds.into());
 
     if fields.ssl {
         config.ssl_mode(SslMode::Require);
-        let (client, connection) = config.connect(make_tls_connector()).await?;
+        let (client, connection) =
+            tokio::time::timeout(timeout, config.connect(make_tls_connector()))
+                .await
+                .map_err(|_| CoreError::message("Connection timed out during setup."))??;
         tokio::spawn(async move {
             let _ = connection.await;
         });
         Ok(client)
     } else {
         config.ssl_mode(SslMode::Disable);
-        let (client, connection) = config.connect(NoTls).await?;
+        let (client, connection) = tokio::time::timeout(timeout, config.connect(NoTls))
+            .await
+            .map_err(|_| CoreError::message("Connection timed out during setup."))??;
         tokio::spawn(async move {
             let _ = connection.await;
         });
@@ -735,7 +742,13 @@ fn postgres_config(fields: &ConnectionFields) -> PgConfig {
         .user(&fields.username)
         .dbname(&fields.database)
         .application_name("catabase")
-        .connect_timeout(CONNECT_TIMEOUT);
+        .connect_timeout(Duration::from_secs(
+            fields.options.connect_timeout_seconds.into(),
+        ));
+    let parameters = fields.options.startup_parameters();
+    if !parameters.is_empty() {
+        config.options(parameters);
+    }
     if let Some(password) = &fields.password {
         config.password(password);
     }
