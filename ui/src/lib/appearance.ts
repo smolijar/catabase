@@ -4,6 +4,11 @@ export type ConnectionAppearance = { color: ConnectionColor; environment: string
 export const CONNECTION_COLORS: ConnectionColor[] = ['none', 'red', 'amber', 'green', 'blue', 'violet'];
 export const APPEARANCE_KEY = 'catabase.connectionAppearance';
 
+/** Return a draft, never the saved object: closing the editor must discard changes. */
+export function connectionAppearanceDraft(appearances: Record<string, ConnectionAppearance>, id?: string | null): ConnectionAppearance {
+  return { ...(id ? appearances[id] : null) ?? { color: 'none', environment: '' } };
+}
+
 export function restoreAppearance(raw: string | null): Record<string, ConnectionAppearance> {
   try {
     const parsed: unknown = JSON.parse(raw ?? '{}');
