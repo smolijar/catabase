@@ -10,11 +10,12 @@ use std::{
 use catabase_core::{
     ApplyUpdatesResult, CommandTimings, ConnectionFields, ConnectionInput, ConnectionRecord,
     ConnectionStats, CoreError, ForeignKeyLookup, ForeignKeyValues, HistoryPage, HistoryStats,
-    NewHistoryEntry, PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryCancellation, QueryResult,
-    ReflectionCache, RowUpdate, SchemaTree, Settings, StatementKind, StatementRange, Storage,
-    SupermavenClient, SupermavenCompletion, SupermavenRequest, SupermavenStatus,
-    apply_row_updates as apply_rows, build_connection_url as build_url, checkout_pool_client,
-    classify_statement, connection_stats as load_connection_stats, create_pool, execute_on_client,
+    HistoryStorageStats, NewHistoryEntry, PgClient, PgErrorInfo, PgPool, PooledPgClient,
+    QueryCancellation, QueryResult, ReflectionCache, RowUpdate, SchemaTree, Settings,
+    StatementKind, StatementRange, Storage, SupermavenClient, SupermavenCompletion,
+    SupermavenRequest, SupermavenStatus, apply_row_updates as apply_rows,
+    build_connection_url as build_url, checkout_pool_client, classify_statement,
+    connection_stats as load_connection_stats, create_pool, execute_on_client,
     execute_on_client_with_reflection, get_ddl_on_client as load_ddl,
     lookup_foreign_key_values as lookup_fk_values, parse_connection_url as parse_url,
     split_editor_statements, split_statements, test_connection as test_pg_connection,
@@ -640,6 +641,13 @@ async fn history_page(
 #[tauri::command]
 async fn history_stats(state: State<'_, AppState>) -> Result<HistoryStats, AppError> {
     state.storage.history_stats().map_err(Into::into)
+}
+
+#[tauri::command]
+async fn history_storage_stats(
+    state: State<'_, AppState>,
+) -> Result<HistoryStorageStats, AppError> {
+    state.storage.history_storage_stats().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1289,6 +1297,7 @@ pub fn run() {
             history_page,
             history_purge,
             history_stats,
+            history_storage_stats,
             introspect_schema,
             foreign_key_values,
             list_connections,
