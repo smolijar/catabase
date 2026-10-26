@@ -14,6 +14,8 @@ pub struct ConnectionFields {
     pub username: String,
     pub password: Option<String>,
     pub ssl: bool,
+    #[serde(default)]
+    pub options: crate::ConnectionOptions,
 }
 
 pub fn parse_connection_url(input: &str) -> Result<ConnectionFields, CoreError> {
@@ -58,6 +60,7 @@ pub fn parse_connection_url(input: &str) -> Result<ConnectionFields, CoreError> 
         username,
         password,
         ssl,
+        options: Default::default(),
     })
 }
 
@@ -111,6 +114,7 @@ mod tests {
             username: "cat user".to_string(),
             password: Some("secret".to_string()),
             ssl: false,
+            options: Default::default(),
         };
 
         let parsed = parse_connection_url(&build_connection_url(&fields).unwrap()).unwrap();

@@ -430,6 +430,12 @@ async fn apply_row_updates(
     let cancellation = begin_operation(&state, &query_token).await;
     let outcome = async {
         let active = requested_connection(&state, Some(&connection_id)).await?;
+        if active.options.read_only {
+            return Err(CoreError::message(
+                "Cell editing is disabled for this read-only connection.",
+            )
+            .into());
+        }
         let mut tx = cancellation
             .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
             .await?;
@@ -1399,6 +1405,7 @@ mod tests {
                 username: "unused".into(),
                 password: None,
                 ssl: false,
+                options: Default::default(),
             },
             5,
         )

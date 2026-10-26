@@ -11,7 +11,9 @@ pub mod storage;
 pub mod supermaven;
 
 pub use cancellation::QueryCancellation;
+mod connection_options;
 pub use conn_url::{ConnectionFields, build_connection_url, parse_connection_url};
+pub use connection_options::ConnectionOptions;
 pub use error::{CoreError, PgErrorInfo};
 pub use foreign_key_values::{ForeignKeyLookup, ForeignKeyValues, lookup_foreign_key_values};
 pub use pg::{
