@@ -127,19 +127,11 @@
     min-width: 0;
     margin-bottom: 0;
     border: 0;
-    border-radius: 4px;
-    background: transparent;
+    border-radius: 0;
   }
 
-  .connection-item:hover {
-    border-color: var(--line-strong);
+  .connection-item:not(.active):hover {
     background: var(--surface-2);
-  }
-
-  .connection-item.active {
-    border-color: var(--accent);
-    background: var(--accent-soft);
-    box-shadow: inset 2px 0 0 var(--accent);
   }
 
   .connection-select {
@@ -150,7 +142,7 @@
     min-height: 28px;
     padding: 4px 10px;
     border: 0;
-    border-radius: 4px;
+    border-radius: 0;
     background: transparent;
     box-shadow: none;
     color: inherit;
