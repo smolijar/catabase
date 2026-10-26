@@ -121,9 +121,14 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
   box-shadow: inset 2px 0 var(--accent);
 }
 .tab-chip.active { box-shadow: inset 0 2px var(--accent); }
-.tab-label, .tab-close { border: 0; background: transparent; color: inherit; padding: 2px 6px; min-height: 26px; }
+.tab-label, .tab-close { border: 0; border-radius: 0; background: transparent; color: inherit; padding: 2px 6px; min-height: 26px; }
 .tab-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; user-select: none; touch-action: none; }
 .tab-label:hover:not(:disabled) { background: transparent; }
+/* Focus belongs to the tab, not its rounded label button. Keep the ring inside
+   the scrolling strip and separate from the selected tab's top edge. */
+.tab-chip:has(> .tab-label:focus-visible) { outline: 2px solid var(--focus); outline-offset: -4px; }
+.tab-label:focus-visible { outline: none; }
+.tab-close:focus-visible { outline-offset: -2px; }
 .tab-label small { color: var(--ink-faint); font-size: 11px; }
 .tab-close { color: var(--ink-faint); margin-right: 2px; padding: 2px; }
 .pending-dot { color: var(--warn); }
