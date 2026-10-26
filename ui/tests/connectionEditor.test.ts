@@ -59,6 +59,18 @@ test('appearance drafts target the edited connection and cannot mutate saved pre
   assert.deepEqual(connectionAppearanceDraft(saved, 'missing'), { color: 'none', environment: '' });
 });
 
+test('the first color option is an empty no-color swatch, not an orange override', () => {
+  const html = renderEditor({ section: 'appearance', appearance: { color: 'none', environment: '' } });
+  const swatches = [...html.matchAll(/<button[^>]*class="color-option"[^>]*>[\s\S]*?<\/button>/g)].map(match => match[0]);
+  assert.equal(swatches.length, 6);
+  assert.match(swatches[0], /data-conn="none"/);
+  assert.match(swatches[0], /aria-label="No color"/);
+  assert.match(swatches[0], /aria-pressed="true"/);
+  assert.match(swatches[0], /><\/button>$/);
+  assert.doesNotMatch(swatches[0], /style=|Default ginger/);
+  assert.match(swatches[1], /data-conn="red"/);
+});
+
 test('unchanged connection settings permit a local appearance-only save', () => {
   assert.equal(sameConnectionSettings(connection, { ...connection }), true);
   assert.equal(sameConnectionSettings(connection, { ...connection, password: '' }), true);

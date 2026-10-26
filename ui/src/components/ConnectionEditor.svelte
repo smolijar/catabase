@@ -73,8 +73,8 @@
     <div>Connection color</div>
     <div class="color-options" role="group" aria-label="Connection color">
       {#each CONNECTION_COLORS as color}
-        <button type="button" class="color-option" data-conn={color} style={color === 'none' ? '--accent: var(--brand)' : ''}
-          aria-label={color === 'none' ? 'Default ginger' : color} title={color === 'none' ? 'Default ginger' : color}
+        <button type="button" class="color-option" data-conn={color}
+          aria-label={color === 'none' ? 'No color' : color} title={color === 'none' ? 'No color override (use app default)' : color}
           aria-pressed={appearance.color === color} disabled={saving} on:click={() => appearance = { ...appearance, color }}></button>
       {/each}
     </div>
