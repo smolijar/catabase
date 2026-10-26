@@ -2,11 +2,12 @@
   import ActionMenu from './ActionMenu.svelte';
   import type { ConnectionRecord } from '../lib/types';
   import { connectionClipboardAction, serializeConnectionReference } from '../lib/connectionClipboard';
+  import { createConnectionInteraction } from '../lib/connectionInteraction';
 
   export let connection: ConnectionRecord;
   export let active = false;
   export let disabled = false;
-  export let onActivate: () => void;
+  export let onActivate: () => void | Promise<void>;
   export let onDisconnect: () => void = () => {};
   export let onEdit: () => void;
   export let onDuplicate: () => void;
@@ -15,6 +16,7 @@
   export let onDelete: () => void;
 
   let actions: ActionMenu;
+  const interaction = createConnectionInteraction(() => onActivate(), () => onEdit(), () => disabled);
   $: address = `${connection.username}@${connection.host}:${connection.port}/${connection.database}`;
   $: items = [
     { id: 'use', label: active ? 'In use in this tab' : 'Use in this tab', disabled: active || disabled },
@@ -25,7 +27,7 @@
   ];
 
   function activate() {
-    if (!disabled) onActivate();
+    interaction.use();
   }
 
   function handleClick(event: MouseEvent) {
@@ -34,11 +36,13 @@
       event.preventDefault();
       event.stopPropagation();
       void actions.openAt(event.clientX, event.clientY);
+    } else if (event.detail < 2) {
+      activate();
     }
   }
 
   function handleDoubleClick(event: MouseEvent) {
-    if (!event.altKey) activate();
+    if (!event.altKey) void interaction.edit();
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -54,7 +58,10 @@
       }
       return;
     }
-    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+    if (event.key === 'F2' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      void interaction.edit();
+    } else if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
       event.preventDefault();
       event.stopPropagation();
       const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
@@ -107,7 +114,7 @@
     aria-pressed={active}
     aria-disabled={disabled}
     aria-haspopup="menu"
-    title={`${address}${active ? ' · This tab' : ''}\nDouble-click or press Enter to use and test. Option/Alt-click, right-click or Shift+F10 for actions.\nCmd/Ctrl+C to copy. Cmd/Ctrl+V to duplicate a copied connection.`}
+    title={`${address}${active ? ' · This tab' : ''}\nClick or press Enter to use and test. Double-click or F2 to edit. Option/Alt-click, right-click or Shift+F10 for actions.\nCmd/Ctrl+C to copy. Cmd/Ctrl+V to duplicate a copied connection.`}
     on:click={handleClick}
     on:dblclick={handleDoubleClick}
     on:keydown={handleKeydown}

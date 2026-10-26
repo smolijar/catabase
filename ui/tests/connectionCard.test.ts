@@ -41,6 +41,8 @@ test('the row is the only button; its action menu has no visible or keyboard-foc
   assert.doesNotMatch(html, /dropdown-trigger/);
   assert.match(html, /aria-haspopup="menu"/);
   assert.match(html, /Option\/Alt-click, right-click or Shift\+F10/);
+  assert.match(html, /Click or press Enter to use and test/);
+  assert.match(html, /Double-click or F2 to edit/);
   assert.match(html, /Cmd\/Ctrl\+C to copy/);
   assert.match(html, /Cmd\/Ctrl\+V to duplicate/);
   assert.match(html, /data-connection-id="zenbase"/);
