@@ -8,6 +8,7 @@
   import Dropdown from './components/Dropdown.svelte';
   import ActionMenu from './components/ActionMenu.svelte';
   import ConnectionCard from './components/ConnectionCard.svelte';
+  import ConnectionEditor from './components/ConnectionEditor.svelte';
   import ConnectionPill from './components/ConnectionPill.svelte';
   import ResultsGrid from './components/ResultsGrid.svelte';
   import Modal from './components/Modal.svelte';
@@ -19,7 +20,8 @@
   import QueryTab from './components/QueryTab.svelte';
   import Cat from './components/Cat.svelte';
   import WorkspacePicker from './components/WorkspacePicker.svelte';
-  import { APPEARANCE_KEY, CONNECTION_COLORS, restoreAppearance, shortType } from './lib/appearance';
+  import { APPEARANCE_KEY, connectionAppearanceDraft, restoreAppearance, shortType } from './lib/appearance';
+  import { sameConnectionSettings } from './lib/connectionEditor';
   import type { ConnectionAppearance, ConnectionColor, ThemePreference } from './lib/appearance';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
@@ -160,6 +162,7 @@
 
   let showConnectionModal = false;
   let connectionForm: ConnectionInput = emptyConnection();
+  let connectionAppearanceForm = connectionAppearanceDraft({});
   let connectionUrl = '';
   let modalFeedback = '';
   let testingConnection = false;
@@ -630,9 +633,8 @@
     try { localStorage.setItem('catabase.theme', next); } catch { /* Session preference still applies. */ }
   }
 
-  function setConnectionAppearance(color: ConnectionColor, environment = connectionAppearance.environment) {
-    if (!tabConnectionId) return;
-    appearances = { ...appearances, [tabConnectionId]: { color, environment: environment.trim().slice(0, 16) } };
+  function saveConnectionAppearance(id: string, { color, environment }: ConnectionAppearance) {
+    appearances = { ...appearances, [id]: { color, environment: environment.trim().slice(0, 16) } };
     try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearances)); } catch { /* Session preference still applies. */ }
   }
 
@@ -885,6 +887,7 @@
   function openNewConnection() {
     if (operation || connectionMutation) return;
     connectionForm = emptyConnection();
+    connectionAppearanceForm = connectionAppearanceDraft({});
     connectionUrl = '';
     modalFeedback = '';
     showConnectionModal = true;
@@ -893,6 +896,7 @@
   function editConnection(connection: ConnectionRecord) {
     if (operation || connectionMutation) return;
     connectionForm = { ...connection };
+    connectionAppearanceForm = connectionAppearanceDraft(appearances, connection.id);
     modalFeedback = '';
     showConnectionModal = true;
     void syncConnectionUrl();
@@ -976,6 +980,13 @@
 
   async function saveConnection() {
     if (operation || connectionMutation) return;
+    const existing = connections.find(connection => connection.id === connectionForm.id);
+    if (existing && sameConnectionSettings(existing, connectionForm)) {
+      saveConnectionAppearance(existing.id, connectionAppearanceForm);
+      showConnectionModal = false;
+      flash(`${existing.name} appearance saved.`);
+      return;
+    }
     const initiatingTab = activeTab;
     const previousId = connectionForm.id;
     connectionMutation = 'Saving connection…';
@@ -984,6 +995,7 @@
       // Keep the lock until the actual write finishes; timing out an IPC promise
       // would leave its uncancelled write racing a subsequent query.
       const saved = await api.saveConnection(connectionForm);
+      saveConnectionAppearance(saved.id, connectionAppearanceForm);
       connectionTester.invalidate(saved.id);
       await loadConnections();
       // A reused ID may now point at a different database. Never apply or replay
@@ -1788,16 +1800,6 @@
                 <button aria-pressed={theme === choice} on:click={() => setTheme(choice as ThemePreference)}>{choice === 'tuxedo' ? 'Tuxedo' : choice === 'snow' ? 'Snow' : 'System'}</button>
               {/each}
             </div>
-            {#if activeConnection}
-              <div>Connection color <span class="muted">{activeConnection.name}</span></div>
-              <div class="color-options" role="group" aria-label="Connection color">
-                {#each CONNECTION_COLORS as color}
-                  <button class="color-option" data-conn={color} style={color === 'none' ? '--accent: var(--brand)' : ''} aria-label={color === 'none' ? 'Default ginger' : color} title={color === 'none' ? 'Default ginger' : color} aria-pressed={connectionAppearance.color === color} on:click={() => setConnectionAppearance(color)}></button>
-                {/each}
-              </div>
-              <label>Environment label <input maxlength="16" placeholder="e.g. PROD, LOCAL" value={connectionAppearance.environment} on:change={(event) => setConnectionAppearance(connectionAppearance.color, event.currentTarget.value)} /></label>
-              <p>Color and label identify the connection; they do not change its database permissions.</p>
-            {/if}
           </section>
           <section class="settings-card">
             <div class="settings-card-head"><strong>Connection pool</strong><span>{settings.poolSize} connections</span></div>
@@ -2041,27 +2043,9 @@
 
 {#if showConnectionModal}
   <Modal label={connectionForm.id ? 'Edit connection' : 'New connection'} locked={savingConnection} onClose={() => (showConnectionModal = false)}>
-    <form class="modal" on:submit|preventDefault={saveConnection}>
-      <div class="panel-head">
-        <h2>{connectionForm.id ? 'Edit connection' : 'New connection'}</h2>
-        <button type="button" disabled={savingConnection} on:click={() => (showConnectionModal = false)}>Close</button>
-      </div>
-      <label>Name <input disabled={savingConnection} bind:value={connectionForm.name} on:input={queueConnectionUrlSync} required /></label>
-      <label>Host <input disabled={savingConnection} bind:value={connectionForm.host} on:input={queueConnectionUrlSync} required /></label>
-      <div class="form-grid">
-        <label>Port <input disabled={savingConnection} type="number" bind:value={connectionForm.port} on:input={queueConnectionUrlSync} required /></label>
-        <label>Database <input disabled={savingConnection} bind:value={connectionForm.database} on:input={queueConnectionUrlSync} required /></label>
-      </div>
-      <label>Username <input disabled={savingConnection} bind:value={connectionForm.username} on:input={queueConnectionUrlSync} required /></label>
-      <label>Password <input disabled={savingConnection} type="password" bind:value={connectionForm.password} on:input={queueConnectionUrlSync} /></label>
-      <label class="checkbox"><input disabled={savingConnection} type="checkbox" bind:checked={connectionForm.ssl} on:change={queueConnectionUrlSync} /> Use SSL</label>
-      <label>Connection URL <input disabled={savingConnection} bind:value={connectionUrl} /></label>
-      <div class="row-actions">
-        <button type="button" disabled={savingConnection} on:click={importConnectionUrl}>Import URL</button>
-        <button type="button" on:click={testConnection} disabled={testingConnection || savingConnection}>{testingConnection ? 'Testing...' : 'Test'}</button>
-        <button class="primary" disabled={savingConnection}>{savingConnection ? 'Saving...' : 'Save'}</button>
-      </div>
-      {#if modalFeedback}<p class="muted">{modalFeedback}</p>{/if}
-    </form>
+    <ConnectionEditor bind:connection={connectionForm} bind:appearance={connectionAppearanceForm} bind:url={connectionUrl}
+      feedback={modalFeedback} saving={savingConnection} testing={testingConnection}
+      onClose={() => showConnectionModal = false} onSave={saveConnection} onTest={testConnection}
+      onImport={importConnectionUrl} onConnectionInput={queueConnectionUrlSync} />
   </Modal>
 {/if}
