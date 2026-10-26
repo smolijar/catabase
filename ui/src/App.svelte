@@ -20,9 +20,10 @@
   import QueryTab from './components/QueryTab.svelte';
   import Cat from './components/Cat.svelte';
   import WorkspacePicker from './components/WorkspacePicker.svelte';
-  import { APPEARANCE_KEY, connectionAppearanceDraft, restoreAppearance, shortType } from './lib/appearance';
+  import { APPEARANCE_KEY, connectionAppearanceDraft, workspaceAppearance, restoreAppearance, shortType } from './lib/appearance';
+  import { connectionOptions, connectionTestTimeout } from './lib/connectionOptions';
   import { sameConnectionSettings } from './lib/connectionEditor';
-  import type { ConnectionAppearance, ConnectionColor, ThemePreference } from './lib/appearance';
+  import type { ConnectionAppearance, ThemePreference } from './lib/appearance';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
@@ -179,7 +180,8 @@
   const nativeCleanup: Array<() => void> = [];
 
   $: activeConnection = connections.find((connection) => connection.id === tabConnectionId) ?? null;
-  $: connectionAppearance = appearances[tabConnectionId ?? ''] ?? { color: 'none' as ConnectionColor, environment: '' };
+  $: connectionAppearance = workspaceAppearance(appearances, tabConnectionId,
+    showConnectionModal ? { id: connectionForm.id, appearance: connectionAppearanceForm } : undefined);
   $: resolvedTheme = theme === 'system' ? systemLight ? 'snow' : 'tuxedo' : theme;
   $: themeKey = `${resolvedTheme}:${connectionAppearance.color}`;
   $: if (mounted) {
@@ -211,6 +213,7 @@
   $: editEligibility = assessRowEditing(result, editMode ? originalRows : result?.rows);
   $: editableColumns = editEligibility.target?.editableColumns.map((column) => column.name) ?? [];
   $: editDisabledReason = running || connectionMutation ? 'Wait for the current operation to finish before editing.'
+    : activeConnection?.options?.readOnly ? 'Cell editing is disabled for this read-only connection.'
     : resultSession?.snapshot ? 'History snapshots are read-only. Re-run the query to edit.'
     : result && !resultUsable ? 'Re-run this query on its original connection before editing.'
     : editEligibility.reason;
@@ -553,7 +556,8 @@
       database: '',
       username: '',
       password: '',
-      ssl: false
+      ssl: false,
+      options: connectionOptions()
     };
   }
 
@@ -895,7 +899,7 @@
 
   function editConnection(connection: ConnectionRecord) {
     if (operation || connectionMutation) return;
-    connectionForm = { ...connection };
+    connectionForm = { ...connection, options: connectionOptions(connection.options) };
     connectionAppearanceForm = connectionAppearanceDraft(appearances, connection.id);
     modalFeedback = '';
     showConnectionModal = true;
@@ -958,7 +962,7 @@
   async function importConnectionUrl() {
     try {
       const parsed = await api.parseConnectionUrl(connectionUrl);
-      connectionForm = { ...connectionForm, ...parsed };
+      connectionForm = { ...connectionForm, ...parsed, options: connectionForm.options };
       modalFeedback = 'URL imported.';
     } catch (error) {
       modalFeedback = errorMessage(error);
@@ -969,7 +973,7 @@
     testingConnection = true;
     modalFeedback = 'Testing connection...';
     try {
-      await withTimeout(api.testConnection(connectionForm), 12000, 'Connection test timed out.');
+      await withTimeout(api.testConnection(connectionForm), connectionTestTimeout(connectionForm.options), 'Connection test timed out.');
       modalFeedback = 'Connection test succeeded.';
     } catch (error) {
       modalFeedback = errorMessage(error);
@@ -989,6 +993,8 @@
     }
     const initiatingTab = activeTab;
     const previousId = connectionForm.id;
+    if (previousId && tabs.some(tab => tab.connectionId === previousId && (tab.id === activeTab ? pendingChanges : tab.pendingChanges).length)
+      && !confirm('Changing connection settings clears affected results and staged edits. Discard these edits and save?')) return;
     connectionMutation = 'Saving connection…';
     savingConnection = true;
     try {
@@ -1023,7 +1029,7 @@
     if (operation || connectionMutation) { flash('Wait for the current operation before switching connections.'); return; }
     const connection = connections.find((candidate) => candidate.id === id);
     if (!connection) return;
-    // A double-click on the current connection is a retry, not a switch: keep
+    // A click on the current connection is a retry, not a switch: keep
     // its result set, staged edits, pool and manual transaction intact.
     if (tabConnectionId === id) { void testSavedConnection(connection); return; }
     if (pendingChanges.length && !confirm('Discard staged edits before changing this tab’s connection?')) return;
@@ -1054,7 +1060,7 @@
 
   function testSavedConnection(connection: ConnectionRecord) {
     return connectionTester.test(connection.id, () => withTimeout(
-      api.testConnection(connection), 12000, 'Connection test timed out.'
+      api.testConnection(connection), connectionTestTimeout(connection.options), 'Connection test timed out.'
     ));
   }
 

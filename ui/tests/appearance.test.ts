@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { restoreAppearance, shortType } from '../src/lib/appearance.ts';
+import { restoreAppearance, shortType, workspaceAppearance } from '../src/lib/appearance.ts';
 
 test('appearance restores only supported connection accents and bounded display labels', () => {
   assert.deepEqual(restoreAppearance(JSON.stringify({
@@ -26,4 +26,14 @@ test('compact type labels retain array identity and unfamiliar PostgreSQL types'
     ['timestamp without time zone', 'timestamp'], ['double precision', 'float8'],
     ['boolean', 'bool'], ['citext', 'citext']
   ]) assert.equal(shortType(type), expected);
+});
+
+test('only the selected connection previews its draft; closing restores the saved appearance', () => {
+  const saved = { docker: { color: 'blue' as const, environment: 'LOCAL' } };
+  const draft = { color: 'red' as const, environment: 'PREVIEW' };
+  assert.deepEqual(workspaceAppearance(saved, 'docker', { id: 'docker', appearance: draft }), draft);
+  assert.deepEqual(workspaceAppearance(saved, 'docker', { id: 'inactive', appearance: draft }), saved.docker);
+  assert.deepEqual(workspaceAppearance(saved, 'docker', { appearance: draft }), saved.docker);
+  assert.deepEqual(workspaceAppearance(saved, 'docker'), saved.docker);
+  assert.deepEqual(workspaceAppearance(saved, null, { id: 'docker', appearance: draft }), { color: 'none', environment: '' });
 });
