@@ -9,6 +9,11 @@ export function connectionAppearanceDraft(appearances: Record<string, Connection
   return { ...(id ? appearances[id] : null) ?? { color: 'none', environment: '' } };
 }
 
+export function workspaceAppearance(appearances: Record<string, ConnectionAppearance>, activeId: string | null,
+  editing?: { id?: string | null; appearance: ConnectionAppearance }): ConnectionAppearance {
+  return editing?.id && editing.id === activeId ? editing.appearance : connectionAppearanceDraft(appearances, activeId);
+}
+
 export function restoreAppearance(raw: string | null): Record<string, ConnectionAppearance> {
   try {
     const parsed: unknown = JSON.parse(raw ?? '{}');

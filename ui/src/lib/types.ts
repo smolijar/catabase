@@ -15,6 +15,14 @@ export interface ConnectionFields {
   username: string;
   password?: string | null;
   ssl: boolean;
+  options?: ConnectionOptions;
+}
+
+export interface ConnectionOptions {
+  connectTimeoutSeconds: number;
+  queryTimeoutSeconds: number;
+  lockTimeoutSeconds: number;
+  readOnly: boolean;
 }
 
 export interface ConnectionInput extends ConnectionFields {

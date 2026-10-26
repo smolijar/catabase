@@ -5,6 +5,7 @@ import { createServer } from 'vite';
 import type { ViteDevServer } from 'vite';
 import { sameConnectionSettings } from '../src/lib/connectionEditor.ts';
 import { connectionAppearanceDraft } from '../src/lib/appearance.ts';
+import { connectionOptions, connectionTestTimeout } from '../src/lib/connectionOptions.ts';
 import type { ConnectionInput } from '../src/lib/types';
 
 const connection: ConnectionInput = { id: 'docker', name: 'zenbase docker', host: 'localhost', port: 5432, database: 'zenbase', username: 'zenbase', ssl: false };
@@ -31,6 +32,7 @@ test('connection editor exposes linked tabs with a single keyboard tab stop', ()
   assert.match(html, /id="connection-editor-connection-tab"[^>]*aria-controls="connection-editor-connection-panel"[^>]*aria-selected="true" tabindex="0"/);
   assert.match(html, /id="connection-editor-appearance-tab"[^>]*aria-controls="connection-editor-appearance-panel"[^>]*aria-selected="false" tabindex="-1"/);
   assert.match(html, /id="connection-editor-appearance-panel"[^>]*hidden/);
+  assert.match(html, /id="connection-editor-options-tab"[^>]*aria-controls="connection-editor-options-panel"[^>]*aria-selected="false" tabindex="-1"/);
 });
 
 test('appearance panel retains connection inputs but hides them and exposes saved preferences', () => {
@@ -79,4 +81,21 @@ test('unchanged connection settings permit a local appearance-only save', () => 
     { id: 'other' }, { name: 'Renamed' }, { host: 'elsewhere' }, { port: 5433 },
     { database: 'other' }, { username: 'other' }, { password: 'changed' }, { ssl: true }
   ]) assert.equal(sameConnectionSettings(connection, { ...connection, ...change }), false);
+  assert.equal(sameConnectionSettings(connection, { ...connection, options: connectionOptions() }), true);
+  for (const change of [{ readOnly: true }, { connectTimeoutSeconds: 10 }, { queryTimeoutSeconds: 30 }, { lockTimeoutSeconds: 1 }]) {
+    assert.equal(sameConnectionSettings(connection, { ...connection, options: connectionOptions(change) }), false);
+  }
+});
+
+test('Options exposes bounded server timeouts and a clearly scoped read-only default', () => {
+  const html = renderEditor({ section: 'options', connection: { ...connection, options: connectionOptions({ readOnly: true, queryTimeoutSeconds: 30 }) } });
+  assert.doesNotMatch(html, /id="connection-editor-options-panel"[^>]*hidden/);
+  assert.match(html, /Connection timeout \(seconds\)/);
+  assert.match(html, /min="1" max="300"/);
+  assert.match(html, /min="0" max="86400"[^>]*value="30"/);
+  assert.match(html, /type="checkbox" checked/);
+  assert.match(html, /Read-only by default/);
+  assert.match(html, /Explicit SQL can override/);
+  assert.equal(connectionTestTimeout(), 12000);
+  assert.equal(connectionTestTimeout(connectionOptions({ connectTimeoutSeconds: 30 })), 34000);
 });
