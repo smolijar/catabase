@@ -215,6 +215,58 @@ async fn activate_connection(
 }
 
 #[tauri::command]
+async fn disconnect_connection(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), AppError> {
+    // Serialize against a new operation starting. Refuse active work rather than
+    // silently ending a transaction or abandoning a possible write.
+    let operations = state.cancels.lock().await;
+    if operations.values().any(|entry| entry.started) {
+        return Err(
+            CoreError::message("Cancel the running operation before disconnecting.").into(),
+        );
+    }
+    let tx = state.tx.try_lock().map_err(|_| {
+        CoreError::message("Connection is busy. Try disconnecting again once it is idle.")
+    })?;
+    if tx
+        .as_ref()
+        .is_some_and(|session| session.connection_id == id)
+    {
+        return Err(CoreError::message(
+            "Commit or roll back the open transaction before disconnecting.",
+        )
+        .into());
+    }
+    let mut pool = state.pool.try_write().map_err(|_| {
+        CoreError::message(
+            "Connection setup is in progress. Try disconnecting again once it finishes.",
+        )
+    })?;
+    state.storage.deactivate_connection(&id)?;
+    let mut active = state.active.write().await;
+    if active
+        .as_ref()
+        .is_some_and(|connection| connection.id == id)
+    {
+        *active = None;
+    }
+    if pool.as_ref().is_some_and(|pool| pool.connection_id == id)
+        && let Some(pool) = pool.take()
+    {
+        pool.pool.close();
+    }
+    drop(active);
+    drop(pool);
+    drop(tx);
+    drop(operations);
+    emit_pool_reset(&app);
+    Ok(())
+}
+
+#[tauri::command]
 async fn test_connection(input: ConnectionInput) -> Result<(), AppError> {
     test_pg_connection(&ConnectionFields::from(&input))
         .await
@@ -1224,6 +1276,7 @@ pub fn run() {
             cancel_query,
             connection_stats,
             delete_connection,
+            disconnect_connection,
             duplicate_connection,
             execute_query,
             enable_exit_guard,

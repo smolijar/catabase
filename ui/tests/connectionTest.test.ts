@@ -108,7 +108,11 @@ test('queries refresh the shared connection state without an extra probe or chan
   const tester = harness();
   const pending = deferred();
   const query = tester.query('zenbase', () => pending.promise);
-  assert.equal(tester.states.get('zenbase')?.status, 'testing');
+  assert.equal(tester.states.get('zenbase')?.status, 'running');
+  assert.equal(connectionHealth(tester.states.get('zenbase')!, 999999), 'running');
+  let probes = 0;
+  await tester.test('zenbase', async () => { probes++; });
+  assert.equal(probes, 0, 'a running query must not open another test connection');
   pending.resolve();
   await query;
   assert.deepEqual(tester.states.get('zenbase'), { status: 'success', checkedAt: 12345 });

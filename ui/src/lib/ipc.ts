@@ -28,6 +28,7 @@ export const api = {
   duplicateConnection: (id: string) => invoke<ConnectionRecord>('duplicate_connection', { id }),
   deleteConnection: (id: string) => invoke<void>('delete_connection', { id }),
   activateConnection: (id: string) => invoke<ConnectionRecord>('activate_connection', { id }),
+  disconnectConnection: (id: string) => invoke<void>('disconnect_connection', { id }),
   testConnection: (input: ConnectionInput) => invoke<void>('test_connection', { input }),
   parseConnectionUrl: (input: string) => invoke<ConnectionFields>('parse_connection_url', { input }),
   buildConnectionUrl: (fields: ConnectionFields) => invoke<string>('build_connection_url', { fields }),
