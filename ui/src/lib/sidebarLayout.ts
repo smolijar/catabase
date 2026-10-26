@@ -1,4 +1,4 @@
-export const DEFAULT_SIDEBAR_WIDTH = 340;
+export const DEFAULT_SIDEBAR_WIDTH = 280;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 640;
 
@@ -6,7 +6,7 @@ export function sidebarWidthBounds(workspaceWidth: number): { min: number; max: 
   const width = Number.isFinite(workspaceWidth) ? Math.max(0, workspaceWidth) : 1280;
   // Below 820px the sidebar overlays the editor instead of sharing its width.
   const editorWidth = width <= 820 ? 0 : 480;
-  const max = Math.floor(Math.max(0, Math.min(MAX_SIDEBAR_WIDTH, width - 58 - 7 - editorWidth)));
+  const max = Math.floor(Math.max(0, Math.min(MAX_SIDEBAR_WIDTH, width - 44 - 5 - editorWidth)));
   return { min: Math.min(MIN_SIDEBAR_WIDTH, max), max };
 }
 

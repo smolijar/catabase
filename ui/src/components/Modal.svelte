@@ -12,7 +12,7 @@
 </dialog>
 
 <style>
-  dialog { width: min(760px, calc(100vw - 40px)); max-height: calc(100vh - 48px); overflow: auto; padding: 0; color: #dce6f7; background: #0d1625; border: 1px solid #3a4b65; border-radius: 12px; box-shadow: 0 20px 70px #0009; }
-  dialog::backdrop { background: #030712b8; }
+  dialog { width: min(760px, calc(100vw - 40px)); max-height: calc(100vh - 48px); overflow: auto; padding: 0; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: 6px; box-shadow: var(--shadow-pop); }
+  dialog::backdrop { background: var(--backdrop); }
   dialog :global(.modal) { width: 100%; border: 0; box-shadow: none; border-radius: 0; }
 </style>

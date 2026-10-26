@@ -1,4 +1,4 @@
-export const DEFAULT_EDITOR_FONT_SIZE = 14;
+export const DEFAULT_EDITOR_FONT_SIZE = 13;
 export const MIN_EDITOR_FONT_SIZE = 8;
 export const MAX_EDITOR_FONT_SIZE = 48;
 export const EDITOR_FONT_STORAGE_KEY = 'catabase.editorFontSize';

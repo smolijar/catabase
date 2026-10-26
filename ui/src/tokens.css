@@ -1,0 +1,44 @@
+/* catabase design system — Tuxedo / Snow. Keep semantic state separate from connection identity. */
+:root, [data-theme='tuxedo'] {
+  color-scheme: dark;
+  --surface-0: #0b0c0e; --surface-1: #111215; --surface-2: #191a1f; --surface-3: #23252b;
+  --line: #24262c; --line-strong: #62666f;
+  --ink: #e9e7e2; --ink-muted: #a6a7ad; --ink-faint: #8b8e96;
+  --brand: #ff9d5c; --accent: #ff9d5c; --accent-soft: #33241a; --on-accent: #111215; --focus: #ffb47f;
+  --ok: #5fcf8c; --ok-soft: #13281c; --warn: #e8c24a; --warn-soft: #2c2511;
+  --danger: #ff7a72; --danger-soft: #3a1a1a; --info: #74b8ff; --info-soft: #152538;
+  --syn-string: #a9d98a; --syn-number: #7fbcff; --syn-literal: #d4a8ff; --syn-function: #6fd3c3;
+  --selection: #2b3a52;
+  --conn-red: #ff6b6b; --conn-red-soft: #3a1a1c;
+  --conn-amber: #f2c14e; --conn-amber-soft: #2e2712;
+  --conn-green: #5fd38d; --conn-green-soft: #12291c;
+  --conn-blue: #6cb2ff; --conn-blue-soft: #142538;
+  --conn-violet: #b69cff; --conn-violet-soft: #271f3d;
+  --shadow-pop: 0 0 0 1px #2e3037, 0 8px 24px #000000b3;
+  --backdrop: #0008;
+  --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace;
+}
+[data-theme='snow'] {
+  color-scheme: light;
+  --surface-0: #efeee9; --surface-1: #fafaf7; --surface-2: #ffffff; --surface-3: #e7e5df;
+  --line: #e2e0da; --line-strong: #8a8c93;
+  --ink: #16171a; --ink-muted: #53555c; --ink-faint: #5e6067;
+  --brand: #c9600f; --accent: #a14808; --accent-soft: #fcf0e4; --on-accent: #ffffff; --focus: #a14808;
+  --ok: #16794a; --ok-soft: #e1f3e8; --warn: #8a6200; --warn-soft: #f8efd4;
+  --danger: #c22f2b; --danger-soft: #fbe3e1; --info: #1d62b5; --info-soft: #e1ecfa;
+  --syn-string: #2e7a2e; --syn-number: #1d62b5; --syn-literal: #8040b8; --syn-function: #0e766a;
+  --selection: #d5e3f6;
+  --conn-red: #b92a26; --conn-red-soft: #fbe4e2;
+  --conn-amber: #825a00; --conn-amber-soft: #f8efd4;
+  --conn-green: #127041; --conn-green-soft: #e1f3e8;
+  --conn-blue: #1d62b5; --conn-blue-soft: #e1ecfa;
+  --conn-violet: #6b42c2; --conn-violet-soft: #ece6fb;
+  --shadow-pop: 0 0 0 1px #d9d7d0, 0 8px 24px #16171a1f;
+  --backdrop: #16171a44;
+}
+[data-conn='red'] { --accent: var(--conn-red); --accent-soft: var(--conn-red-soft); --focus: var(--conn-red); }
+[data-conn='amber'] { --accent: var(--conn-amber); --accent-soft: var(--conn-amber-soft); --focus: var(--conn-amber); }
+[data-conn='green'] { --accent: var(--conn-green); --accent-soft: var(--conn-green-soft); --focus: var(--conn-green); }
+[data-conn='blue'] { --accent: var(--conn-blue); --accent-soft: var(--conn-blue-soft); --focus: var(--conn-blue); }
+[data-conn='violet'] { --accent: var(--conn-violet); --accent-soft: var(--conn-violet-soft); --focus: var(--conn-violet); }
