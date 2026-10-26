@@ -2,16 +2,21 @@
   import { tick } from 'svelte';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
+  import { pickerMatches } from '../lib/workspacePicker';
+  import type { PickerItem } from '../lib/workspacePicker';
   export let label: string;
   export let placeholder: string;
-  export let items: Array<{ id: string; label: string; detail: string; group: string; disabled?: boolean; active?: boolean }>;
+  export let items: PickerItem[];
+  export let onSearch: (search: string) => void = () => {};
+  export let searchStatus = '';
   export let onSelect: (id: string) => void;
   export let onClose: () => void;
   let search = '';
   let selected = 0;
   let input: HTMLInputElement;
   let list: HTMLDivElement;
-  $: matches = items.filter(item => `${item.label} ${item.detail} ${item.group}`.toLowerCase().includes(search.toLowerCase())).slice(0, 80);
+  $: matches = pickerMatches(items, search);
+  $: onSearch(search);
   $: if (search !== undefined) selected = 0;
   $: if (selected >= matches.length) selected = 0;
 
@@ -35,11 +40,12 @@
     <div class="picker-list" bind:this={list} id="workspace-picker-list" role="listbox" aria-label={label}>
       {#each matches as item, index (item.id)}
         {#if index === 0 || matches[index - 1].group !== item.group}<div class="group-label" role="presentation">{item.group}</div>{/if}
-        <button id={`picker-option-${index}`} data-index={index} role="option" aria-selected={selected === index} class:selected={selected === index} disabled={item.disabled} on:focus={() => selected = index} on:keydown={keydown} on:click={() => onSelect(item.id)}>
+        <button id={`picker-option-${index}`} data-index={index} title={item.title ? `${item.title}\n${item.detail}` : undefined} role="option" aria-selected={selected === index} class:selected={selected === index} disabled={item.disabled} on:focus={() => selected = index} on:keydown={keydown} on:click={() => onSelect(item.id)}>
           <span class="item-label">{item.label}</span><span class="detail">{item.detail}</span>{#if item.active}<Icon name="check" size={14} />{/if}
         </button>
       {/each}
-      {#if !matches.length}<p class="empty">No matches. Try another name.</p>{/if}
+      {#if !matches.length && !searchStatus}<p class="empty">No matches. Try another name.</p>{/if}
+      {#if searchStatus}<p class="search-status" role="status">{searchStatus}</p>{/if}
     </div>
     <footer><span><kbd>↑</kbd> <kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></footer>
   </div>
@@ -56,5 +62,6 @@
   .picker-list button.selected { background: var(--surface-3); }
   .item-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .detail { margin-left: auto; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-faint); font: 11px/16px var(--font-mono); }
+  .search-status { margin: 8px; color: var(--ink-muted); font-size: 12px; }
   footer { display: flex; gap: 16px; border-top: 1px solid var(--line); padding: 8px 12px; color: var(--ink-faint); font-size: 11px; }
 </style>

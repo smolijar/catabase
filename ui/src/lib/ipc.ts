@@ -12,6 +12,7 @@ import type {
   ConnectionStats,
   HistoryPage,
   HistoryStats,
+  HistoryStorageStats,
   ForeignKeyLookup,
   ForeignKeyValues,
   QueryResult,
@@ -52,6 +53,7 @@ export const api = {
   historyPage: (search: string | null, offset = 0, limit = 50) =>
     invoke<HistoryPage>('history_page', { search, offset, limit }),
   historyStats: () => invoke<HistoryStats>('history_stats'),
+  historyStorageStats: () => invoke<HistoryStorageStats>('history_storage_stats'),
   historyGetResult: (id: number) => invoke<{ result: QueryResult | null }>('history_get_result', { id }),
   historyDelete: (id: number) => invoke<void>('history_delete', { id }),
   historyPurge: () => invoke<void>('history_purge'),

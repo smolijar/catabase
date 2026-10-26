@@ -111,6 +111,12 @@ export interface HistoryEntry {
   errorMessage?: string | null;
   hasResult: boolean;
   executedAt: string;
+  queryHash: string;
+  resultHash?: string | null;
+  querySize: number;
+  executionSize: number;
+  queryReferences: number;
+  resultReferences: number;
 }
 
 export interface HistoryPage {
@@ -122,6 +128,17 @@ export interface HistoryStats {
   total: number;
   errors: number;
   lastExecutedAt?: string | null;
+}
+
+export interface HistoryStorageStats {
+  storedBytes: number;
+  allocatedBytes: number;
+  savedBytes: number;
+  queryBytes: number;
+  resultBytes: number;
+  executionBytes: number;
+  uniqueQueries: number;
+  uniqueResults: number;
 }
 
 export interface SchemaColumn {

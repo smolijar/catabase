@@ -12,6 +12,7 @@
   import ResultsGrid from './components/ResultsGrid.svelte';
   import Modal from './components/Modal.svelte';
   import QueryTimingDialog from './components/QueryTimingDialog.svelte';
+  import HistoryStorageDialog from './components/HistoryStorageDialog.svelte';
   import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
   import SidebarResizer from './components/SidebarResizer.svelte';
@@ -23,6 +24,8 @@
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
+  import { createHistorySearch, formatBytes, historyEntryBytes } from './lib/history';
+  import type { HistorySearchState } from './lib/history';
   import { editorSearchShortcut } from './lib/editorSearch';
   import { DEFAULT_EDITOR_FONT_SIZE, EDITOR_FONT_STORAGE_KEY, fontSizeShortcut, resizeEditorFont, restoreEditorFontSize } from './lib/editorFont';
   import type { QueryTimingDetails } from './lib/queryTiming';
@@ -48,6 +51,7 @@
     ExecutionTarget,
     HistoryEntry,
     HistoryStats,
+    HistoryStorageStats,
     ForeignKeyLookup,
     QueryResult,
     SchemaItem,
@@ -141,6 +145,13 @@
   let historyTotal = 0;
   let historyLoading = false;
   let historyTimer: ReturnType<typeof setTimeout> | null = null;
+  let historyStorage: { entry: HistoryEntry | null; stats: HistoryStorageStats | null; error: string } | null = null;
+  let pickerHistory: HistorySearchState = { entries: [], total: 0, loading: false, error: '' };
+  const pickerHistorySearch = createHistorySearch(
+    (search) => api.historyPage(search || null, 0, 20),
+    (state) => pickerHistory = state,
+    errorMessage
+  );
   let resultsHeight = 360;
   let resizingResults = false;
   let showUpdatePreview = false;
@@ -184,8 +195,10 @@
     : [
       ...tabs.map(t => ({ id: `tab:${t.id}`, label: t.title, detail: t.kind === 'reference' ? 'Read-only reference' : 'Saved query', group: 'Open queries' })),
       ...schemaItems.map(item => ({ id: `table:${item.schema}.${item.name}`, label: `${item.schema}.${item.name}`, detail: `${item.columns.length} columns`, group: 'Tables & views' })),
+      ...pickerHistory.entries.map(entry => ({ id: `history:${entry.id}`, label: entry.query.replace(/\s+/g, ' ').slice(0, 200), title: entry.query, detail: `#${entry.id} · ${entry.durationMs} ms · ${connections.find(c => c.id === entry.connectionId)?.name ?? 'Unavailable connection'} · ${formatHistoryTime(entry.executedAt)} · ${entry.isError ? 'Error' : entry.hasResult ? 'Snapshot' : 'SQL only'}`, group: 'History', matched: true })),
       ...(['new', 'connections', 'schema', 'history', 'settings', 'find', 'format'] as const).map(id => ({ id: `command:${id}`, label: ({ new: 'New query', connections: 'Switch connection', schema: 'Browse schema', history: 'Query history', settings: 'Settings', find: 'Find in SQL', format: 'Format SQL' })[id], detail: id === 'new' ? '⌘T' : id === 'find' ? '⌘F' : '', group: 'Commands' }))
     ];
+  $: if (picker !== 'commands') pickerHistorySearch.cancel();
   $: running = operation !== null;
   $: visibleSidebarWidth = clampSidebarWidth(sidebarWidth, workspaceWidth);
   $: runningDuration = formatRunningDuration(operation?.startedAt, nowMs);
@@ -268,6 +281,7 @@
       if (toastTimer) window.clearTimeout(toastTimer);
       if (draftTimer) window.clearTimeout(draftTimer);
       if (historyTimer) window.clearTimeout(historyTimer);
+      pickerHistorySearch.cancel();
       stopResultsResize();
     };
   });
@@ -636,6 +650,12 @@
       return;
     }
     if (id.startsWith('tab:')) { switchTab(id.slice(4)); return; }
+    if (id.startsWith('history:')) {
+      const entry = pickerHistory.entries.find(entry => `history:${entry.id}` === id);
+      if (entry?.hasResult) void openHistory(entry);
+      else if (entry) openReadonlyTab(`history:${entry.id}`, `History #${entry.id}`, entry.query, entry.connectionId ?? null);
+      return;
+    }
     if (id.startsWith('table:')) {
       const item = schemaItems.find(t => `${t.schema}.${t.name}` === id.slice(6));
       if (item) newQuery(`select * from ${quoteIdent(item.schema)}.${quoteIdent(item.name)};`, tabConnectionId);
@@ -1243,6 +1263,22 @@
     historyTimer = setTimeout(() => void refreshHistory(), 300);
   }
 
+  function searchPickerHistory(search: string) {
+    if (picker === 'commands') pickerHistorySearch.search(search);
+  }
+
+  async function showHistoryStorage(entry: HistoryEntry | null = null) {
+    const request = { entry, stats: null as HistoryStorageStats | null, error: '' };
+    historyStorage = request;
+    if (entry) return;
+    try {
+      const stats = await api.historyStorageStats();
+      if (historyStorage === request) historyStorage = { ...request, stats };
+    } catch (error) {
+      if (historyStorage === request) historyStorage = { ...request, error: errorMessage(error) };
+    }
+  }
+
   async function refreshHistory(append = false) {
     const search = historySearch;
     historyLoading = true;
@@ -1579,7 +1615,7 @@
       <Cat mood={running ? 'prompt' : queryError ? 'error' : !activeConnection || result?.rowCount === 0 ? 'asleep' : 'awake'} />
       <span class="wordmark" aria-hidden="true"><b>CAT</b>ABASE<i></i></span>
     </div>
-    <button class="workspace-search" aria-label="Search tables, queries, commands" title="Search workspace (Cmd/Ctrl+K)" on:click={() => picker = 'commands'}><Icon name="search" size={14} /><span>Search tables, queries, commands</span><kbd>⌘K</kbd></button>
+    <button class="workspace-search" aria-label="Search tables, queries, history, commands" title="Search workspace (Cmd/Ctrl+K)" on:click={() => picker = 'commands'}><Icon name="search" size={14} /><span>Search tables, queries, history, commands</span><kbd>⌘K</kbd></button>
     {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : 'Exporting'} · {runningDuration}</button>{/if}
     <ConnectionPill
       switcher
@@ -1712,6 +1748,7 @@
             <div>
               <h2>History</h2>
               <p>{historyStats.total} queries · {historyStats.errors} errors</p>
+              <button class="history-storage-link" on:click={() => showHistoryStorage()} title="Show history disk usage and deduplication savings">Storage…</button>
             </div>
             <button class="danger-quiet icon-label-button" on:click={purgeHistory}><Icon name="trash" size={14} /> Purge</button>
           </div>
@@ -1730,7 +1767,8 @@
                 <time title={entry.executedAt}>{formatHistoryTime(entry.executedAt)}</time>
               </div>
               <code>{entry.query}</code>
-              <small>{entry.durationMs} ms{entry.rowCount != null ? ` · ${entry.rowCount} rows` : ''}</small>
+              <small>{entry.durationMs} ms{entry.rowCount != null ? ` · ${entry.rowCount} ${entry.rowCount === 1 ? 'row' : 'rows'}` : ''}</small>
+              <button class="history-storage-link" title="Show size, shared content and hashes for this execution" on:click={() => showHistoryStorage(entry)}>{formatBytes(historyEntryBytes(entry))}{entry.resultReferences > 1 ? ' · shared result' : entry.queryReferences > 1 ? ' · shared SQL' : ''}</button>
               <small class="history-connection">{connections.find((connection) => connection.id === entry.connectionId)?.name ?? 'Unavailable connection'}</small>
               {#if entry.errorMessage}<small class="history-error">{entry.errorMessage}</small>{/if}
               <div class="row-actions">
@@ -1957,8 +1995,11 @@
   </footer>
 </main>
 
+{#if historyStorage}
+  <HistoryStorageDialog entry={historyStorage.entry} stats={historyStorage.stats} error={historyStorage.error} onClose={() => historyStorage = null} />
+{/if}
 {#if picker}
-  <WorkspacePicker label={picker === 'connections' ? 'Switch connection' : 'Search workspace'} placeholder={picker === 'connections' ? 'Find a connection…' : 'Search tables, open queries, commands…'} items={pickerItems} onSelect={selectPickerItem} onClose={() => picker = null} />
+  <WorkspacePicker label={picker === 'connections' ? 'Switch connection' : 'Search workspace'} placeholder={picker === 'connections' ? 'Find a connection…' : 'Search tables, queries, history, commands…'} items={pickerItems} onSearch={searchPickerHistory} searchStatus={picker === 'commands' ? pickerHistory.loading ? 'Searching history…' : pickerHistory.error ? `History unavailable: ${pickerHistory.error}` : pickerHistory.total > 20 ? `Showing the 20 newest of ${pickerHistory.total} history matches. Refine your search for older entries.` : '' : ''} onSelect={selectPickerItem} onClose={() => picker = null} />
 {/if}
 
 {#if timingDetails}
