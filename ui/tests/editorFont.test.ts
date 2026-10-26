@@ -33,5 +33,5 @@ test('font size persists as a bounded integer; missing/corrupt preferences use t
   assert.equal(resizeEditorFont(MAX_EDITOR_FONT_SIZE, 'in'), MAX_EDITOR_FONT_SIZE);
   assert.equal(resizeEditorFont(MIN_EDITOR_FONT_SIZE, 'out'), MIN_EDITOR_FONT_SIZE);
   assert.equal(resizeEditorFont(25, 'reset'), DEFAULT_EDITOR_FONT_SIZE);
-  assert.equal(resizeEditorFont(NaN, 'in'), 15);
+  assert.equal(resizeEditorFont(NaN, 'in'), DEFAULT_EDITOR_FONT_SIZE + 1);
 });

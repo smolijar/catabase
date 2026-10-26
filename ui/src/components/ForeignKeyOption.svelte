@@ -17,12 +17,12 @@
 </button>
 
 <style>
-  .fk-option { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 28px; padding: 4px 6px; border: 0; border-bottom: 1px solid #35465d; border-radius: 0; background: #141e2b; color: #e4ebf5; text-align: left; box-shadow: none; font-size: 11px; }
+  .fk-option { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 28px; padding: 4px 6px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--surface-1); color: var(--ink); text-align: left; box-shadow: none; font-size: 11px; }
   strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; }
-  .key-only, .fk-key { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .fk-key { flex: 0 1 auto; min-width: 0; max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #a4b5ce; font-size: 10px; }
-  .fk-option:hover:not(:disabled) { background: #26364b; }
-  .fk-option.chosen { background: #293e5d; box-shadow: inset 2px 0 #8cb6f3; }
-  .fk-option:focus-visible { outline: 2px solid #90baff; outline-offset: -2px; }
+  .key-only, .fk-key { font-family: var(--font-mono); }
+  .fk-key { flex: 0 1 auto; min-width: 0; max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-muted); font-size: 11px; }
+  .fk-option:hover:not(:disabled) { background: var(--surface-2); }
+  .fk-option.chosen { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
+  .fk-option:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
   .fk-option:disabled { opacity: .45; }
 </style>

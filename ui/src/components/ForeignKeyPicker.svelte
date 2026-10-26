@@ -79,10 +79,10 @@
 
 <style>
   .fk-picker { display: flex; flex-direction: column; flex: 1; min-height: 140px; margin-top: 6px; }
-  .fk-source { flex-shrink: 0; margin: 0 0 6px; color: #a9bed5; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  input { flex-shrink: 0; width: 100%; min-height: 30px; padding: 6px 8px; border: 1px solid #596d87; border-radius: 5px; background: #111a26; color: #eef4ff; font-size: 11px; }
-  .fk-options { flex: 1; min-height: 56px; overflow-y: auto; overscroll-behavior: contain; margin-top: 6px; border: 1px solid #35465d; border-radius: 4px; }
-  .fk-status, .fk-note, .fk-error { flex-shrink: 0; margin: 4px 0; font-size: 10px; line-height: 1.5; }
-  .fk-status, .fk-note { color: #b9c6d8; }
-  .fk-error { color: #ffb6b6; overflow-wrap: anywhere; }
+  .fk-source { flex-shrink: 0; margin: 0 0 6px; color: var(--ink-muted); font: 11px/1.5 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  input { flex-shrink: 0; width: 100%; min-height: 30px; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--surface-1); color: var(--ink); font-size: 11px; }
+  .fk-options { flex: 1; min-height: 56px; overflow-y: auto; overscroll-behavior: contain; margin-top: 6px; border: 1px solid var(--line); border-radius: 4px; }
+  .fk-status, .fk-note, .fk-error { flex-shrink: 0; margin: 4px 0; font-size: 11px; line-height: 1.5; }
+  .fk-status, .fk-note { color: var(--ink-muted); }
+  .fk-error { color: var(--danger); overflow-wrap: anywhere; }
 </style>

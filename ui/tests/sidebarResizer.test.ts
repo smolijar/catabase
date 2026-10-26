@@ -35,7 +35,7 @@ test('sidebar divider exposes a keyboard-focusable vertical separator with its w
 
 test('accessible width follows the visible clamped layout, not an offscreen stored preference', () => {
   const html = renderResizer(640, 960);
-  assert.match(html, /aria-valuemax="415"/);
-  assert.match(html, /aria-valuenow="415"/);
-  assert.match(html, /aria-valuetext="415 pixels"/);
+  assert.match(html, /aria-valuemax="431"/);
+  assert.match(html, /aria-valuenow="431"/);
+  assert.match(html, /aria-valuetext="431 pixels"/);
 });

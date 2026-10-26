@@ -349,7 +349,7 @@
   }
 
   .dropdown-option.danger {
-    color: #fda4af;
+    color: var(--danger);
   }
 
   .dropdown-option:disabled {
@@ -358,7 +358,7 @@
 
   .unavailable-hint {
     flex: 0 0 auto;
-    color: #fbbf24;
+    color: var(--warn);
     font-size: 0.7rem;
   }
 

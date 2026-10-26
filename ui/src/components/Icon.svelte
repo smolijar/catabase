@@ -10,6 +10,8 @@
     | 'edit'
     | 'ellipsis'
     | 'history'
+    | 'format'
+    | 'explain'
     | 'key'
     | 'link'
     | 'plus'
@@ -34,11 +36,15 @@
   viewBox="0 0 24 24"
   fill="none"
   stroke="currentColor"
-  stroke-width="1.8"
+  stroke-width="1.75"
   stroke-linecap="round"
   stroke-linejoin="round"
 >
-  {#if name === 'database'}
+  {#if name === 'format'}
+    <path d="m4 7-3 5 3 5M20 7l3 5-3 5M14 4l-4 16M7 8h3M6 12h3M5 16h3" />
+  {:else if name === 'explain'}
+    <rect x="9" y="3" width="6" height="5" rx="1" /><path d="M12 8v4M5 16v-4h14v4" /><rect x="2" y="16" width="6" height="5" rx="1" /><rect x="16" y="16" width="6" height="5" rx="1" />
+  {:else if name === 'database'}
     <ellipse cx="12" cy="5" rx="7" ry="3" />
     <path d="M5 5v7c0 1.7 3.1 3 7 3s7-1.3 7-3V5" />
     <path d="M5 12v7c0 1.7 3.1 3 7 3s7-1.3 7-3v-7" />

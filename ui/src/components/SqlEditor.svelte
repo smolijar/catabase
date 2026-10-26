@@ -9,6 +9,7 @@
   import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController';
   import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
   import { onDestroy, onMount } from 'svelte';
+  import { format } from 'sql-formatter';
   import { schemaGroundedSql, schemaInlineIdentifierEnd, sqlCompletionContext, sqlJoinSuggestions, supermavenSchemaContext } from '../lib/sqlCompletion';
   import type { SqlCompletionContext } from '../lib/sqlCompletion';
   import { createInlineRequester, inlineEdit } from '../lib/supermavenInline';
@@ -16,7 +17,9 @@
 
   export let value = '';
   export let readOnly = false;
-  export let fontSize = 14;
+  export let fontSize = 13;
+  export let themeKey = 'tuxedo:none';
+  export let onPosition: (line: number, column: number) => void = () => {};
   export let supermavenEnabled = false;
   export let schemaItems: SchemaItem[] = [];
   export let viewState: monaco.editor.ICodeEditorViewState | null = null;
@@ -87,6 +90,7 @@
   let inlineProvider: monaco.IDisposable | undefined;
   let highlights: monaco.editor.IEditorDecorationsCollection | undefined;
   let keydownHandler: ((event: KeyboardEvent) => void) | undefined;
+  let cursorSubscription: monaco.IDisposable | undefined;
   const ownerTabId = tabId;
   let previousSchemaItems = schemaItems;
   const inlineRequester = createInlineRequester(
@@ -100,28 +104,21 @@
       getWorker: () => new EditorWorker()
     };
 
-    monaco.editor.defineTheme('catabase-dark', {
-      base: 'vs-dark',
-      inherit: true,
-      rules: [
-        { token: 'keyword', foreground: '9CDCFE' },
-        { token: 'string', foreground: 'CE9178' },
-        { token: 'comment', foreground: '6A9955' }
-      ],
-      colors: {
-        'editor.background': '#0b1020',
-        'editorLineNumber.foreground': '#526078',
-        'editorCursor.foreground': '#9ee493'
-      }
-    });
+    applyTheme(themeKey);
 
     editor = monaco.editor.create(host, {
       value,
       language: 'sql',
-      theme: 'catabase-dark',
+      theme: 'catabase',
       automaticLayout: true,
       fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize,
+      lineHeight: Math.round(fontSize * 20 / 13),
+      fontLigatures: false,
+      cursorWidth: 2,
+      padding: { top: 8, bottom: 8 },
+      renderLineHighlight: 'all',
+      lineNumbersMinChars: 3,
       // Keep Find/Replace over the text instead of inserting a top view zone.
       find: { addExtraSpaceOnTop: false },
       minimap: { enabled: false },
@@ -135,6 +132,9 @@
       wordWrap: 'on'
     });
     if (viewState) editor.restoreViewState(viewState);
+    const position = editor.getPosition();
+    if (position) onPosition(position.lineNumber, position.column);
+    cursorSubscription = editor.onDidChangeCursorPosition(({ position }) => onPosition(position.lineNumber, position.column));
 
     subscription = editor.onDidChangeModelContent((event) => {
       const next = editor?.getValue() ?? '';
@@ -235,6 +235,7 @@
   onDestroy(() => {
     inlineRequester.cancel();
     subscription?.dispose();
+    cursorSubscription?.dispose();
     completionProvider?.dispose();
     inlineProvider?.dispose();
     highlights?.clear();
@@ -250,7 +251,8 @@
     if (position) editor.setPosition(position);
   }
 
-  $: if (editor) editor.updateOptions({ readOnly, fontSize });
+  $: if (editor) editor.updateOptions({ readOnly, fontSize, lineHeight: Math.round(fontSize * 20 / 13) });
+  $: if (editor) applyTheme(themeKey);
   $: if (schemaItems !== previousSchemaItems) {
     previousSchemaItems = schemaItems;
     inlineRequester.cancel();
@@ -267,6 +269,51 @@
   function triggerSuggest() {
     if (!editor || readOnly) return;
     editor.trigger('catabase', 'editor.action.triggerSuggest', {});
+  }
+
+  function applyTheme(key: string) {
+    const style = getComputedStyle(document.documentElement);
+    const color = (name: string) => style.getPropertyValue(`--${name}`).trim();
+    monaco.editor.defineTheme('catabase', {
+      base: key.startsWith('snow') ? 'vs' : 'vs-dark', inherit: true,
+      rules: [
+        { token: 'keyword', foreground: color('accent').slice(1) },
+        { token: 'string', foreground: color('syn-string').slice(1) },
+        // Monaco's inherited SQL-specific string rule otherwise wins over "string".
+        { token: 'string.sql', foreground: color('syn-string').slice(1) },
+        { token: 'number', foreground: color('syn-number').slice(1) },
+        { token: 'predefined', foreground: color('syn-function').slice(1) },
+        { token: 'comment', foreground: color('ink-faint').slice(1), fontStyle: 'italic' }
+      ],
+      colors: {
+        'editor.background': color('surface-1'), 'editor.foreground': color('ink'),
+        'editorLineNumber.foreground': color('ink-faint'), 'editorLineNumber.activeForeground': color('ink'),
+        'editorCursor.foreground': color('accent'), 'editor.lineHighlightBackground': color('surface-2'),
+        'editor.lineHighlightBorder': '#00000000', 'editor.selectionBackground': color('selection'),
+        'editorWidget.background': color('surface-2'), 'editorWidget.border': color('line-strong'),
+        'editorSuggestWidget.background': color('surface-2'), 'editorSuggestWidget.border': color('line-strong'),
+        'editorSuggestWidget.foreground': color('ink'), 'editorSuggestWidget.selectedBackground': color('surface-3'),
+        'editorHoverWidget.background': color('surface-2'), 'editorHoverWidget.border': color('line-strong'),
+        'input.background': color('surface-1'), 'input.foreground': color('ink'), 'input.border': color('line-strong'),
+        'inputOption.activeBorder': color('accent'), 'inputOption.activeBackground': color('accent-soft'),
+        'focusBorder': color('focus'), 'editorError.foreground': color('danger')
+      }
+    });
+    monaco.editor.setTheme('catabase');
+  }
+
+  export function formatSql() {
+    if (!editor || readOnly) return;
+    const model = editor.getModel();
+    if (!model) return;
+    const selection = editor.getSelection();
+    const range = selection && !selection.isEmpty() ? selection : model.getFullModelRange();
+    // One undoable edit; parsing failures leave the draft untouched.
+    const formatted = format(model.getValueInRange(range), { language: 'postgresql', keywordCase: 'lower', tabWidth: 2 });
+    editor.pushUndoStop();
+    editor.executeEdits('format-sql', [{ range, text: formatted }]);
+    editor.pushUndoStop();
+    editor.focus();
   }
 
   export function find(replace = false) {

@@ -16,6 +16,10 @@
   import SqlEditor from './components/SqlEditor.svelte';
   import SidebarResizer from './components/SidebarResizer.svelte';
   import QueryTab from './components/QueryTab.svelte';
+  import Cat from './components/Cat.svelte';
+  import WorkspacePicker from './components/WorkspacePicker.svelte';
+  import { APPEARANCE_KEY, CONNECTION_COLORS, restoreAppearance, shortType } from './lib/appearance';
+  import type { ConnectionAppearance, ConnectionColor, ThemePreference } from './lib/appearance';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
@@ -56,6 +60,7 @@
 
   type SidebarTab = 'connections' | 'schema' | 'history' | 'settings';
   type EditorHandle = {
+    formatSql: () => void;
     find: (replace?: boolean) => void;
     getExecutionTarget: (splitSql: typeof api.splitSql) => Promise<ExecutionTarget>;
     clearHighlights: () => void;
@@ -88,6 +93,12 @@
   let workspaceLoaded = false;
   let editorRef: EditorHandle | undefined;
   let editorFontSize = DEFAULT_EDITOR_FONT_SIZE;
+  let theme: ThemePreference = 'tuxedo';
+  let systemLight = false;
+  let appearances: Record<string, ConnectionAppearance> = {};
+  let picker: 'commands' | 'connections' | null = null;
+  let cursorLine = 1;
+  let cursorColumn = 1;
   let running = false;
   let nowMs = Date.now();
   let operation: Operation | null = null;
@@ -154,6 +165,24 @@
   const nativeCleanup: Array<() => void> = [];
 
   $: activeConnection = connections.find((connection) => connection.id === tabConnectionId) ?? null;
+  $: connectionAppearance = appearances[tabConnectionId ?? ''] ?? { color: 'none' as ConnectionColor, environment: '' };
+  $: resolvedTheme = theme === 'system' ? systemLight ? 'snow' : 'tuxedo' : theme;
+  $: themeKey = `${resolvedTheme}:${connectionAppearance.color}`;
+  $: if (mounted) {
+    document.documentElement.dataset.theme = resolvedTheme;
+    document.documentElement.dataset.conn = connectionAppearance.color;
+  }
+  $: if (mounted && isTauri()) {
+    void getCurrentWindow().setTheme(theme === 'system' ? null : theme === 'snow' ? 'light' : 'dark')
+      .catch(error => console.warn('Could not update the native window theme', error));
+  }
+  $: pickerItems = picker === 'connections'
+    ? connections.map(c => ({ id: c.id, label: c.name, detail: c.username, group: 'Connections', active: c.id === tabConnectionId, disabled: running || Boolean(connectionMutation) }))
+    : [
+      ...tabs.map(t => ({ id: `tab:${t.id}`, label: t.title, detail: t.kind === 'reference' ? 'Read-only reference' : 'Saved query', group: 'Open queries' })),
+      ...schemaItems.map(item => ({ id: `table:${item.schema}.${item.name}`, label: `${item.schema}.${item.name}`, detail: `${item.columns.length} columns`, group: 'Tables & views' })),
+      ...(['new', 'connections', 'schema', 'history', 'settings', 'find', 'format'] as const).map(id => ({ id: `command:${id}`, label: ({ new: 'New query', connections: 'Switch connection', schema: 'Browse schema', history: 'Query history', settings: 'Settings', find: 'Find in SQL', format: 'Format SQL' })[id], detail: id === 'new' ? '⌘T' : id === 'find' ? '⌘F' : '', group: 'Commands' }))
+    ];
   $: running = operation !== null;
   $: visibleSidebarWidth = clampSidebarWidth(sidebarWidth, workspaceWidth);
   $: runningDuration = formatRunningDuration(operation?.startedAt, nowMs);
@@ -184,6 +213,15 @@
 
   onMount(() => {
     mounted = true;
+    const media = window.matchMedia('(prefers-color-scheme: light)');
+    systemLight = media.matches;
+    const onSystemTheme = (event: MediaQueryListEvent) => { systemLight = event.matches; };
+    media.addEventListener('change', onSystemTheme);
+    try {
+      const savedTheme = localStorage.getItem('catabase.theme');
+      if (savedTheme === 'snow' || savedTheme === 'system' || savedTheme === 'tuxedo') theme = savedTheme;
+      appearances = restoreAppearance(localStorage.getItem(APPEARANCE_KEY));
+    } catch { /* Appearance controls remain usable without storage. */ }
     try { editorFontSize = restoreEditorFontSize(localStorage.getItem(EDITOR_FONT_STORAGE_KEY)); } catch { /* Font controls still work without storage. */ }
     const savedResultsHeight = Number(localStorage.getItem('catabase.resultsHeight'));
     if (Number.isFinite(savedResultsHeight) && savedResultsHeight >= 180) resultsHeight = savedResultsHeight;
@@ -215,6 +253,7 @@
     return () => {
       flushDraftOnUnload();
       mounted = false;
+      media.removeEventListener('change', onSystemTheme);
       layoutObserver.disconnect();
       for (const cleanup of nativeCleanup) cleanup();
       window.removeEventListener('keydown', handleKeydown);
@@ -526,6 +565,7 @@
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented || closingWorkspace) return;
+    if (picker) return;
     const fontAction = fontSizeShortcut(event);
     if (fontAction) {
       event.preventDefault();
@@ -536,6 +576,11 @@
     if (showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails) return;
     const command = event.metaKey || event.ctrlKey;
     if (!command) return;
+    if (event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      picker = 'commands';
+      return;
+    }
     const searchAction = editorSearchShortcut(event);
     if (searchAction) {
       event.preventDefault();
@@ -561,6 +606,40 @@
       event.preventDefault();
       closeTab(activeTab);
     }
+  }
+
+  function setTheme(next: ThemePreference) {
+    theme = next;
+    try { localStorage.setItem('catabase.theme', next); } catch { /* Session preference still applies. */ }
+  }
+
+  function setConnectionAppearance(color: ConnectionColor, environment = connectionAppearance.environment) {
+    if (!tabConnectionId) return;
+    appearances = { ...appearances, [tabConnectionId]: { color, environment: environment.trim().slice(0, 16) } };
+    try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearances)); } catch { /* Session preference still applies. */ }
+  }
+
+  function formatSql() {
+    if (!workspaceLoaded || tabKind !== 'query') return;
+    try { editorRef?.formatSql(); } catch (error) { flash(`Could not format SQL: ${errorMessage(error)}`, true); }
+  }
+
+  function selectPickerItem(id: string) {
+    const mode = picker;
+    picker = null;
+    if (mode === 'connections') { void activateConnection(id); return; }
+    if (id.startsWith('tab:')) { switchTab(id.slice(4)); return; }
+    if (id.startsWith('table:')) {
+      const item = schemaItems.find(t => `${t.schema}.${t.name}` === id.slice(6));
+      if (item) newQuery(`select * from ${quoteIdent(item.schema)}.${quoteIdent(item.name)};`, tabConnectionId);
+      return;
+    }
+    const command = id.slice(8);
+    if (command === 'new') newQuery();
+    else if (command === 'connections') picker = 'connections';
+    else if (command === 'find') editorRef?.find();
+    else if (command === 'format') formatSql();
+    else if (command === 'schema' || command === 'history' || command === 'settings') { sidebar = command; sidebarOpen = true; }
   }
 
   async function loadSettings() {
@@ -1464,32 +1543,22 @@
 
 <main class="app-shell" inert={closingWorkspace}>
   <header class="toolbar">
-    <div class="brand">
-      <span class="brand-mark">C</span>
-      <div>
-        <strong>Catabase</strong>
-      </div>
+    <div class="brand" aria-label="catabase">
+      <Cat mood={running ? 'prompt' : queryError ? 'error' : !activeConnection || result?.rowCount === 0 ? 'asleep' : 'awake'} />
+      <span class="wordmark" aria-hidden="true"><b>CAT</b>ABASE<i></i></span>
     </div>
-    <button
-      class="primary run-button"
-      class:cancel-button={running}
-      on:click={runQuery}
-      disabled={Boolean(connectionMutation) || operation?.cancelling || (!running && (!activeConnection || tabKind !== 'query'))}
-      title={activeConnection ? 'Run current statement (Cmd/Ctrl+Enter)' : 'Add or activate a connection first'}
-    >
-      <Icon name={running ? 'stop' : 'play'} size={16} />
-      <span>{connectionMutation ? 'Please wait…' : operation?.cancelling ? 'Cancelling…' : running ? 'Cancel' : 'Run'}</span>
-      <kbd>⌘↵</kbd>
-    </button>
+    <button class="workspace-search" aria-label="Search tables, queries, commands" title="Search workspace (Cmd/Ctrl+K)" on:click={() => picker = 'commands'}><Icon name="search" size={14} /><span>Search tables, queries, commands</span><kbd>⌘K</kbd></button>
+    {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : 'Exporting'} · {runningDuration}</button>{/if}
     <ConnectionPill
+      switcher
+      environment={connectionAppearance.environment}
       connection={activeConnection}
       state={activeConnection ? connectionTests[activeConnection.id] ?? null : null}
       now={nowMs}
-      disabled={Boolean(connectionMutation)}
+      disabled={running || Boolean(connectionMutation)}
       onTest={testCurrentConnection}
-      onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }}
+      onChoose={() => picker = 'connections'}
     />
-    {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : 'Exporting'} · {runningDuration} · {tabs.find((tab) => tab.id === operation?.tabId)?.title}</button>{/if}
     {#if connectionMutation}<span class="operation-status" role="status">{connectionMutation}</span>{/if}
   </header>
 
@@ -1594,8 +1663,8 @@
                   <div class="schema-detail">
                     {#each item.columns as column (column.name)}
                       <div class="column-row">
-                        <span>{column.name}{column.primaryKey ? ' PK' : ''}{column.generated ? ' GEN' : ''}</span>
-                        <small>{column.typeName}{column.nullable ? '' : ' not null'}</small>
+                        <span title={column.name}>{column.name}{#if column.primaryKey}<b class="key-tag">PK</b>{/if}{#if column.generated}<b class="generated-tag">GEN</b>{/if}</span>
+                        <small title={`${column.typeName}${column.nullable ? '' : ' · not null'}`}>{shortType(column.typeName)}</small>
                       </div>
                     {/each}
                     <div class="row-actions"><button class="ddl-button" on:click={() => browseTable(item)}>Query table</button><button class="ddl-button" on:click={() => openDdl(item)}>Open DDL</button></div>
@@ -1641,6 +1710,24 @@
         {:else}
           <div class="panel-head"><div><h2>Settings</h2><p>Workspace preferences</p></div></div>
           <section class="settings-card">
+            <div class="settings-card-head"><strong>Appearance</strong></div>
+            <div class="theme-options" role="group" aria-label="Theme">
+              {#each ['tuxedo', 'snow', 'system'] as choice}
+                <button aria-pressed={theme === choice} on:click={() => setTheme(choice as ThemePreference)}>{choice === 'tuxedo' ? 'Tuxedo' : choice === 'snow' ? 'Snow' : 'System'}</button>
+              {/each}
+            </div>
+            {#if activeConnection}
+              <div>Connection color <span class="muted">{activeConnection.name}</span></div>
+              <div class="color-options" role="group" aria-label="Connection color">
+                {#each CONNECTION_COLORS as color}
+                  <button class="color-option" data-conn={color} style={color === 'none' ? '--accent: var(--brand)' : ''} aria-label={color === 'none' ? 'Default ginger' : color} title={color === 'none' ? 'Default ginger' : color} aria-pressed={connectionAppearance.color === color} on:click={() => setConnectionAppearance(color)}></button>
+                {/each}
+              </div>
+              <label>Environment label <input maxlength="16" placeholder="e.g. PROD, LOCAL" value={connectionAppearance.environment} on:change={(event) => setConnectionAppearance(connectionAppearance.color, event.currentTarget.value)} /></label>
+              <p>Color and label identify the connection; they do not change its database permissions.</p>
+            {/if}
+          </section>
+          <section class="settings-card">
             <div class="settings-card-head"><strong>Connection pool</strong><span>{settings.poolSize} connections</span></div>
             <label>
               Maximum connections
@@ -1672,6 +1759,7 @@
     {/if}
 
     <section class="main-pane" class:resizing={resizingResults} style={`--results-height: ${resultsHeight}px`}>
+      <div class="tabbar">
       <nav bind:this={tabBar} class="tabs" class:dragging={Boolean(draggingTab)} aria-label="Query tabs">
         {#each tabs as tab (tab.id)}
           <QueryTab
@@ -1690,8 +1778,16 @@
           />
         {/each}
         <button class="new-tab" aria-label="New query tab" title="New query tab (Cmd/Ctrl+T)" on:click={() => newQuery()}><Icon name="plus" size={16} /></button>
-        <button class="new-tab" aria-label="Find in SQL editor" title="Find in SQL editor (Cmd/Ctrl+F)" disabled={!workspaceLoaded} on:click={() => editorRef?.find()}><Icon name="search" size={16} /></button>
       </nav>
+      <div class="editor-actions" aria-label="SQL actions">
+        <button aria-label="Find in SQL editor" title="Find in SQL editor (Cmd/Ctrl+F)" disabled={!workspaceLoaded} on:click={() => editorRef?.find()}><Icon name="search" size={16} /></button>
+        <button aria-label="Format SQL" title="Format selected SQL, or the entire draft" disabled={!workspaceLoaded || tabKind !== 'query'} on:click={formatSql}><Icon name="format" size={16} /><span class="action-label">Format SQL</span></button>
+        <span class="deferred-action" title="Explain — coming later. A query-plan dialog is planned."><button disabled aria-label="Explain (coming later)"><Icon name="explain" size={16} /><span class="action-label">Explain</span></button></span>
+        <button class="primary run-button" class:cancel-button={running} on:click={runQuery} disabled={Boolean(connectionMutation) || operation?.cancelling || (!running && (!activeConnection || tabKind !== 'query'))} title={activeConnection ? 'Run current statement (Cmd/Ctrl+Enter)' : 'Add or activate a connection first'}>
+          <Icon name={running ? 'stop' : 'play'} size={14} /><span>{operation?.cancelling ? 'Cancelling…' : running ? 'Cancel' : 'Run'}</span><kbd>⌘↵</kbd>
+        </button>
+      </div>
+      </div>
 
       <div class="editor-pane">
         {#if txStatus.active}
@@ -1710,6 +1806,8 @@
             tabId={activeTab}
             readOnly={tabKind !== 'query'}
             fontSize={editorFontSize}
+            {themeKey}
+            onPosition={(line, column) => { cursorLine = line; cursorColumn = column; }}
             viewState={editorViewState}
             supermavenEnabled={supermaven.state === 'ready' && tabKind === 'query'}
             {schemaItems}
@@ -1801,7 +1899,7 @@
           <p class="empty">Query completed in {result.durationMs} ms with no rows.</p>
         {:else}
           <div class="empty-state results-empty">
-            <span class="empty-state-icon"><Icon name="play" size={22} /></span>
+            <Cat mood={queryError ? 'error' : 'asleep'} size={52} muted />
             <strong>{tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
             {#if tabKind === 'query'}<p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>{:else}<button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>{/if}
           </div>
@@ -1812,10 +1910,11 @@
 
   <footer class="status-bar">
     <ConnectionPill connection={activeConnection} state={activeConnection ? connectionTests[activeConnection.id] ?? null : null} now={nowMs} compact disabled={Boolean(connectionMutation)} onTest={testCurrentConnection} onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }} />
-    {#if activeConnection}<button class="status-link" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>Pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
+    {#if activeConnection}<button class="status-link" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
     <button class="status-link" title="Open schema browser" on:click={() => { sidebar = 'schema'; sidebarOpen = true; }}>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : 'Schema'}</button>
-    <span>{!workspaceLoaded ? 'Restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'Saving drafts…' : draftStatus === 'pending' ? 'Unsaved draft changes' : draftStatus === 'error' ? 'Draft save failed' : 'Drafts saved'}</span>
+    <span class="draft-status">{!workspaceLoaded ? 'restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'saving drafts…' : draftStatus === 'pending' ? 'saving drafts…' : draftStatus === 'error' ? 'draft save failed' : 'drafts saved'}</span>
     {#if running}<span>Running {runningDuration}</span>{/if}
+    <span class="cursor-position">Ln {cursorLine}, Col {cursorColumn}</span>
     {#if statusTiming}
       <button class="status-flash status-timing" title="Show query timing breakdown" aria-haspopup="dialog" on:click={() => (timingDetails = statusTiming)}>{statusFlash}</button>
     {:else}
@@ -1823,6 +1922,10 @@
     {/if}
   </footer>
 </main>
+
+{#if picker}
+  <WorkspacePicker label={picker === 'connections' ? 'Switch connection' : 'Search workspace'} placeholder={picker === 'connections' ? 'Find a connection…' : 'Search tables, open queries, commands…'} items={pickerItems} onSelect={selectPickerItem} onClose={() => picker = null} />
+{/if}
 
 {#if timingDetails}
   <QueryTimingDialog details={timingDetails} onClose={() => (timingDetails = null)} />
