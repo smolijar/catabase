@@ -30,7 +30,7 @@ pub use sql::{
     validate_transaction_sql,
 };
 pub use storage::{
-    ConnectionInput, ConnectionRecord, HistoryEntry, HistoryPage, HistoryStats, NewHistoryEntry,
-    Settings, Storage,
+    ConnectionInput, ConnectionRecord, HistoryEntry, HistoryPage, HistoryStats,
+    HistoryStorageStats, NewHistoryEntry, Settings, Storage,
 };
 pub use supermaven::{SupermavenClient, SupermavenCompletion, SupermavenRequest, SupermavenStatus};
