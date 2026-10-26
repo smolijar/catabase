@@ -49,7 +49,6 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .icon-strip { display: flex; flex-direction: column; align-items: stretch; gap: 4px; border-right: 1px solid var(--line); background: var(--surface-0); padding: 4px 0; }
 .icon-strip button { position: relative; width: 44px; height: 40px; flex-shrink: 0; border: 0; border-radius: 0; background: transparent; color: var(--ink-faint); padding: 0; }
 .icon-strip button:last-child { margin-top: auto; }
-.icon-strip button.active { background: var(--accent-soft); color: var(--accent); box-shadow: inset 2px 0 var(--accent); }
 .icon-strip button::after { position: absolute; z-index: 20; top: 50%; left: calc(100% + 8px); transform: translateY(-50%); visibility: hidden; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); box-shadow: var(--shadow-pop); color: var(--ink); content: attr(data-tooltip); font-size: 12px; padding: 4px 8px; pointer-events: none; white-space: nowrap; }
 .icon-strip button:hover::after, .icon-strip button:focus-visible::after { visibility: visible; }
 .sidebar { min-width: 0; width: 100%; overflow: auto; background: var(--surface-1); padding: 12px; }
@@ -112,10 +111,19 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .editor-actions > button:not(.primary) { border-color: transparent; background: transparent; color: var(--ink-muted); padding: 3px 6px; }
 .deferred-action { display: inline-flex; }
 .deferred-action button { border-color: transparent; background: transparent; color: var(--ink-muted); padding: 3px 6px; }
-.tab-chip { position: relative; display: flex; align-items: center; flex: 0 0 auto; min-width: 90px; max-width: 200px; height: 32px; border: 1px solid transparent; border-top: 2px solid transparent; border-radius: 4px 4px 0 0; background: transparent; color: var(--ink-muted); }
-.tab-chip.active { border-color: var(--line); border-top-color: var(--accent); border-bottom-color: var(--surface-1); background: var(--surface-1); color: var(--ink); }
+.tab-chip { position: relative; display: flex; align-items: center; flex: 0 0 auto; min-width: 90px; max-width: 200px; height: 32px; border: 0; border-radius: 0; background: transparent; color: var(--ink-muted); }
+.tab-chip:not(.active):hover { background: var(--surface-2); }
+/* Navigation and workspace selection share one treatment. Horizontal editor tabs
+   move the same 2px indicator to the top; hover never replaces the selected tint. */
+.icon-strip button.active, .connection-item.active, .tab-chip.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: inset 2px 0 var(--accent);
+}
+.tab-chip.active { box-shadow: inset 0 2px var(--accent); }
 .tab-label, .tab-close { border: 0; background: transparent; color: inherit; padding: 2px 6px; min-height: 26px; }
 .tab-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; user-select: none; touch-action: none; }
+.tab-label:hover:not(:disabled) { background: transparent; }
 .tab-label small { color: var(--ink-faint); font-size: 11px; }
 .tab-close { color: var(--ink-faint); margin-right: 2px; padding: 2px; }
 .pending-dot { color: var(--warn); }
@@ -125,6 +133,8 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .tab-chip.dragging { opacity: .5; }
 .tab-chip.drop-before { box-shadow: -2px 0 var(--accent); }
 .tab-chip.drop-after { box-shadow: 2px 0 var(--accent); }
+.tab-chip.active.drop-before { box-shadow: inset 0 2px var(--accent), -2px 0 var(--accent); }
+.tab-chip.active.drop-after { box-shadow: inset 0 2px var(--accent), 2px 0 var(--accent); }
 .tabs.dragging, .tabs.dragging * { cursor: grabbing; }
 .editor-pane, .editor-host { min-width: 0; min-height: 0; height: 100%; overflow: hidden; }
 .editor-pane { position: relative; display: flex; flex-direction: column; }
