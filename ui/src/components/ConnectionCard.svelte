@@ -7,6 +7,7 @@
   export let active = false;
   export let disabled = false;
   export let onActivate: () => void;
+  export let onDisconnect: () => void = () => {};
   export let onEdit: () => void;
   export let onDuplicate: () => void;
   export let onCopy: () => void;
@@ -17,6 +18,7 @@
   $: address = `${connection.username}@${connection.host}:${connection.port}/${connection.database}`;
   $: items = [
     { id: 'use', label: active ? 'In use in this tab' : 'Use in this tab', disabled: active || disabled },
+    ...(active ? [{ id: 'disconnect', label: 'Disconnect', disabled }] : []),
     { id: 'edit', label: 'Edit connection…', disabled },
     { id: 'duplicate', label: 'Duplicate connection', disabled },
     { id: 'delete', label: 'Delete connection…', danger: true, disabled }
@@ -89,6 +91,7 @@
   function handleAction(id: string) {
     if (disabled) return;
     if (id === 'use') activate();
+    else if (id === 'disconnect') onDisconnect();
     else if (id === 'edit') onEdit();
     else if (id === 'duplicate') onDuplicate();
     else if (id === 'delete') onDelete();

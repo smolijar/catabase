@@ -270,6 +270,13 @@ impl Storage {
         Ok(record.map(resolve_connection_password))
     }
 
+    /// Disconnecting keeps credentials and drafts; it only clears the default.
+    pub fn deactivate_connection(&self, id: &str) -> Result<(), CoreError> {
+        self.lock()?
+            .execute("UPDATE connections SET is_active = 0 WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     pub fn save_connection(&self, input: ConnectionInput) -> Result<ConnectionRecord, CoreError> {
         self.save_connection_inner(input, true)
     }
@@ -1039,6 +1046,17 @@ mod tests {
         assert!(second.is_active);
         assert_eq!(storage.activate_connection(&first.id).unwrap().id, first.id);
         assert_eq!(storage.active_connection().unwrap().unwrap().id, first.id);
+        storage.save_draft("workspace.v1", "saved SQL").unwrap();
+        storage.deactivate_connection(&second.id).unwrap();
+        assert_eq!(storage.active_connection().unwrap().unwrap().id, first.id);
+        storage.deactivate_connection(&first.id).unwrap();
+        assert!(storage.active_connection().unwrap().is_none());
+        assert_eq!(storage.list_connections().unwrap().len(), 2);
+        assert_eq!(
+            storage.load_draft("workspace.v1").unwrap().as_deref(),
+            Some("saved SQL")
+        );
+        assert!(storage.activate_connection(&first.id).unwrap().is_active);
     }
 
     #[test]

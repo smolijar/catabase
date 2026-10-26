@@ -177,7 +177,10 @@
       .catch(error => console.warn('Could not update the native window theme', error));
   }
   $: pickerItems = picker === 'connections'
-    ? connections.map(c => ({ id: c.id, label: c.name, detail: c.username, group: 'Connections', active: c.id === tabConnectionId, disabled: running || Boolean(connectionMutation) }))
+    ? [
+      ...connections.map(c => ({ id: c.id, label: c.name, detail: c.username, group: 'Connections', active: c.id === tabConnectionId, disabled: running || Boolean(connectionMutation) })),
+      ...(activeConnection ? [{ id: 'command:disconnect', label: `Disconnect ${activeConnection.name}`, detail: 'Keep saved connection & drafts', group: 'Actions', disabled: running || Boolean(connectionMutation) }] : [])
+    ]
     : [
       ...tabs.map(t => ({ id: `tab:${t.id}`, label: t.title, detail: t.kind === 'reference' ? 'Read-only reference' : 'Saved query', group: 'Open queries' })),
       ...schemaItems.map(item => ({ id: `table:${item.schema}.${item.name}`, label: `${item.schema}.${item.name}`, detail: `${item.columns.length} columns`, group: 'Tables & views' })),
@@ -627,7 +630,11 @@
   function selectPickerItem(id: string) {
     const mode = picker;
     picker = null;
-    if (mode === 'connections') { void activateConnection(id); return; }
+    if (mode === 'connections') {
+      if (id === 'command:disconnect' && tabConnectionId) void disconnectConnection(tabConnectionId);
+      else void activateConnection(id);
+      return;
+    }
     if (id.startsWith('tab:')) { switchTab(id.slice(4)); return; }
     if (id.startsWith('table:')) {
       const item = schemaItems.find(t => `${t.schema}.${t.name}` === id.slice(6));
@@ -1020,7 +1027,32 @@
   }
 
   function testCurrentConnection() {
-    if (activeConnection && !connectionMutation) void testSavedConnection(activeConnection);
+    if (activeConnection && !connectionMutation && operation?.connectionId !== activeConnection.id) void testSavedConnection(activeConnection);
+  }
+
+  async function disconnectConnection(id: string) {
+    if (operation || connectionMutation) return;
+    captureActive();
+    const affected = tabs.filter(tab => tab.connectionId === id);
+    const count = affected.reduce((total, tab) => total + tab.pendingChanges.length, 0);
+    if (count && !confirm(`Disconnecting will discard ${count} staged edit${count === 1 ? '' : 's'} across this connection’s tabs. Continue?`)) return;
+    connectionMutation = 'Disconnecting…';
+    try {
+      await api.disconnectConnection(id);
+      connectionTester.invalidate(id);
+      for (const tab of affected) patchTab(tab.id, {
+        connectionId: null, editMode: false, pendingChanges: [],
+        session: tab.session ? { ...tab.session, data: { ...tab.session.data, rows: cloneRows(tab.originalRows) } } : null
+      });
+      await loadConnections();
+      void refreshTxStatus();
+      void loadConnectionStats();
+      flash('Disconnected. Saved connection and query drafts kept; existing results are read-only.');
+    } catch (error) {
+      flash(errorMessage(error), true);
+    } finally {
+      connectionMutation = null;
+    }
   }
 
   async function deleteConnection(id: string) {
@@ -1551,6 +1583,7 @@
     {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : 'Exporting'} · {runningDuration}</button>{/if}
     <ConnectionPill
       switcher
+      activity={operation?.connectionId === tabConnectionId ? operation.cancelling ? 'cancelling' : 'running' : null}
       environment={connectionAppearance.environment}
       connection={activeConnection}
       state={activeConnection ? connectionTests[activeConnection.id] ?? null : null}
@@ -1620,6 +1653,7 @@
                     active={connection.id === tabConnectionId}
                     disabled={running || Boolean(connectionMutation)}
                     onActivate={() => activateConnection(connection.id)}
+                    onDisconnect={() => disconnectConnection(connection.id)}
                     onEdit={() => editConnection(connection)}
                     onDuplicate={() => duplicateConnection(connection.id)}
                     onCopy={() => copyConnection(connection)}
@@ -1909,7 +1943,7 @@
   </section>
 
   <footer class="status-bar">
-    <ConnectionPill connection={activeConnection} state={activeConnection ? connectionTests[activeConnection.id] ?? null : null} now={nowMs} compact disabled={Boolean(connectionMutation)} onTest={testCurrentConnection} onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }} />
+    <ConnectionPill connection={activeConnection} state={activeConnection ? connectionTests[activeConnection.id] ?? null : null} activity={operation?.connectionId === tabConnectionId ? operation.cancelling ? 'cancelling' : 'running' : null} now={nowMs} compact disabled={Boolean(connectionMutation)} onTest={testCurrentConnection} onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }} />
     {#if activeConnection}<button class="status-link" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
     <button class="status-link" title="Open schema browser" on:click={() => { sidebar = 'schema'; sidebarOpen = true; }}>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : 'Schema'}</button>
     <span class="draft-status">{!workspaceLoaded ? 'restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'saving drafts…' : draftStatus === 'pending' ? 'saving drafts…' : draftStatus === 'error' ? 'draft save failed' : 'drafts saved'}</span>

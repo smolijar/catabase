@@ -1,11 +1,12 @@
 export type ConnectionTestState =
   | { status: 'testing' }
+  | { status: 'running' }
   | { status: 'success'; checkedAt: number }
   | { status: 'error'; message: string; checkedAt: number };
 
 export function connectionHealth(state: ConnectionTestState | null, now = Date.now()) {
   if (!state) return 'unknown';
-  if (state.status === 'testing') return 'testing';
+  if (state.status === 'testing' || state.status === 'running') return state.status;
   return now - state.checkedAt >= 60_000 ? 'stale' : state.status;
 }
 
@@ -52,7 +53,7 @@ export function createConnectionTester(
     // or configuration invalidation supersedes older responses.
     const request = { promise: Promise.resolve() };
     requests.set(id, request);
-    onChange(id, { status: 'testing' });
+    onChange(id, { status: 'running' });
     try {
       const result = await execute();
       if (requests.get(id) === request) onChange(id, { status: 'success', checkedAt: clock() });
