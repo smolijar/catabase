@@ -24,6 +24,8 @@ pub enum CoreError {
     Message(String),
     #[error("{0}")]
     Cancelled(String),
+    #[error("{0}")]
+    ConnectionDiscarded(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -10,12 +10,11 @@ use std::{
 use catabase_core::{
     ApplyUpdatesResult, CommandTimings, ConnectionFields, ConnectionInput, ConnectionRecord,
     ConnectionStats, CoreError, ForeignKeyLookup, ForeignKeyValues, HistoryPage, HistoryStats,
-    NewHistoryEntry, PgCancelToken, PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryResult,
+    NewHistoryEntry, PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryCancellation, QueryResult,
     ReflectionCache, RowUpdate, SchemaTree, Settings, StatementKind, StatementRange, Storage,
     SupermavenClient, SupermavenCompletion, SupermavenRequest, SupermavenStatus,
-    apply_row_updates as apply_rows, build_connection_url as build_url, cancel_query_token,
-    checkout_pool_client, classify_statement, connect_client,
-    connection_stats as load_connection_stats, create_pool, execute_on_client,
+    apply_row_updates as apply_rows, build_connection_url as build_url, checkout_pool_client,
+    classify_statement, connection_stats as load_connection_stats, create_pool, execute_on_client,
     execute_on_client_with_reflection, get_ddl_on_client as load_ddl,
     lookup_foreign_key_values as lookup_fk_values, parse_connection_url as parse_url,
     split_editor_statements, split_statements, test_connection as test_pg_connection,
@@ -53,18 +52,16 @@ struct TxSession {
 }
 
 struct CancelEntry {
-    token: Option<PgCancelToken>,
-    ssl: bool,
-    cancelled: Arc<AtomicBool>,
+    started: bool,
+    signal: Arc<QueryCancellation>,
     created_at: Instant,
 }
 
 impl CancelEntry {
     fn pending() -> Self {
         Self {
-            token: None,
-            ssl: false,
-            cancelled: Arc::new(AtomicBool::new(false)),
+            started: false,
+            signal: Arc::new(QueryCancellation::default()),
             created_at: Instant::now(),
         }
     }
@@ -295,11 +292,16 @@ async fn execute_query(
     read_only_replay: Option<bool>,
 ) -> Result<QueryResult, AppError> {
     let command_start = Instant::now();
-    begin_operation(&state, &query_token).await;
+    let cancellation = begin_operation(&state, &query_token).await;
     let outcome = async {
-        let active = requested_connection(&state, connection_id.as_deref()).await?;
-        ensure_transaction_connection(&state, &active.id).await?;
-        let pool = active_pool(&state, &active).await?;
+        let (active, pool) = cancellation
+            .setup(async {
+                let active = requested_connection(&state, connection_id.as_deref()).await?;
+                ensure_transaction_connection(&state, &active.id).await?;
+                let pool = active_pool(&state, &active).await?;
+                Ok::<_, AppError>((active, pool))
+            })
+            .await?;
         let result = run_query_with_state(
             &app,
             &state,
@@ -366,41 +368,53 @@ async fn execute_query(
 
 #[tauri::command]
 async fn apply_row_updates(
+    app: AppHandle,
     state: State<'_, AppState>,
     connection_id: String,
     query_token: String,
     updates: Vec<RowUpdate>,
 ) -> Result<ApplyUpdatesResult, AppError> {
-    begin_operation(&state, &query_token).await;
+    let cancellation = begin_operation(&state, &query_token).await;
     let outcome = async {
         let active = requested_connection(&state, Some(&connection_id)).await?;
-        let tx = state.tx.lock().await;
+        let mut tx = cancellation
+            .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
+            .await?;
         if let Some(session) = tx.as_ref() {
             check_transaction_connection(&session.connection_id, &active.id)?;
-            let cancelled =
-                register_cancel(&state, &query_token, &session.client, session.ssl).await?;
-            let result = apply_rows(&session.client, &updates, true, &cancelled)
-                .await
-                .map_err(AppError::from);
+            let result = cancellation
+                .run(
+                    &session.client,
+                    session.ssl,
+                    apply_rows(&session.client, &updates, true, cancellation.flag()),
+                )
+                .await;
             state.cancels.lock().await.remove(&query_token);
-            result
+            if must_discard(&result) || session.client.is_closed() {
+                discard_transaction(&mut tx);
+                invalidate_pool_reflection(&state, &active.id).await;
+            }
+            result.map_err(AppError::from)
         } else {
             // Hold the transaction-state lock so another request cannot begin a
             // manual transaction halfway through an independently committed batch.
-            let pool = active_pool(&state, &active).await?;
-            let client = checkout_pool_client(&pool.pool)
-                .await
-                .map_err(AppError::from)?;
-            let cancelled = register_cancel(&state, &query_token, &client, active.ssl).await?;
-            let result = apply_rows(&client, &updates, false, &cancelled)
-                .await
-                .map_err(AppError::from);
+            let pool = cancellation.setup(active_pool(&state, &active)).await?;
+            let client = cancellation.setup(checkout_pool_client(&pool.pool)).await?;
+            let result = cancellation
+                .run(
+                    &client,
+                    active.ssl,
+                    apply_rows(&client, &updates, false, cancellation.flag()),
+                )
+                .await;
             state.cancels.lock().await.remove(&query_token);
-            result
+            release_client(client, &result);
+            result.map_err(AppError::from)
         }
     }
     .await;
     state.cancels.lock().await.remove(&query_token);
+    let _ = app.emit("tx-changed", tx_status_inner(&state).await);
     outcome
 }
 
@@ -414,20 +428,12 @@ async fn cancel_query(
     let entry = cancels
         .entry(query_token)
         .or_insert_with(CancelEntry::pending);
-    entry.cancelled.store(true, Ordering::Release);
-    if let Some(token) = entry.token.clone() {
-        cancel_query_token(token, entry.ssl)
-            .await
-            .map_err(AppError::from)?;
-        return Ok(CancelResult {
-            cancelled: true,
-            message: "Server-side cancel sent.".to_string(),
-        });
-    }
-
+    // Never await network I/O while holding the shared registry. The query
+    // owner sends cancellation and owns the bounded cleanup of its client.
+    entry.signal.request();
     Ok(CancelResult {
         cancelled: true,
-        message: "Cancellation requested before query execution.".to_string(),
+        message: "Cancellation requested.".to_string(),
     })
 }
 
@@ -521,23 +527,30 @@ async fn foreign_key_values(
     query_token: String,
     request: ForeignKeyLookup,
 ) -> Result<ForeignKeyValues, AppError> {
-    begin_operation(&state, &query_token).await;
+    let cancelled = begin_operation(&state, &query_token).await;
     let outcome = async {
         let active = requested_connection(&state, Some(&connection_id)).await?;
         // An isolated connection cannot steal, mutate or abort the user's held
         // transaction, even with a one-client pool. Preview committed rows only.
-        let client = connect_client(&ConnectionFields::from(&active)).await.map_err(AppError::from)?;
-        let cancelled = register_cancel(&state, &query_token, &client, active.ssl).await?;
-        let outcome = async {
-            if cancelled.load(Ordering::Acquire) {
+        let pool = create_pool(&ConnectionFields::from(&active), 1)?;
+        let client = cancelled.setup(checkout_pool_client(&pool)).await?;
+        let outcome = cancelled.run(&client, active.ssl, async {
+            if cancelled.flag().load(Ordering::Acquire) {
                 return Err(CoreError::Cancelled("Foreign-key preview cancelled.".into()));
             }
             client.batch_execute("BEGIN READ ONLY; SET LOCAL statement_timeout = '5s'; SET LOCAL lock_timeout = '1s'").await?;
             lookup_fk_values(&client, &request).await
-        }.await;
+        }).await;
         // Late cancellation must never interrupt cleanup or another request.
         state.cancels.lock().await.remove(&query_token);
-        client.batch_execute("ROLLBACK").await.map_err(|error| AppError::from(CoreError::from(error)))?;
+        if !must_discard(&outcome)
+            && let Err(error) = bounded_rollback(&client).await
+        {
+            drop(PooledPgClient::take(client));
+            return Err(AppError::from(error));
+        }
+        // This preview owns an isolated connection, not the workspace pool.
+        drop(PooledPgClient::take(client));
         outcome.map_err(AppError::from)
     }.await;
     state.cancels.lock().await.remove(&query_token);
@@ -681,14 +694,17 @@ async fn run_query_with_state(
     if run.read_only_replay {
         return execute_read_only_replay(state, &run).await;
     }
+    let cancellation = register_cancel(state, run.query_token).await;
     match classify_statement(run.sql) {
         StatementKind::TxBegin => {
-            let mut tx = state.tx.lock().await;
+            let mut tx = cancellation
+                .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
+                .await?;
             if tx.is_some() {
                 return Err(CoreError::message("Transaction already active"));
             }
 
-            let client = checkout_pool_client(run.pool).await?;
+            let client = cancellation.setup(checkout_pool_client(run.pool)).await?;
             let reflection = Arc::new(ReflectionCache::default());
             let result = execute_with_cancel(
                 state,
@@ -700,7 +716,16 @@ async fn run_query_with_state(
                 run.offset,
                 run.page_size,
             )
-            .await?;
+            .await;
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    // BEGIN may have reached the server even when cancellation
+                    // raced its response. Never recycle an ambiguous session.
+                    drop(PooledPgClient::take(client));
+                    return Err(error);
+                }
+            };
             let started_at = chrono::Utc::now().to_rfc3339();
             *tx = Some(TxSession {
                 connection_id: run.active.id.clone(),
@@ -741,10 +766,12 @@ async fn run_query_with_state(
         }
         _ => {
             {
-                let tx = state.tx.lock().await;
+                let mut tx = cancellation
+                    .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
+                    .await?;
                 if let Some(session) = tx.as_ref() {
                     check_transaction_connection(&session.connection_id, &run.active.id)?;
-                    return execute_with_cancel(
+                    let result = execute_with_cancel(
                         state,
                         &session.client,
                         &session.reflection,
@@ -755,11 +782,18 @@ async fn run_query_with_state(
                         run.page_size,
                     )
                     .await;
+                    if must_discard(&result) || session.client.is_closed() {
+                        discard_transaction(&mut tx);
+                        invalidate_pool_reflection(state, &run.active.id).await;
+                    }
+                    drop(tx);
+                    let _ = app.emit("tx-changed", tx_status_inner(state).await);
+                    return result;
                 }
             }
 
-            let client = checkout_pool_client(run.pool).await?;
-            execute_with_cancel(
+            let client = cancellation.setup(checkout_pool_client(run.pool)).await?;
+            let result = execute_with_cancel(
                 state,
                 &client,
                 run.reflection,
@@ -769,7 +803,9 @@ async fn run_query_with_state(
                 run.offset,
                 run.page_size,
             )
-            .await
+            .await;
+            release_client(client, &result);
+            result
         }
     }
 }
@@ -788,40 +824,50 @@ async fn execute_read_only_replay(
     run: &QueryRun<'_>,
 ) -> Result<QueryResult, CoreError> {
     validate_replay_sql(run.sql)?;
-    let tx = state.tx.lock().await;
+    let cancelled = register_cancel(state, run.query_token).await;
+    let tx = cancelled
+        .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
+        .await?;
     if tx.is_some() {
         return Err(CoreError::message(
             "Commit or roll back the open transaction before loading more rows or re-running an export. You can still save the loaded rows.",
         ));
     }
-    let client = checkout_pool_client(run.pool).await?;
-    let cancelled = register_cancel(state, run.query_token, &client, run.ssl).await?;
+    let client = cancelled.setup(checkout_pool_client(run.pool)).await?;
     // Enforce read-only in PostgreSQL itself: a SELECT-like WITH statement may
     // contain INSERT/UPDATE/DELETE, which a lexical prefix check cannot detect.
-    let begin = client.batch_execute("BEGIN READ ONLY").await;
-    let result = match begin {
-        Ok(()) if cancelled.load(Ordering::Acquire) => Err(CoreError::Cancelled(
-            "Replay cancelled before execution.".into(),
-        )),
-        Ok(()) => {
-            execute_on_client_with_reflection(
-                &client,
-                run.sql,
-                run.offset,
-                run.page_size,
-                Some(&cancelled),
-                run.reflection,
-            )
-            .await
-        }
-        Err(error) => Err(error.into()),
-    };
-    // Detach cancellation before cleanup so a late Cancel cannot interrupt the
-    // ROLLBACK or hit a subsequent borrower of this pooled connection.
+    let result = cancelled
+        .run(&client, run.ssl, async {
+            let begin = client.batch_execute("BEGIN READ ONLY").await;
+            match begin {
+                Ok(()) if cancelled.flag().load(Ordering::Acquire) => Err(CoreError::Cancelled(
+                    "Replay cancelled before execution.".into(),
+                )),
+                Ok(()) => {
+                    execute_on_client_with_reflection(
+                        &client,
+                        run.sql,
+                        run.offset,
+                        run.page_size,
+                        Some(cancelled.flag()),
+                        run.reflection,
+                    )
+                    .await
+                }
+                Err(error) => Err(error.into()),
+            }
+        })
+        .await;
+    // No sender remains in flight after run() returns successfully. On timeout
+    // close the transport instead of trying ROLLBACK over a stalled connection.
     state.cancels.lock().await.remove(run.query_token);
-    if let Err(error) = client.batch_execute("ROLLBACK").await {
+    if must_discard(&result) {
         drop(PooledPgClient::take(client));
-        return Err(error.into());
+        return result;
+    }
+    if let Err(error) = bounded_rollback(&client).await {
+        drop(PooledPgClient::take(client));
+        return Err(error);
     }
     drop(tx);
     result
@@ -838,16 +884,21 @@ async fn execute_with_cancel(
     offset: usize,
     page_size: usize,
 ) -> Result<QueryResult, CoreError> {
-    let cancelled = register_cancel(state, query_token, client, ssl).await?;
-    let result = execute_on_client_with_reflection(
-        client,
-        sql,
-        offset,
-        page_size,
-        Some(&cancelled),
-        reflection,
-    )
-    .await;
+    let cancelled = register_cancel(state, query_token).await;
+    let result = cancelled
+        .run(
+            client,
+            ssl,
+            execute_on_client_with_reflection(
+                client,
+                sql,
+                offset,
+                page_size,
+                Some(cancelled.flag()),
+                reflection,
+            ),
+        )
+        .await;
     state.cancels.lock().await.remove(query_token);
     result
 }
@@ -861,7 +912,10 @@ async fn finish_tx_with_sql(
     page_size: usize,
     connection_id: &str,
 ) -> Result<QueryResult, CoreError> {
-    let mut tx = state.tx.lock().await;
+    let cancellation = register_cancel(state, query_token).await;
+    let mut tx = cancellation
+        .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
+        .await?;
     if let Some(session) = tx.as_ref() {
         check_transaction_connection(&session.connection_id, connection_id)?;
     }
@@ -879,13 +933,45 @@ async fn finish_tx_with_sql(
         page_size,
     )
     .await;
-    if result.is_ok() {
+    if must_discard(&result) || session.client.is_closed() {
+        discard_transaction(&mut tx);
+        invalidate_pool_reflection(state, connection_id).await;
+    } else if result.is_ok() {
         *tx = None;
         invalidate_pool_reflection(state, connection_id).await;
     }
     drop(tx);
     let _ = app.emit("tx-changed", tx_status_inner(state).await);
     result
+}
+
+fn must_discard<T>(result: &Result<T, CoreError>) -> bool {
+    matches!(result, Err(CoreError::ConnectionDiscarded(_)))
+}
+
+fn release_client<T>(client: PooledPgClient, result: &Result<T, CoreError>) {
+    if must_discard(result) || client.is_closed() {
+        // take() detaches the object from the pool; dropping ClientWrapper
+        // aborts its driver task and closes the socket, even with queued SQL.
+        drop(PooledPgClient::take(client));
+    }
+}
+
+fn discard_transaction(tx: &mut Option<TxSession>) {
+    if let Some(session) = tx.take() {
+        drop(PooledPgClient::take(session.client));
+    }
+}
+
+async fn bounded_rollback(client: &PgClient) -> Result<(), CoreError> {
+    tokio::time::timeout(Duration::from_secs(5), client.batch_execute("ROLLBACK"))
+        .await
+        .map_err(|_| {
+            CoreError::ConnectionDiscarded(
+                "The database did not respond during cleanup; its session was closed.".into(),
+            )
+        })?
+        .map_err(Into::into)
 }
 
 async fn finish_tx(
@@ -964,37 +1050,26 @@ async fn ensure_no_transaction<'a>(
 }
 
 fn prune_pending_cancels(cancels: &mut HashMap<String, CancelEntry>) {
-    cancels.retain(|_, entry| {
-        entry.token.is_some() || entry.created_at.elapsed() < Duration::from_secs(60)
-    });
+    cancels
+        .retain(|_, entry| entry.started || entry.created_at.elapsed() < Duration::from_secs(60));
 }
 
-async fn begin_operation(state: &State<'_, AppState>, query_token: &str) {
+async fn begin_operation(state: &State<'_, AppState>, query_token: &str) -> Arc<QueryCancellation> {
     let mut cancels = state.cancels.lock().await;
     prune_pending_cancels(&mut cancels);
-    cancels
+    let entry = cancels
         .entry(query_token.to_string())
         .or_insert_with(CancelEntry::pending);
+    entry.started = true;
+    Arc::clone(&entry.signal)
 }
 
-async fn register_cancel(
-    state: &State<'_, AppState>,
-    query_token: &str,
-    client: &PgClient,
-    ssl: bool,
-) -> Result<Arc<AtomicBool>, CoreError> {
+async fn register_cancel(state: &State<'_, AppState>, query_token: &str) -> Arc<QueryCancellation> {
     let mut cancels = state.cancels.lock().await;
     let entry = cancels
         .entry(query_token.to_string())
         .or_insert_with(CancelEntry::pending);
-    if entry.cancelled.load(Ordering::Acquire) {
-        return Err(CoreError::Cancelled(
-            "Query cancelled before execution.".into(),
-        ));
-    }
-    entry.token = Some(client.cancel_token());
-    entry.ssl = ssl;
-    Ok(Arc::clone(&entry.cancelled))
+    Arc::clone(&entry.signal)
 }
 
 async fn active_pool(

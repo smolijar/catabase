@@ -1,3 +1,4 @@
+mod cancellation;
 pub mod conn_url;
 pub mod error;
 pub mod foreign_key_values;
@@ -9,6 +10,7 @@ pub mod sql;
 pub mod storage;
 pub mod supermaven;
 
+pub use cancellation::QueryCancellation;
 pub use conn_url::{ConnectionFields, build_connection_url, parse_connection_url};
 pub use error::{CoreError, PgErrorInfo};
 pub use foreign_key_values::{ForeignKeyLookup, ForeignKeyValues, lookup_foreign_key_values};

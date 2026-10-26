@@ -12,6 +12,87 @@ use catabase_core::{
     ConnectionFields, MetadataSource, PrepareMode, QueryResult, ReflectionCache, RowUpdate,
     apply_row_updates, connect_client, execute_on_client_with_reflection,
 };
+
+#[tokio::test]
+#[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE pointing at the saved zenbase docker connection"]
+async fn cancellation_and_unacknowledged_cancel_recover_on_docker() -> Result<(), Box<dyn Error>> {
+    use catabase_core::{
+        CoreError, PooledPgClient, QueryCancellation, checkout_pool_client, create_pool,
+    };
+    use std::time::{Duration, Instant};
+    let fields = docker_fields()?;
+    let pool = create_pool(&fields, 1)?;
+    let client = checkout_pool_client(&pool).await?;
+    // Exercise a held transaction: normal cancellation keeps it available for
+    // ROLLBACK, and the same client is still usable afterward.
+    client.batch_execute("BEGIN").await?;
+    let cancellation = QueryCancellation::default();
+    let cache = ReflectionCache::default();
+    let (result, ()) = tokio::join!(
+        cancellation.run(
+            &client,
+            false,
+            execute_on_client_with_reflection(
+                &client,
+                "SELECT pg_sleep(10)",
+                0,
+                200,
+                Some(cancellation.flag()),
+                &cache
+            )
+        ),
+        async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancellation.request();
+        }
+    );
+    assert_eq!(
+        result.unwrap_err().pg_info().unwrap().code.as_deref(),
+        Some("57014")
+    );
+    client.batch_execute("ROLLBACK").await?;
+    client.simple_query("SELECT 1").await?;
+    drop(client);
+
+    // This existing test-only proxy forwards one data connection, but not the
+    // second connection used by PostgreSQL's cancel protocol. A sent packet is
+    // not an acknowledgement: the query owner must still have a bounded exit.
+    let (proxied, _) = counted_connection(&fields)?;
+    let isolated = create_pool(&proxied, 1)?;
+    let stalled = checkout_pool_client(&isolated).await?;
+    let cancellation = QueryCancellation::default();
+    let start = Instant::now();
+    let (result, ()) = tokio::join!(
+        cancellation.run(
+            &stalled,
+            false,
+            execute_on_client_with_reflection(
+                &stalled,
+                "SELECT pg_sleep(10)",
+                0,
+                200,
+                Some(cancellation.flag()),
+                &cache
+            )
+        ),
+        async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancellation.request();
+        }
+    );
+    assert!(matches!(result, Err(CoreError::ConnectionDiscarded(_))));
+    assert!(start.elapsed() < Duration::from_secs(8));
+    drop(PooledPgClient::take(stalled));
+    assert_eq!(
+        isolated.status().size,
+        0,
+        "timed-out client must not return to the pool"
+    );
+    // The real Docker service is never killed or paused by this regression test.
+    let recovered = checkout_pool_client(&pool).await?;
+    recovered.simple_query("SELECT 1").await?;
+    Ok(())
+}
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
