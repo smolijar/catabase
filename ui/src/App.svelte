@@ -36,6 +36,7 @@
   import { DEFAULT_EDITOR_FONT_SIZE, EDITOR_FONT_STORAGE_KEY, fontSizeShortcut, resizeEditorFont, restoreEditorFontSize } from './lib/editorFont';
   import type { QueryTimingDetails } from './lib/queryTiming';
   import { createConnectionTester } from './lib/connectionTest';
+  import { createConnectionHealthcheck, createWindowFocusTracker } from './lib/connectionHealthcheck';
   import type { ConnectionTestState } from './lib/connectionTest';
   import { parseConnectionReference, serializeConnectionReference } from './lib/connectionClipboard';
   import { parseTabReference, serializeTabReference } from './lib/tabClipboard';
@@ -126,6 +127,7 @@
   let toastError = false;
   let mounted = false;
   let txStatus: TxStatus = { active: false, startedAt: null };
+  let txStatusKnown = false;
   let editMode = false;
   let pendingChanges: PendingChange[] = [];
 
@@ -279,11 +281,55 @@
       }
     }, 100);
     const aiInterval = window.setInterval(checkSupermaven, 2000);
-    const healthInterval = window.setInterval(() => { nowMs = Date.now(); }, 1000);
+    const healthcheck = createConnectionHealthcheck(() => ({
+      connectionId: activeConnection?.id ?? null,
+      state: activeConnection ? connectionTests[activeConnection.id] ?? null : null,
+      ready: mounted && workspaceLoaded && !closingWorkspace,
+      busy: Boolean(operation || connectionMutation || showConnectionModal || schemaLoading || editMode || discardRunConfirmation),
+      transactionIdle: txStatusKnown && !txStatus.active
+    }), (id) => {
+      const connection = connections.find(candidate => candidate.id === id);
+      if (connection) void testSavedConnection(connection);
+    });
+    const nativeFocus = createWindowFocusTracker(() => getCurrentWindow().isFocused(), healthcheck.setFocused);
+    // Native window focus is authoritative: a background WebView may still
+    // report itself visible/focused. DOM blur also closes the event-delivery gap.
+    // A returning WebView may regain DOM focus without a new native-window
+    // event (for example after native menus). Validate that focus natively too.
+    const onWindowFocus = () => { if (isTauri()) void nativeFocus.refresh(); else nativeFocus.set(true); };
+    const onWindowBlur = () => nativeFocus.set(false);
+    const onVisibility = () => healthcheck.setVisible(document.visibilityState === 'visible');
+    window.addEventListener('focus', onWindowFocus);
+    window.addEventListener('blur', onWindowBlur);
+    document.addEventListener('visibilitychange', onVisibility);
+    onVisibility();
+    if (isTauri()) {
+      void (async () => {
+        try {
+          const window = getCurrentWindow();
+          const unlisten = await window.onFocusChanged(({ payload }) => nativeFocus.set(payload));
+          if (!mounted) { unlisten(); return; }
+          nativeCleanup.push(unlisten);
+          await nativeFocus.refresh();
+        } catch (error) {
+          nativeFocus.set(false);
+          console.warn('Automatic connection checks unavailable: could not determine window focus', error);
+        }
+      })();
+    } else nativeFocus.set(document.hasFocus());
+    const healthInterval = window.setInterval(() => {
+      nowMs = Date.now();
+      healthcheck.poll();
+    }, 1000);
 
     return () => {
       flushDraftOnUnload();
       mounted = false;
+      healthcheck.dispose();
+      nativeFocus.dispose();
+      window.removeEventListener('focus', onWindowFocus);
+      window.removeEventListener('blur', onWindowBlur);
+      document.removeEventListener('visibilitychange', onVisibility);
       media.removeEventListener('change', onSystemTheme);
       layoutObserver.disconnect();
       for (const cleanup of nativeCleanup) cleanup();
@@ -1183,17 +1229,24 @@
 
   async function refreshTxStatus() {
     const request = ++txStatusRequest;
-    const next = await api.txStatus().catch(() => ({ active: false, startedAt: null }));
-    if (request === txStatusRequest) txStatus = next;
+    txStatusKnown = false;
+    try {
+      const next = await api.txStatus();
+      if (request === txStatusRequest) { txStatus = next; txStatusKnown = true; }
+    } catch {
+      // Unknown is not idle. Keep the last known transaction visible and do
+      // not start automatic probes after a failed status refresh.
+    }
   }
 
   async function commitTransaction() {
     if (operation || connectionMutation) return;
     connectionMutation = 'Committing transaction…';
     const request = ++txStatusRequest;
+    txStatusKnown = false;
     try {
       const next = await api.txCommit();
-      if (request === txStatusRequest) txStatus = next;
+      if (request === txStatusRequest) { txStatus = next; txStatusKnown = true; }
       flash('Transaction committed.');
     } catch (error) {
       flash(errorMessage(error));
@@ -1206,9 +1259,10 @@
     if (operation || connectionMutation) return;
     connectionMutation = 'Rolling back transaction…';
     const request = ++txStatusRequest;
+    txStatusKnown = false;
     try {
       const next = await api.txRollback();
-      if (request === txStatusRequest) txStatus = next;
+      if (request === txStatusRequest) { txStatus = next; txStatusKnown = true; }
       flash('Transaction rolled back.');
     } catch (error) {
       flash(errorMessage(error));
