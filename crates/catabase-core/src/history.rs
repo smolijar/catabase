@@ -89,7 +89,12 @@ impl StatementObserver for StatementHistory<'_> {
                 duration_ms,
                 row_count: None,
                 is_error: true,
-                error_message: Some(error.to_string()),
+                error_message: Some(
+                    error
+                        .pg_info()
+                        .map(|info| info.message)
+                        .unwrap_or_else(|| error.to_string()),
+                ),
                 result_json: None,
             }),
         };
