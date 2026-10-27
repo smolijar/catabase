@@ -1,4 +1,34 @@
-import type { HistoryEntry, HistoryPage } from './types';
+import type { HistoryEntry, HistoryPage, HistoryTransaction } from './types';
+
+export interface HistoryGroup {
+  key: string;
+  transaction: HistoryTransaction | null;
+  entries: HistoryEntry[];
+}
+
+/** Preserve newest-first group order even when another connection's statements
+ * interleave. Groups spanning history pages are still represented only once. */
+export function groupHistory(entries: HistoryEntry[]): HistoryGroup[] {
+  const groups = new Map<string, HistoryGroup>();
+  for (const entry of entries) {
+    const key = entry.transaction ? `transaction:${entry.transaction.id}` : `entry:${entry.id}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { key, transaction: entry.transaction ?? null, entries: [] };
+      groups.set(key, group);
+    }
+    if (!group.entries.some(item => item.id === entry.id)) group.entries.push(entry);
+  }
+  return [...groups.values()];
+}
+
+export function transactionLabel(transaction: HistoryTransaction): string {
+  return transaction.kind === 'review' ? 'Reviewed edits' : transaction.kind === 'batch' ? 'SQL batch' : 'Transaction';
+}
+
+export function transactionStatus(transaction: HistoryTransaction): string {
+  return ({ active: 'Active', finished: 'Finished', rolledBack: 'Rolled back', interrupted: 'Interrupted · outcome unconfirmed' })[transaction.status];
+}
 
 /** Decimal storage units, matching the KB/MB/GB labels rather than KiB/MiB. */
 export function formatBytes(bytes: number): string {

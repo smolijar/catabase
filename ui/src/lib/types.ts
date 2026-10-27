@@ -125,6 +125,14 @@ export interface HistoryEntry {
   executionSize: number;
   queryReferences: number;
   resultReferences: number;
+  transaction?: HistoryTransaction | null;
+}
+
+export interface HistoryTransaction {
+  id: string;
+  kind: 'manual' | 'review' | 'batch';
+  status: 'active' | 'finished' | 'rolledBack' | 'interrupted';
+  statementCount: number;
 }
 
 export interface HistoryPage {
@@ -218,6 +226,7 @@ export interface ExecutionTarget {
 export interface TxStatus {
   active: boolean;
   startedAt?: string | null;
+  transactionId?: string | null;
 }
 
 export interface ConnectionStats {

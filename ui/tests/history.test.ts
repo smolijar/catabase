@@ -1,12 +1,29 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as wait } from 'node:timers/promises';
-import { createHistorySearch, formatBytes, historyEntryBytes } from '../src/lib/history.ts';
+import { createHistorySearch, formatBytes, groupHistory, historyEntryBytes, transactionLabel, transactionStatus } from '../src/lib/history.ts';
 import type { HistorySearchState } from '../src/lib/history.ts';
 import type { HistoryEntry, HistoryPage } from '../src/lib/types.ts';
 import { pickerMatches } from '../src/lib/workspacePicker.ts';
 
 const entry: HistoryEntry = { id: 17, query: 'select 1', durationMs: 1, hasResult: true, isError: false, executedAt: '2026-01-01', queryHash: 'sql-hash', resultHash: 'response-hash', querySize: 8, resultSize: 300, executionSize: 100, queryReferences: 2, resultReferences: 2 };
+
+test('transactions group across interleaved entries/pages without hiding standalone statements', () => {
+  const transaction = { id: 'tx-1', kind: 'manual', status: 'active', statementCount: 70 } as const;
+  const entries = [{ ...entry, id: 100, transaction }, { ...entry, id: 99 }, { ...entry, id: 98, transaction }, { ...entry, id: 98, transaction }];
+  const groups = groupHistory(entries);
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups[0].entries.map(entry => entry.id), [100, 98]);
+  assert.equal(groups[0].transaction?.statementCount, 70);
+  assert.equal(groups[1].entries[0].id, 99);
+  assert.equal(groups[1].transaction, null);
+  assert.equal(transactionLabel(transaction), 'Transaction');
+  assert.equal(transactionLabel({ ...transaction, kind: 'review' }), 'Reviewed edits');
+  assert.equal(transactionLabel({ ...transaction, kind: 'batch' }), 'SQL batch');
+  assert.equal(transactionStatus(transaction), 'Active');
+  assert.equal(transactionStatus({ ...transaction, status: 'finished' }), 'Finished');
+  assert.match(transactionStatus({ ...transaction, status: 'interrupted' }), /unconfirmed/);
+});
 
 test('history sizes distinguish bytes, KB, MB and GB without invalid values', () => {
   for (const [bytes, label] of [[0, '0 B'], [999, '999 B'], [1000, '1.0 KB'], [1_234_567, '1.2 MB'], [2_500_000_000, '2.5 GB'], [-1, '0 B'], [Infinity, '0 B']] as const) assert.equal(formatBytes(bytes), label);

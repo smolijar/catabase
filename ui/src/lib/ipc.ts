@@ -52,6 +52,8 @@ export const api = {
   getDdl: (schema: string, name: string, connectionId?: string) => invoke<string>('get_ddl', { schema, name, connectionId }),
   historyPage: (search: string | null, offset = 0, limit = 50) =>
     invoke<HistoryPage>('history_page', { search, offset, limit }),
+  historyTransactionPage: (id: string, offset = 0, limit = 50) =>
+    invoke<HistoryPage>('history_transaction_page', { id, offset, limit }),
   historyStats: () => invoke<HistoryStats>('history_stats'),
   historyStorageStats: () => invoke<HistoryStorageStats>('history_storage_stats'),
   historyGetResult: (id: number) => invoke<{ result: QueryResult | null }>('history_get_result', { id }),

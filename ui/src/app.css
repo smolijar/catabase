@@ -92,6 +92,16 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .history-card code { display: -webkit-box; overflow: hidden; font-size: 12px; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .history-error { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-more { width: 100%; }
+.history-transaction { border: 1px solid var(--line); margin-bottom: 12px; border-radius: 4px; }
+.history-transaction > summary { cursor: pointer; padding: 10px; font-size: 12px; }
+.history-transaction > summary:hover { background: var(--surface-3); }
+.history-transaction > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.history-transaction-heading { display: inline-flex; align-items: center; gap: 8px; }
+.history-transaction-heading code, .history-transaction-detail, .history-transaction-note { font-size: 11px; color: var(--ink-faint); }
+.history-transaction-detail { display: block; margin: 5px 0 0 16px; }
+.history-transaction-entries { padding: 0 10px 10px 18px; border-left: 2px solid var(--line); margin-left: 10px; }
+.history-transaction-note { display: block; padding: 6px 0 12px; }
+.history-card.transaction-entry { gap: 4px; margin-bottom: 10px; padding-bottom: 10px; }
 .history-storage-link { justify-self: start; background: transparent; border: 0; padding: 0; min-height: 22px; color: var(--ink-muted); font: 11px var(--font-mono); }
 .history-storage-link:hover { color: var(--accent); text-decoration: underline; }
 .row-actions { flex-wrap: wrap; gap: 8px; }
