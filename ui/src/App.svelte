@@ -95,9 +95,7 @@
   let activeTab = 'playground';
   let tabs: WorkspaceTab[] = [createQueryTab('playground', 'Query 1', DEFAULT_SQL)];
   let archivedTabs: ArchivedTab[] = [];
-  let closeTabConfirmation: WorkspaceTab | null = null;
   let tabCloseTask: Promise<void> | null = null;
-  let closeTabError = '';
   let tabKind: WorkspaceTab['kind'] = 'query';
   let tabConnectionId: string | null = null;
   let editorViewState: WorkspaceTab['viewState'] = null;
@@ -295,7 +293,7 @@
       connectionId: activeConnection?.id ?? null,
       state: activeConnection ? connectionTests[activeConnection.id] ?? null : null,
       ready: mounted && workspaceLoaded && !closingWorkspace,
-      busy: Boolean(operation || connectionMutation || showConnectionModal || schemaLoading || editMode || discardRunConfirmation || closeTabConfirmation),
+      busy: Boolean(operation || connectionMutation || showConnectionModal || schemaLoading || editMode || discardRunConfirmation || tabCloseTask),
       transactionIdle: txStatusKnown && !txStatus.active
     }), (id) => {
       const connection = connections.find(candidate => candidate.id === id);
@@ -499,26 +497,20 @@
   }
 
   function closeTab(id: string) {
-    if (!workspaceLoaded || closingWorkspace || closeTabConfirmation) return;
+    if (!workspaceLoaded || closingWorkspace || tabCloseTask) return;
     if (operation?.tabId === id) { flash('Cancel or wait for this query before closing its tab.'); return; }
     if (renamingTab) finishRename(false);
-    captureActive();
-    const tab = tabs.find((item) => item.id === id);
-    if (!tab) return;
-    closeTabError = '';
-    closeTabConfirmation = tab;
-  }
-
-  function confirmCloseTab() {
-    if (tabCloseTask || !closeTabConfirmation) return;
-    tabCloseTask = saveAndCloseTab(closeTabConfirmation.id).finally(() => { tabCloseTask = null; });
+    tabCloseTask = saveAndCloseTab(id).finally(() => {
+      tabCloseTask = null;
+      // Restore focus after the brief archive-save interaction lock is lifted.
+      focusTabLabel(activeTab);
+    });
   }
 
   async function saveAndCloseTab(id: string) {
-    if (operation?.tabId === id) { closeTabError = 'Wait for this query to finish before closing its tab.'; return; }
     captureActive();
     const tab = tabs.find(item => item.id === id);
-    if (!tab) { closeTabConfirmation = null; return; }
+    if (!tab) return;
     const index = tabs.indexOf(tab);
     const remaining = tabs.filter(item => item.id !== id);
     if (!remaining.length) remaining.push(createQueryTab(crypto.randomUUID(), 'Query 1', '', tabConnectionId));
@@ -528,10 +520,9 @@
     if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
     ++draftRevision;
     draftStatus = 'saving';
-    closeTabError = '';
     try {
       // Commit the archive before removing the live tab. On failure the editor,
-      // result and staged changes remain untouched and the dialog can retry.
+      // result and staged changes remain untouched and closing can be retried.
       await writeWorkspaceDraft(serializeWorkspace(remaining, nextId, nextArchive));
       archivedTabs = nextArchive;
       // Keep async results that may have arrived on a different open tab.
@@ -539,17 +530,15 @@
       if (!tabs.length) tabs = remaining;
       if (activeTab === id) displayTab(tabs.find(item => item.id === nextId)!);
       draftStatus = 'saved';
-      closeTabConfirmation = null;
-      focusTabLabel(activeTab);
       flash(archived ? `${tab.title} archived. Reopen it from Tabs or search.` : `${tab.title} closed.`);
     } catch (error) {
       draftStatus = 'error';
-      closeTabError = `Could not save the closed tab. Nothing was closed: ${errorMessage(error)}`;
+      flash(`Could not save the closed tab. Nothing was closed: ${errorMessage(error)}`, true);
     }
   }
 
   function reopenTab(id: string) {
-    if (!workspaceLoaded || closingWorkspace || closeTabConfirmation) return;
+    if (!workspaceLoaded || closingWorkspace || tabCloseTask) return;
     const archived = archivedTabs.find(tab => tab.id === id);
     if (!archived) return;
     captureActive();
@@ -727,6 +716,7 @@
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented || closingWorkspace) return;
+    if (tabCloseTask) { event.preventDefault(); return; }
     if (picker) return;
     const fontAction = fontSizeShortcut(event);
     if (fontAction) {
@@ -735,7 +725,7 @@
       try { localStorage.setItem(EDITOR_FONT_STORAGE_KEY, String(editorFontSize)); } catch { /* Keep the current session's preference. */ }
       return;
     }
-    if (showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails || closeTabConfirmation) return;
+    if (showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails) return;
     const command = event.metaKey || event.ctrlKey;
     if (!command) return;
     if (event.key.toLowerCase() === 'k') {
@@ -1761,7 +1751,7 @@
 
 </script>
 
-<main class="app-shell" class:native-titlebar={nativeTitlebar} inert={closingWorkspace}>
+<main class="app-shell" class:native-titlebar={nativeTitlebar} inert={closingWorkspace || Boolean(tabCloseTask)} aria-busy={Boolean(tabCloseTask)}>
   <header class="toolbar" data-tauri-drag-region={nativeTitlebar ? 'deep' : undefined}>
     <div class="brand" aria-label="catabase">
       <Cat mood={running ? 'prompt' : queryError ? 'error' : !activeConnection || result?.rowCount === 0 ? 'asleep' : 'awake'} />
@@ -2181,28 +2171,6 @@
       <div class="row-actions">
         <button on:click={() => resolveDiscardForRun(false)}>Keep editing</button>
         <button class="danger-quiet" on:click={() => resolveDiscardForRun(true)}>Discard edits and run</button>
-      </div>
-    </div>
-  </Modal>
-{/if}
-
-{#if closeTabConfirmation}
-  <Modal label="Close tab?" locked={Boolean(tabCloseTask)} onClose={() => closeTabConfirmation = null}>
-    <div class="modal">
-      <h2>Close “{closeTabConfirmation.title}”?</h2>
-      {#if closeTabConfirmation.kind === 'query'}
-        <p>This query will be saved in Tabs → Closed, including its name, SQL, connection and editor position. Reopen it there or find it in global search.</p>
-        <p>Results are not kept with closed tabs. Closing a tab does not commit or roll back a transaction.</p>
-      {:else}
-        <p>This read-only reference will be closed without being archived. You can open it again from History or Schema.</p>
-      {/if}
-      {#if closeTabConfirmation.pendingChanges.length}
-        <p class="error-text">{closeTabConfirmation.pendingChanges.length} staged cell {closeTabConfirmation.pendingChanges.length === 1 ? 'edit' : 'edits'} will be discarded. These changes have not been saved to the database.</p>
-      {/if}
-      {#if closeTabError}<p class="error-text" role="alert">{closeTabError}</p>{/if}
-      <div class="row-actions">
-        <button disabled={Boolean(tabCloseTask)} on:click={() => closeTabConfirmation = null}>Keep open</button>
-        <button class="primary" disabled={Boolean(tabCloseTask)} on:click={confirmCloseTab}>{tabCloseTask ? 'Saving…' : closeTabConfirmation.pendingChanges.length ? 'Discard edits & close' : closeTabConfirmation.kind === 'query' ? 'Archive & close' : 'Close tab'}</button>
       </div>
     </div>
   </Modal>

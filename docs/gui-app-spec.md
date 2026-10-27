@@ -320,8 +320,11 @@ GUI MUST manage Playground, DDL, update-preview, and history tabs with Monaco mo
 
 #### Scenario: Close tab
 - **WHEN** user closes closable tab
-- **THEN** tab model is disposed
-- **AND** neighboring tab or Playground becomes active.
+- **THEN** it closes without a confirmation dialog
+- **AND** editable queries are archived under Tabs → Closed before their models are disposed, and remain searchable/reopenable
+- **AND** a storage failure keeps the tab open and displays an error
+- **AND** read-only references close without being archived
+- **AND** the neighboring tab becomes active, or a new blank query is created if none remain.
 
 #### Scenario: Draft auto-save
 - **WHEN** Playground content changes
