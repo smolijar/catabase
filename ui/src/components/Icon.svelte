@@ -22,6 +22,7 @@
     | 'settings'
     | 'sparkles'
     | 'stop'
+    | 'tabs'
     | 'trash';
 
   export let name: IconName;
@@ -53,6 +54,8 @@
     <rect x="14" y="15" width="7" height="6" rx="1.5" />
     <rect x="3" y="15" width="7" height="6" rx="1.5" />
     <path d="M6.5 9v3h11v3M6.5 12v3" />
+  {:else if name === 'tabs'}
+    <rect x="3" y="6" width="18" height="15" rx="1.5" /><path d="M6 3h12M3 11h18M9 6v5" />
   {:else if name === 'history'}
     <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
     <path d="M3 3v5h5M12 7v5l3 2" />

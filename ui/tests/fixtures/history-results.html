@@ -4,6 +4,7 @@
   <body>
     <div id="app"></div>
     <output id="probe" style="position:fixed;bottom:30px;right:12px;z-index:100;background:#191a1d;color:#fff;padding:4px 8px;font:12px monospace">Preview only · SQL executions: 0</output>
+    <label style="position:fixed;bottom:30px;left:70px;z-index:100;background:#191a1d;color:#fff;padding:4px 8px;font:12px monospace"><input id="fail-save" type="checkbox" /> Fail archive save</label>
     <script type="module">
       // The real app with synthetic IPC responses. No database/network requests
       // or native storage writes; unexpected commands fail instead of executing.
@@ -14,14 +15,24 @@
         { ...base, id: 40, query: 'select invalid_column from landlords', isError: true, errorMessage: 'column "invalid_column" does not exist', hasResult: false, transaction: { id: 'preview-transaction', kind: 'manual', status: 'rolledBack', statementCount: 1 } }
       ];
       let executions = 0;
+      const draftKey = 'catabase.test.history-results.workspace';
+      const initialDraft = JSON.stringify({ version: 2, activeId: 'draft', tabs: [
+        { id: 'draft', title: 'Untouched draft', sql: 'select 1 as original_draft', connectionId: 'preview', viewState: null },
+        { id: 'blank', title: 'Empty query', sql: '', connectionId: 'preview', viewState: null }
+      ], archivedTabs: [{ id: 'archived', title: 'Monthly report', sql: 'select * from archived_report_table', connectionId: 'preview', viewState: null, closedAt: base.executedAt }] });
       window.__TAURI_INTERNALS__ = { invoke: async (command, args = {}) => {
         switch (command) {
           case 'list_connections': return [{ id: 'preview', name: 'zenbase docker (preview)', host: 'localhost', port: 5432, database: 'zenbase', username: 'zenbase', ssl: false, isActive: true, createdAt: base.executedAt, updatedAt: base.executedAt }];
           case 'get_settings': return { poolSize: 1, supermavenEnabled: false };
           case 'tx_status': return { active: false, startedAt: null };
           case 'supermaven_status': return { enabled: false, state: 'off', message: 'Preview only' };
-          case 'load_draft': return JSON.stringify({ version: 1, activeId: 'draft', tabs: [{ id: 'draft', title: 'Untouched draft', sql: 'select 1 as original_draft', connectionId: 'preview', viewState: null }] });
-          case 'save_draft': case 'test_connection': return;
+          case 'load_draft': return sessionStorage.getItem(draftKey) ?? initialDraft;
+          case 'save_draft': {
+            if (document.getElementById('fail-save').checked) throw new Error('Simulated storage failure');
+            sessionStorage.setItem(draftKey, args.content);
+            return;
+          }
+          case 'test_connection': return;
           case 'introspect_schema': return { schemas: [] };
           case 'connection_stats': return { active: 0, idle: 1, poolSize: 1 };
           case 'history_stats': return { total: 3, errors: 2, lastExecutedAt: base.executedAt };
