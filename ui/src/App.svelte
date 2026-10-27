@@ -31,6 +31,7 @@
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
+  import { canRequestSupermaven } from './lib/supermavenInline';
   import { createHistorySearch, groupHistory } from './lib/history';
   import type { HistorySearchState } from './lib/history';
   import { editorSearchShortcut } from './lib/editorSearch';
@@ -2023,7 +2024,7 @@
             {themeKey}
             onPosition={(line, column) => { cursorLine = line; cursorColumn = column; }}
             viewState={editorViewState}
-            supermavenEnabled={supermaven.state === 'ready' && tabKind === 'query'}
+            supermavenEnabled={canRequestSupermaven(supermaven) && tabKind === 'query'}
             {schemaItems}
             supermavenComplete={api.supermavenComplete}
             supermavenCancel={api.supermavenCancel}

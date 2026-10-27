@@ -81,9 +81,40 @@ struct AgentState {
     state_id: u64,
     pending: Option<Pending>,
     started: Option<Instant>,
+    connected: Option<bool>,
+    connection_error: Option<&'static str>,
     latest_request: Option<String>,
     #[cfg(test)]
     diagnostics: (usize, usize, std::collections::BTreeSet<String>),
+}
+
+impl AgentState {
+    fn can_complete(&self) -> bool {
+        self.status.enabled
+            && self.status.activation_url.is_none()
+            && matches!(
+                self.status.state.as_str(),
+                "ready" | "connecting" | "disconnected"
+            )
+    }
+
+    fn ready(&mut self) {
+        self.started = None;
+        self.connection_error = None;
+        self.status.state = "ready".into();
+        self.status.message = "Supermaven inline SQL suggestions are ready.".into();
+    }
+
+    fn disconnected(&mut self) {
+        self.started = None;
+        self.pending = None;
+        self.status.state = "disconnected".into();
+        self.status.message = format!(
+            "{} Edit SQL or press Option/Alt+\\ to reconnect; Retry in Settings restarts the agent. Built-in schema suggestions remain available.",
+            self.connection_error
+                .unwrap_or("The Supermaven service disconnected.")
+        );
+    }
 }
 
 struct AgentRun {
@@ -124,9 +155,15 @@ impl SupermavenClient {
                 .started
                 .is_some_and(|started| started.elapsed() > Duration::from_secs(45))
         {
-            state.status.state = "error".into();
-            state.status.message =
-                "Supermaven did not finish starting. Retry from Settings.".into();
+            if state.status.state == "connecting" {
+                state.connection_error.get_or_insert("The agent started, but the Supermaven service did not connect within 45 seconds.");
+                state.disconnected();
+            } else {
+                state.status.state = "error".into();
+                state.status.message =
+                    "Supermaven agent did not respond within 45 seconds. Retry from Settings."
+                        .into();
+            }
         }
         state.status.clone()
     }
@@ -138,7 +175,10 @@ impl SupermavenClient {
             state.generation += 1;
             state.pending = None;
             state.latest_request = None;
-            state.started = enabled.then(Instant::now);
+            state.state_id = 0;
+            state.started = None;
+            state.connected = None;
+            state.connection_error = None;
             state.status = if enabled {
                 SupermavenStatus {
                     enabled: true,
@@ -188,6 +228,9 @@ impl SupermavenClient {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
+        // Download requests have their own deadlines. Only time agent startup
+        // once the process exists, not while installing/verifying the binary.
+        self.state.lock().await.started = Some(Instant::now());
         let mut stdin = child
             .stdin
             .take()
@@ -247,6 +290,13 @@ impl SupermavenClient {
                     state.lock().await.diagnostics.0 += 1;
                 }
                 let Some(payload) = text.strip_prefix("SM-MESSAGE ") else {
+                    let mut state = state.lock().await;
+                    if state.generation != generation {
+                        return;
+                    }
+                    if process_agent_log(&mut state, text) {
+                        changed.send_modify(|value| *value += 1);
+                    }
                     continue;
                 };
                 let Ok(message) = serde_json::from_str::<Value>(payload) else {
@@ -341,7 +391,7 @@ impl SupermavenClient {
         let mut updates = self.changed.subscribe();
         {
             let mut state = self.state.lock().await;
-            if !state.status.enabled || state.status.state != "ready" {
+            if !state.can_complete() {
                 return Ok(None);
             }
             state.latest_request = Some(request.request_id.clone());
@@ -353,11 +403,16 @@ impl SupermavenClient {
         };
         let state_id = {
             let mut state = self.state.lock().await;
-            if !state.status.enabled
-                || state.status.state != "ready"
-                || state.latest_request.as_deref() != Some(&request.request_id)
+            if !state.can_complete() || state.latest_request.as_deref() != Some(&request.request_id)
             {
                 return Ok(None);
+            }
+            // The official agent reconnects lazily on a new state_update, just
+            // like Neovim. Gating requests on ready deadlocks after a disconnect.
+            if state.status.state == "disconnected" {
+                state.started = Some(Instant::now());
+                state.status.state = "connecting".into();
+                state.status.message = "Reconnecting to Supermaven…".into();
             }
             state.state_id += 1;
             let id = state.state_id;
@@ -483,6 +538,26 @@ async fn write_message(stdin: &mut ChildStdin, message: &Value) -> Result<(), Co
     Ok(())
 }
 
+fn process_agent_log(state: &mut AgentState, line: &str) -> bool {
+    // Agent logs can contain SQL, account emails or credentials. Classify only
+    // known transport failures; never retain, forward or persist raw log text.
+    if !line.contains("ERROR [sm_agent::edge_connection]") {
+        return false;
+    }
+    let reason = if line.contains("Connection reset without closing handshake") {
+        "The Supermaven WebSocket connection was reset before closing cleanly."
+    } else if line.contains("error reading from websocket:") {
+        "The Supermaven WebSocket connection failed."
+    } else {
+        return false;
+    };
+    state.connection_error = Some(reason);
+    if state.status.state == "disconnected" {
+        state.disconnected();
+    }
+    true
+}
+
 fn process_message(state: &mut AgentState, message: &Value) {
     #[cfg(test)]
     {
@@ -560,28 +635,41 @@ fn process_message(state: &mut AgentState, message: &Value) {
         }
         "activation_success" => {
             state.status.activation_url = None;
-            state.status.state = "ready".into();
-            state.status.message = "Supermaven inline SQL suggestions are ready.".into();
+            if state.connected != Some(false) {
+                state.ready();
+            }
         }
         "service_tier" => {
             state.status.service_tier = message["display"]
                 .as_str()
                 .map(|value| value.chars().take(80).collect());
             state.status.activation_url = None;
-            state.status.state = "ready".into();
-            state.status.message = "Supermaven inline SQL suggestions are ready.".into();
+            // Legacy agents announce only a tier. Modern agents also report
+            // transport state; a late account message must not mask a disconnect.
+            if state.connected != Some(false) {
+                state.ready();
+            }
         }
         "connection_status" => {
-            if message["is_connected"].as_bool() == Some(true) {
-                state.status.state = "ready".into();
-                state.status.message = "Supermaven inline SQL suggestions are ready.".into();
-            } else if state.status.enabled && state.status.activation_url.is_none() {
-                state.status.state = "connecting".into();
-                state.status.message = message["status_text"]
+            let Some(connected) = message["is_connected"].as_bool() else {
+                return;
+            };
+            state.connected = Some(connected);
+            if state.status.enabled && state.status.activation_url.is_none() {
+                if connected {
+                    state.ready();
+                } else if message["status_text"]
                     .as_str()
-                    .filter(|text| !text.contains("https://"))
-                    .map(|text| text.chars().take(240).collect())
-                    .unwrap_or_else(|| "Connecting to Supermaven…".into());
+                    .is_some_and(|text| text.eq_ignore_ascii_case("disconnected"))
+                {
+                    state.disconnected();
+                } else {
+                    if state.status.state != "connecting" {
+                        state.started = Some(Instant::now());
+                    }
+                    state.status.state = "connecting".into();
+                    state.status.message = "Connecting to Supermaven…".into();
+                }
             }
         }
         "user_status" => {
@@ -1044,6 +1132,96 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_diagnostics_survive_late_account_messages_without_retaining_logs() {
+        let mut state = AgentState::default();
+        state.status.enabled = true;
+        process_message(
+            &mut state,
+            &json!({"kind":"connection_status","is_connected":true}),
+        );
+        assert!(state.started.is_none());
+        assert!(!process_agent_log(
+            &mut state,
+            "SQL: secret@example.invalid select 'private'"
+        ));
+        assert!(process_agent_log(
+            &mut state,
+            "ERROR [sm_agent::edge_connection] error reading from websocket: WebSocket protocol error: Connection reset without closing handshake private@example.invalid https://example.invalid?token=secret"
+        ));
+        process_message(
+            &mut state,
+            &json!({"kind":"connection_status","is_connected":false,"status_text":"disconnected"}),
+        );
+        assert_eq!(state.status.state, "disconnected");
+        assert!(state.can_complete());
+        assert!(
+            state
+                .status
+                .message
+                .contains("WebSocket connection was reset")
+        );
+        let public_status = serde_json::to_string(&state.status).unwrap();
+        for private in ["secret", "private", "example.invalid"] {
+            assert!(!public_status.contains(private));
+        }
+        process_message(&mut state, &json!({"kind":"service_tier","display":"Free"}));
+        process_message(&mut state, &json!({"kind":"activation_success"}));
+        assert_eq!(state.status.state, "disconnected");
+        assert!(
+            state
+                .status
+                .message
+                .contains("WebSocket connection was reset")
+        );
+        process_message(
+            &mut state,
+            &json!({"kind":"connection_status","is_connected":true}),
+        );
+        assert_eq!(state.status.state, "ready");
+        assert!(state.connection_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn connection_deadlines_restart_per_attempt_not_per_process_lifetime() {
+        let directory = tempfile::tempdir().unwrap();
+        let client = SupermavenClient::new(directory.path().to_owned());
+        {
+            let mut state = client.state.lock().await;
+            state.status.enabled = true;
+            state.status.state = "connecting".into();
+            state.started = Some(Instant::now() - Duration::from_secs(46));
+        }
+        let status = client.status().await;
+        assert_eq!(status.state, "disconnected");
+        assert!(status.message.contains("agent started"));
+        {
+            let mut state = client.state.lock().await;
+            process_message(
+                &mut state,
+                &json!({"kind":"connection_status","is_connected":false,"status_text":"connecting..."}),
+            );
+            assert!(state.started.unwrap().elapsed() < Duration::from_secs(1));
+        }
+        assert_eq!(client.status().await.state, "connecting");
+        {
+            let mut state = client.state.lock().await;
+            state.started = Some(Instant::now() - Duration::from_secs(46));
+            // Repeated progress messages must not extend a stalled attempt forever.
+            process_message(
+                &mut state,
+                &json!({"kind":"connection_status","is_connected":false,"status_text":"connecting..."}),
+            );
+        }
+        assert_eq!(client.status().await.state, "disconnected");
+        {
+            let mut state = client.state.lock().await;
+            state.status.state = "starting".into();
+            state.started = Some(Instant::now() - Duration::from_secs(46));
+        }
+        assert_eq!(client.status().await.state, "error");
+    }
+
+    #[test]
     fn fake_agent_fixture() {
         if std::env::var("CATABASE_FAKE_SUPERMAVEN").as_deref() != Ok("1") {
             return;
@@ -1062,6 +1240,21 @@ mod tests {
                 ),
                 Some("state_update") => {
                     let text = message["updates"][1]["content"].as_str().unwrap();
+                    if text.contains("disconnect_probe") {
+                        println!(
+                            "ERROR [sm_agent::edge_connection] error reading from websocket: WebSocket protocol error: Connection reset without closing handshake"
+                        );
+                        println!(
+                            "SM-MESSAGE {}",
+                            json!({"kind":"connection_status","is_connected":false,"status_text":"disconnected"})
+                        );
+                        std::io::stdout().flush().unwrap();
+                        continue;
+                    }
+                    println!(
+                        "SM-MESSAGE {}",
+                        json!({"kind":"connection_status","is_connected":true})
+                    );
                     assert!(
                         message["updates"][1]["path"]
                             .as_str()
@@ -1148,6 +1341,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn next_edit_recovers_after_disconnect_without_restarting_the_agent() {
+        let directory = tempfile::tempdir().unwrap();
+        let client = mock_client(directory.path()).await;
+        let child_id = client.run.lock().await.as_ref().unwrap().child.id();
+        let result = timeout(
+            Duration::from_secs(2),
+            client.complete(request("lost", "select /* disconnect_probe */ ")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(result.is_none());
+        assert_eq!(client.status().await.state, "disconnected");
+        assert!(client.state.lock().await.pending.is_none());
+        assert!(
+            client
+                .status()
+                .await
+                .message
+                .contains("WebSocket connection was reset")
+        );
+        let completion = client
+            .complete(request("retry", "select "))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion.text, "1 AS synthetic");
+        assert_eq!(client.status().await.state, "ready");
+        assert_eq!(
+            client.run.lock().await.as_ref().unwrap().child.id(),
+            child_id
+        );
+        client.set_enabled(false).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn superseded_requests_and_cancellation_never_return_stale_text() {
         let directory = tempfile::tempdir().unwrap();
         let client = mock_client(directory.path()).await;
@@ -1194,34 +1423,44 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let client = SupermavenClient::new(directory.path().to_owned());
         client.set_enabled(true).await?;
-        for _ in 0..200 {
+        let mut previous_status = String::new();
+        let mut attempts = 0;
+        for _ in 0..600 {
             let status = client.status().await;
-            if status.state == "ready" {
+            let status_summary = format!("{}: {}", status.state, status.message);
+            if previous_status != status_summary {
+                println!("Agent status: {status_summary}");
+                previous_status = status_summary;
+            }
+            if matches!(status.state.as_str(), "ready" | "disconnected") {
                 // Allow delayed account/announcement messages to arrive before
                 // asserting readiness, not just the first connection event.
                 tokio::time::sleep(Duration::from_millis(750)).await;
-                assert_eq!(client.status().await.state, "ready");
+                // A new state_update is also the official agent's reconnect
+                // trigger. Exercise that path with synthetic context only.
+                attempts += 1;
                 let mut probe = request("synthetic-live-test", "select * from prop");
                 probe.document_id = "00000000-1111-2222-3333-444444444444".into();
                 probe.schema_context = "CREATE TABLE public.properties (id text PRIMARY KEY, landlord_id text, address text);\nCREATE TABLE public.landlords (id text PRIMARY KEY, name text);".into();
                 let result = client.complete(probe).await?;
-                let diagnostic = client.state.lock().await.pending.as_ref().map(|pending| {
-                    pending
-                        .items
-                        .iter()
-                        .map(|item| {
-                            (
-                                item["kind"].as_str().unwrap_or("").to_owned(),
-                                item["text"].as_str().map_or(0, str::len),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                });
+                if result.is_none() {
+                    let status = client.status().await;
+                    if attempts < 3
+                        && matches!(
+                            status.state.as_str(),
+                            "ready" | "connecting" | "disconnected"
+                        )
+                    {
+                        continue;
+                    }
+                    client.set_enabled(false).await?;
+                    return Err(format!(
+                        "No synthetic completion after {attempts} attempts. Agent status: {}: {}",
+                        status.state, status.message
+                    )
+                    .into());
+                }
                 client.set_enabled(false).await?;
-                assert!(
-                    result.is_some(),
-                    "authenticated agent did not return a synthetic completion; response item kinds/lengths {diagnostic:?}"
-                );
                 let result = result.unwrap();
                 assert!(
                     result.text.starts_with("erties"),
