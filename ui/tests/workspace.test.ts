@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canUseResult, createDraftWriter, createHistoryTab, createQueryTab, duplicateQueryTab, restoreWorkspace, serializeWorkspace } from '../src/lib/workspace.ts';
+import { archiveTab, canUseResult, createDraftWriter, createHistoryTab, createQueryTab, duplicateQueryTab, reopenArchivedTab, restoreWorkspace, serializeWorkspace } from '../src/lib/workspace.ts';
 import type { HistoryEntry, QueryResult } from '../src/lib/types.ts';
 
 const failedHistory: HistoryEntry = {
@@ -166,4 +166,67 @@ test('closing can retry a draft after an earlier autosave failure', async () => 
   await assert.rejects(write('unsaved'), /Temporary storage failure/);
   await write('retry on close');
   assert.equal(saved, 'retry on close');
+});
+
+test('closed tabs persist exact SQL, names, connections and editor positions, never results or staged changes', () => {
+  const source = createQueryTab('closed', 'Monthly report', 'select 1;\n\nselect 2;', 'docker');
+  source.viewState = { cursorState: [], viewState: { scrollTop: 42 } } as unknown as NonNullable<typeof source.viewState>;
+  source.error = { message: 'private error' };
+  source.originalRows = [{ secret: 'secret row' }];
+  source.pendingChanges = [{ rowIndex: 0, column: 'secret', oldValue: 'private old', newValue: 'private new' }];
+  source.editMode = true;
+  const archived = archiveTab(source, '2026-10-27T10:00:00Z')!;
+  assert.notEqual(archived.viewState, source.viewState);
+  const stored = serializeWorkspace([createQueryTab('open', 'Open')], 'open', [archived]);
+  assert.doesNotMatch(stored, /private|secret|pendingChanges|editMode|originalRows|historyContext/);
+  const restored = restoreWorkspace(stored)!;
+  assert.equal(restored.tabs.length, 1);
+  assert.deepEqual(restored.archivedTabs, [archived]);
+  const reopened = reopenArchivedTab(restored.archivedTabs[0]);
+  assert.equal(reopened.id, source.id);
+  assert.equal(reopened.sql, source.sql);
+  assert.equal(reopened.title, source.title);
+  assert.equal(reopened.connectionId, 'docker');
+  assert.deepEqual(reopened.viewState, source.viewState);
+  assert.notEqual(reopened.viewState, archived.viewState);
+  assert.equal(reopened.session, null);
+  assert.equal(reopened.error, null);
+  assert.equal(reopened.editMode, false);
+  assert.deepEqual(reopened.pendingChanges, []);
+});
+
+test('empty queries are archived, references and history previews are not', () => {
+  assert.equal(archiveTab(createQueryTab('blank', 'Blank'), '2026-10-27')?.sql, '');
+  assert.equal(archiveTab(createHistoryTab(failedHistory, null, 'Docker'), '2026-10-27'), null);
+  assert.equal(archiveTab({ ...createQueryTab('ddl', 'DDL'), kind: 'reference' }, '2026-10-27'), null);
+});
+
+test('archives migrate from v1, retain newest-first order and reject malformed/duplicate records', () => {
+  const open = createQueryTab('one', 'Open');
+  assert.deepEqual(restoreWorkspace(JSON.stringify({ version: 1, tabs: [open] }))?.archivedTabs, []);
+  const old = archiveTab(createQueryTab('old', 'Old'), '2026-10-25')!;
+  const newer = archiveTab(createQueryTab('new', 'New'), '2026-10-27')!;
+  const restored = restoreWorkspace(JSON.stringify({ version: 2, tabs: [open], activeId: 'new', archivedTabs: [old, newer, { ...old, title: 'duplicate' }, { ...old, id: 'one' }, { ...old, id: 'bad', closedAt: 'invalid' }, { ...old, id: 'ref', kind: 'reference' }, null] }))!;
+  assert.deepEqual(restored.archivedTabs, [newer, old]);
+  assert.equal(restored.activeId, 'one');
+});
+
+test('closing the last draft retains its archive and creates a distinct blank tab after restart', () => {
+  const archived = archiveTab(createQueryTab('playground', 'Saved', 'select 42'), '2026-10-27')!;
+  const restored = restoreWorkspace(serializeWorkspace([], archived.id, [archived]))!;
+  assert.equal(restored.tabs.length, 1);
+  assert.equal(restored.tabs[0].sql, '');
+  assert.notEqual(restored.activeId, archived.id);
+  assert.deepEqual(restored.archivedTabs, [archived]);
+});
+
+test('a reopened tab is not also persisted as closed; repeated closes replace the same identity', () => {
+  const first = archiveTab(createQueryTab('a', 'A', 'select 1'), '2026-10-26')!;
+  const reopened = reopenArchivedTab(first);
+  const stored = restoreWorkspace(serializeWorkspace([reopened], reopened.id, [first]))!;
+  assert.deepEqual(stored.archivedTabs, []);
+  reopened.sql = 'select 2';
+  const again = archiveTab(reopened, '2026-10-27')!;
+  assert.equal(again.id, first.id);
+  assert.equal(again.sql, 'select 2');
 });

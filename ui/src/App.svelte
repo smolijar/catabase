@@ -20,6 +20,7 @@
   import SqlEditor from './components/SqlEditor.svelte';
   import SidebarResizer from './components/SidebarResizer.svelte';
   import QueryTab from './components/QueryTab.svelte';
+  import TabsPanel from './components/TabsPanel.svelte';
   import Cat from './components/Cat.svelte';
   import WorkspacePicker from './components/WorkspacePicker.svelte';
   import { APPEARANCE_KEY, connectionAppearanceDraft, workspaceAppearance, restoreAppearance, shortType } from './lib/appearance';
@@ -46,8 +47,8 @@
   import { assessRowEditing, buildRowUpdates, originalEditColumns } from './lib/rowEditing';
   import { sameCellValue } from './lib/resultsGrid';
   import type { EditTarget } from './lib/rowEditing';
-  import { canUseResult, createDraftWriter, createHistoryTab, createQueryTab, duplicateQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
-  import type { PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
+  import { archiveTab, canUseResult, createDraftWriter, createHistoryTab, createQueryTab, duplicateQueryTab, reopenArchivedTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
+  import type { ArchivedTab, PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
   import type {
     SupermavenStatus,
     AppError,
@@ -69,7 +70,7 @@
   const DEFAULT_SQL = `-- Welcome to Catabase\n-- Add a PostgreSQL connection, then run SQL with Cmd/Ctrl+Enter.\nselect now() as connected_at;`;
   const PAGE_SIZE = 200;
 
-  type SidebarTab = 'connections' | 'schema' | 'history' | 'settings';
+  type SidebarTab = 'connections' | 'schema' | 'history' | 'tabs' | 'settings';
   type EditorHandle = {
     formatSql: () => void;
     find: (replace?: boolean) => void;
@@ -92,6 +93,10 @@
   let sql = DEFAULT_SQL;
   let activeTab = 'playground';
   let tabs: WorkspaceTab[] = [createQueryTab('playground', 'Query 1', DEFAULT_SQL)];
+  let archivedTabs: ArchivedTab[] = [];
+  let closeTabConfirmation: WorkspaceTab | null = null;
+  let tabCloseTask: Promise<void> | null = null;
+  let closeTabError = '';
   let tabKind: WorkspaceTab['kind'] = 'query';
   let tabConnectionId: string | null = null;
   let editorViewState: WorkspaceTab['viewState'] = null;
@@ -207,10 +212,11 @@
       ...(activeConnection ? [{ id: 'command:disconnect', label: `Disconnect ${activeConnection.name}`, detail: 'Keep saved connection & drafts', group: 'Actions', disabled: running || Boolean(connectionMutation) }] : [])
     ]
     : [
-      ...tabs.map(t => ({ id: `tab:${t.id}`, label: t.title, detail: t.kind === 'reference' ? 'Read-only reference' : 'Saved query', group: 'Open queries' })),
+      ...tabs.map(t => ({ id: `tab:${t.id}`, label: t.title, title: t.id === activeTab ? sql : t.sql, searchText: t.id === activeTab ? sql : t.sql, detail: `${t.kind === 'reference' ? 'Read-only reference' : 'Saved query'} · ${connections.find(c => c.id === t.connectionId)?.name ?? 'No connection'}`, group: 'Open tabs' })),
+      ...archivedTabs.map(t => ({ id: `closed-tab:${t.id}`, label: t.title, title: t.sql, searchText: t.sql, detail: `Reopen · ${connections.find(c => c.id === t.connectionId)?.name ?? 'No connection'} · ${formatHistoryTime(t.closedAt)}`, group: 'Closed tabs' })),
       ...schemaItems.map(item => ({ id: `table:${item.schema}.${item.name}`, label: `${item.schema}.${item.name}`, detail: `${item.columns.length} columns`, group: 'Tables & views' })),
       ...pickerHistory.entries.map(entry => ({ id: `history:${entry.id}`, label: entry.query.replace(/\s+/g, ' ').slice(0, 200), title: entry.query, detail: `#${entry.id} · ${entry.durationMs} ms · ${connections.find(c => c.id === entry.connectionId)?.name ?? 'Unavailable connection'} · ${formatHistoryTime(entry.executedAt)} · ${entry.isError ? 'Error' : entry.hasResult ? 'Snapshot' : 'SQL only'}`, group: 'History', matched: true })),
-      ...(['new', 'connections', 'schema', 'history', 'settings', 'find', 'format'] as const).map(id => ({ id: `command:${id}`, label: ({ new: 'New query', connections: 'Switch connection', schema: 'Browse schema', history: 'Query history', settings: 'Settings', find: 'Find in SQL', format: 'Format SQL' })[id], detail: id === 'new' ? '⌘T' : id === 'find' ? '⌘F' : '', group: 'Commands' }))
+      ...(['new', 'connections', 'schema', 'history', 'tabs', 'settings', 'find', 'format'] as const).map(id => ({ id: `command:${id}`, label: ({ new: 'New query', connections: 'Switch connection', schema: 'Browse schema', history: 'Query history', tabs: 'Browse open & closed tabs', settings: 'Settings', find: 'Find in SQL', format: 'Format SQL' })[id], detail: id === 'new' ? '⌘T' : id === 'find' ? '⌘F' : '', group: 'Commands' }))
     ];
   $: if (picker !== 'commands') pickerHistorySearch.cancel();
   $: running = operation !== null;
@@ -231,7 +237,7 @@
     : editEligibility.reason;
   $: canLoadMore = Boolean(result?.autoLimited && result.hasMore && resultUsable && !running && !connectionMutation && !pendingChanges.length);
   $: schemaGroups = groupSchemaItems(schemaItems, schemaSearch);
-  $: if (workspaceLoaded) scheduleDraftSave(sql, activeTab, tabConnectionId, tabs);
+  $: if (workspaceLoaded) scheduleDraftSave(sql, activeTab, tabConnectionId, tabs, archivedTabs);
   $: if (workspaceLoaded) void refreshSchemaForConnection(tabConnectionId);
   $: if (workspaceLoaded) void loadConnectionStats(activeConnection?.id ?? null);
   $: exportItems = [
@@ -288,7 +294,7 @@
       connectionId: activeConnection?.id ?? null,
       state: activeConnection ? connectionTests[activeConnection.id] ?? null : null,
       ready: mounted && workspaceLoaded && !closingWorkspace,
-      busy: Boolean(operation || connectionMutation || showConnectionModal || schemaLoading || editMode || discardRunConfirmation),
+      busy: Boolean(operation || connectionMutation || showConnectionModal || schemaLoading || editMode || discardRunConfirmation || closeTabConfirmation),
       transactionIdle: txStatusKnown && !txStatus.active
     }), (id) => {
       const connection = connections.find(candidate => candidate.id === id);
@@ -422,6 +428,7 @@
 
   async function flushWorkspaceForClose() {
     await bootstrapTask;
+    await tabCloseTask;
     if (renamingTab) finishRename(false);
     await tick();
     await persistDraftNow();
@@ -491,16 +498,66 @@
   }
 
   function closeTab(id: string) {
+    if (!workspaceLoaded || closingWorkspace || closeTabConfirmation) return;
     if (operation?.tabId === id) { flash('Cancel or wait for this query before closing its tab.'); return; }
+    if (renamingTab) finishRename(false);
     captureActive();
     const tab = tabs.find((item) => item.id === id);
-    if (tab?.pendingChanges.length && !confirm('Discard the staged cell edits and close this tab?')) return;
-    if (tab?.kind === 'query' && tab.sql.trim() && !confirm(`Close “${tab.title}”? Its draft will be removed from the workspace.`)) return;
-    const index = tabs.findIndex((item) => item.id === id);
-    tabs = tabs.filter((item) => item.id !== id);
-    if (!tabs.length) tabs = [createQueryTab(crypto.randomUUID(), 'Query 1', '', tabConnectionId)];
-    if (activeTab === id) displayTab(tabs[Math.min(index, tabs.length - 1)]);
-    focusTabLabel(activeTab);
+    if (!tab) return;
+    closeTabError = '';
+    closeTabConfirmation = tab;
+  }
+
+  function confirmCloseTab() {
+    if (tabCloseTask || !closeTabConfirmation) return;
+    tabCloseTask = saveAndCloseTab(closeTabConfirmation.id).finally(() => { tabCloseTask = null; });
+  }
+
+  async function saveAndCloseTab(id: string) {
+    if (operation?.tabId === id) { closeTabError = 'Wait for this query to finish before closing its tab.'; return; }
+    captureActive();
+    const tab = tabs.find(item => item.id === id);
+    if (!tab) { closeTabConfirmation = null; return; }
+    const index = tabs.indexOf(tab);
+    const remaining = tabs.filter(item => item.id !== id);
+    if (!remaining.length) remaining.push(createQueryTab(crypto.randomUUID(), 'Query 1', '', tabConnectionId));
+    const nextId = activeTab === id ? remaining[Math.min(index, remaining.length - 1)].id : activeTab;
+    const archived = archiveTab(tab, new Date().toISOString());
+    const nextArchive = archived ? [archived, ...archivedTabs.filter(item => item.id !== id)] : archivedTabs;
+    if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+    ++draftRevision;
+    draftStatus = 'saving';
+    closeTabError = '';
+    try {
+      // Commit the archive before removing the live tab. On failure the editor,
+      // result and staged changes remain untouched and the dialog can retry.
+      await writeWorkspaceDraft(serializeWorkspace(remaining, nextId, nextArchive));
+      archivedTabs = nextArchive;
+      // Keep async results that may have arrived on a different open tab.
+      tabs = tabs.filter(item => item.id !== id);
+      if (!tabs.length) tabs = remaining;
+      if (activeTab === id) displayTab(tabs.find(item => item.id === nextId)!);
+      draftStatus = 'saved';
+      closeTabConfirmation = null;
+      focusTabLabel(activeTab);
+      flash(archived ? `${tab.title} archived. Reopen it from Tabs or search.` : `${tab.title} closed.`);
+    } catch (error) {
+      draftStatus = 'error';
+      closeTabError = `Could not save the closed tab. Nothing was closed: ${errorMessage(error)}`;
+    }
+  }
+
+  function reopenTab(id: string) {
+    if (!workspaceLoaded || closingWorkspace || closeTabConfirmation) return;
+    const archived = archivedTabs.find(tab => tab.id === id);
+    if (!archived) return;
+    captureActive();
+    const tab = tabs.find(tab => tab.id === id) ?? reopenArchivedTab(archived);
+    if (!tabs.some(tab => tab.id === id)) tabs = [...tabs, tab];
+    archivedTabs = archivedTabs.filter(tab => tab.id !== id);
+    displayTab(tab);
+    void persistDraftNow().catch(() => {});
+    focusTabLabel(id);
   }
 
   function duplicateTab(id: string) {
@@ -677,7 +734,7 @@
       try { localStorage.setItem(EDITOR_FONT_STORAGE_KEY, String(editorFontSize)); } catch { /* Keep the current session's preference. */ }
       return;
     }
-    if (showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails) return;
+    if (showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails || closeTabConfirmation) return;
     const command = event.metaKey || event.ctrlKey;
     if (!command) return;
     if (event.key.toLowerCase() === 'k') {
@@ -736,6 +793,7 @@
       return;
     }
     if (id.startsWith('tab:')) { switchTab(id.slice(4)); return; }
+    if (id.startsWith('closed-tab:')) { reopenTab(id.slice(11)); return; }
     if (id.startsWith('history:')) {
       const entry = pickerHistory.entries.find(entry => `history:${entry.id}` === id);
       if (entry) void openHistory(entry);
@@ -751,7 +809,7 @@
     else if (command === 'connections') picker = 'connections';
     else if (command === 'find') editorRef?.find();
     else if (command === 'format') formatSql();
-    else if (command === 'schema' || command === 'history' || command === 'settings') { sidebar = command; sidebarOpen = true; }
+    else if (command === 'schema' || command === 'history' || command === 'tabs' || command === 'settings') { sidebar = command; sidebarOpen = true; }
   }
 
   async function loadSettings() {
@@ -776,6 +834,7 @@
       const restored = restoreWorkspace(await api.loadDraft('workspace.v1') ?? '');
       if (restored) {
         tabs = restored.tabs;
+        archivedTabs = restored.archivedTabs;
         displayTab(tabs.find((tab) => tab.id === restored.activeId)!);
         return;
       }
@@ -788,7 +847,8 @@
     captureActive();
   }
 
-  function scheduleDraftSave(_sql: string, _activeId: string, _connectionId: string | null, _tabs: WorkspaceTab[]) {
+  function scheduleDraftSave(_sql: string, _activeId: string, _connectionId: string | null, _tabs: WorkspaceTab[], _archivedTabs: ArchivedTab[]) {
+    if (tabCloseTask) return;
     if (draftTimer) clearTimeout(draftTimer);
     draftRevision++;
     draftStatus = 'pending';
@@ -797,13 +857,14 @@
 
   async function persistDraftNow() {
     if (!mounted || !workspaceLoaded) return;
+    if (tabCloseTask) await tabCloseTask;
     if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
     const revision = ++draftRevision;
     draftStatus = 'saving';
     const captured = snapshotActive();
     const workspace = tabs.map((tab) => tab.id === activeTab ? captured : tab);
     try {
-      await writeWorkspaceDraft(serializeWorkspace(workspace, activeTab));
+      await writeWorkspaceDraft(serializeWorkspace(workspace, activeTab, archivedTabs));
       if (revision === draftRevision) draftStatus = 'saved';
     } catch (error) {
       if (revision === draftRevision) draftStatus = 'error';
@@ -1741,6 +1802,13 @@
         on:click={() => selectSidebar('history')}
       ><Icon name="history" /></button>
       <button
+        class:active={sidebar === 'tabs' && sidebarOpen}
+        aria-label="Tabs"
+        aria-pressed={sidebar === 'tabs' && sidebarOpen}
+        data-tooltip="Open & closed tabs"
+        on:click={() => selectSidebar('tabs')}
+      ><Icon name="tabs" /></button>
+      <button
         class:active={sidebar === 'settings' && sidebarOpen}
         aria-label="Settings"
         aria-pressed={sidebar === 'settings' && sidebarOpen}
@@ -1855,6 +1923,8 @@
             {/if}
           {/each}
           {#if history.length < historyTotal}<button class="history-more" disabled={historyLoading} on:click={() => refreshHistory(true)}>{historyLoading ? 'Loading…' : `Load more (${history.length} of ${historyTotal})`}</button>{/if}
+        {:else if sidebar === 'tabs'}
+          <TabsPanel tabs={tabs.map(tab => tab.id === activeTab ? { ...tab, sql, connectionId: tabConnectionId } : tab)} {archivedTabs} {connections} activeId={activeTab} onSelect={switchTab} onReopen={reopenTab} onNew={() => newQuery()} />
         {:else}
           <div class="panel-head"><div><h2>Settings</h2><p>Workspace preferences</p></div></div>
           <section class="settings-card">
@@ -2104,6 +2174,28 @@
       <div class="row-actions">
         <button on:click={() => resolveDiscardForRun(false)}>Keep editing</button>
         <button class="danger-quiet" on:click={() => resolveDiscardForRun(true)}>Discard edits and run</button>
+      </div>
+    </div>
+  </Modal>
+{/if}
+
+{#if closeTabConfirmation}
+  <Modal label="Close tab?" locked={Boolean(tabCloseTask)} onClose={() => closeTabConfirmation = null}>
+    <div class="modal">
+      <h2>Close “{closeTabConfirmation.title}”?</h2>
+      {#if closeTabConfirmation.kind === 'query'}
+        <p>This query will be saved in Tabs → Closed, including its name, SQL, connection and editor position. Reopen it there or find it in global search.</p>
+        <p>Results are not kept with closed tabs. Closing a tab does not commit or roll back a transaction.</p>
+      {:else}
+        <p>This read-only reference will be closed without being archived. You can open it again from History or Schema.</p>
+      {/if}
+      {#if closeTabConfirmation.pendingChanges.length}
+        <p class="error-text">{closeTabConfirmation.pendingChanges.length} staged cell {closeTabConfirmation.pendingChanges.length === 1 ? 'edit' : 'edits'} will be discarded. These changes have not been saved to the database.</p>
+      {/if}
+      {#if closeTabError}<p class="error-text" role="alert">{closeTabError}</p>{/if}
+      <div class="row-actions">
+        <button disabled={Boolean(tabCloseTask)} on:click={() => closeTabConfirmation = null}>Keep open</button>
+        <button class="primary" disabled={Boolean(tabCloseTask)} on:click={confirmCloseTab}>{tabCloseTask ? 'Saving…' : closeTabConfirmation.pendingChanges.length ? 'Discard edits & close' : closeTabConfirmation.kind === 'query' ? 'Archive & close' : 'Close tab'}</button>
       </div>
     </div>
   </Modal>

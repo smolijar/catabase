@@ -43,6 +43,17 @@ test('large schemas cannot crowd history or commands out of global search', () =
   assert.deepEqual(pickerMatches([history, command], 'missing_relation'), [history]);
 });
 
+test('global search finds closed tabs by their full SQL and keeps all groups discoverable', () => {
+  const archived = { id: 'closed-tab:1', label: 'Monthly report', detail: 'Reopen · Docker', group: 'Closed tabs', searchText: `select ${'x'.repeat(400)} from archived_report_table` };
+  assert.deepEqual(pickerMatches([archived], 'archived_report_table'), [archived]);
+  assert.deepEqual(pickerMatches([archived], 'monthly'), [archived]);
+  assert.deepEqual(pickerMatches([archived], 'docker'), [archived]);
+  assert.deepEqual(pickerMatches([archived], 'unrelated'), []);
+  const items = ['Open tabs', 'Closed tabs', 'Tables & views', 'History', 'Commands'].flatMap(group => Array.from({ length: 30 }, (_, i) => ({ id: `${group}:${i}`, label: `${group} ${i}`, detail: '', group })));
+  const matches = pickerMatches(items, '');
+  for (const group of new Set(items.map(item => item.group))) assert.equal(matches.filter(item => item.group === group).length, 20);
+});
+
 test('history search debounces input and ignores responses after a newer request or closing', async () => {
   const requests: Array<{ term: string; resolve: (page: HistoryPage) => void }> = [];
   let state: HistorySearchState = { entries: [], total: 0, loading: false, error: '' };
