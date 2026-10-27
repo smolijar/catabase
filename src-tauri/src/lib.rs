@@ -10,13 +10,12 @@ use std::{
 use catabase_core::{
     ApplyUpdatesResult, CommandTimings, ConnectionFields, ConnectionInput, ConnectionRecord,
     ConnectionStats, CoreError, ForeignKeyLookup, ForeignKeyValues, HistoryPage, HistoryStats,
-    HistoryStorageStats, NewHistoryEntry, PgClient, PgErrorInfo, PgPool, PooledPgClient,
-    QueryCancellation, QueryResult, ReflectionCache, RowUpdate, SchemaTree, Settings,
-    StatementKind, StatementRange, Storage, SupermavenClient, SupermavenCompletion,
-    SupermavenRequest, SupermavenStatus, apply_row_updates as apply_rows,
-    build_connection_url as build_url, checkout_pool_client, classify_statement,
-    connection_stats as load_connection_stats, create_pool, execute_on_client,
-    execute_on_client_with_reflection, get_ddl_on_client as load_ddl,
+    HistoryStorageStats, PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryCancellation,
+    QueryResult, ReflectionCache, RowUpdate, SchemaTree, Settings, StatementHistory, StatementKind,
+    StatementRange, Storage, SupermavenClient, SupermavenCompletion, SupermavenRequest,
+    SupermavenStatus, apply_row_updates_observed as apply_rows, build_connection_url as build_url,
+    checkout_pool_client, classify_statement, connection_stats as load_connection_stats,
+    create_pool, execute_on_client_observed, get_ddl_on_client as load_ddl,
     lookup_foreign_key_values as lookup_fk_values, parse_connection_url as parse_url,
     split_editor_statements, split_statements, test_connection as test_pg_connection,
     validate_transaction_sql,
@@ -45,6 +44,7 @@ struct ActivePool {
 }
 
 struct TxSession {
+    history_id: String,
     connection_id: String,
     client: PooledPgClient,
     ssl: bool,
@@ -69,6 +69,7 @@ impl CancelEntry {
 }
 
 struct QueryRun<'a> {
+    history: &'a StatementHistory<'a>,
     active: &'a ConnectionRecord,
     pool: &'a PgPool,
     reflection: &'a ReflectionCache,
@@ -96,6 +97,7 @@ struct AppError {
 struct TxStatus {
     active: bool,
     started_at: Option<String>,
+    transaction_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -355,10 +357,13 @@ async fn execute_query(
                 Ok::<_, AppError>((active, pool))
             })
             .await?;
+        let notify = |saved| notify_history(&app, saved);
+        let history = StatementHistory::new(&state.storage, &active.id, &notify);
         let result = run_query_with_state(
             &app,
             &state,
             QueryRun {
+                history: &history,
                 active: &active,
                 pool: &pool.pool,
                 reflection: &pool.reflection,
@@ -374,32 +379,20 @@ async fn execute_query(
 
         match result {
             Ok(mut result) => {
-                let before_history_ms = command_start.elapsed().as_secs_f64() * 1000.0;
-                let _ = state
-                    .storage
-                    .insert_query_history(Some(active.id), sql, &result);
-                let after_history_ms = command_start.elapsed().as_secs_f64() * 1000.0;
+                let total_ms = command_start.elapsed().as_secs_f64() * 1000.0;
+                let history_ms = history.save_time_ms();
                 if let Some(timings) = result.timings.as_mut() {
                     timings.command = Some(CommandTimings {
-                        setup_ms: (before_history_ms - timings.total_ms).max(0.0),
-                        history_ms: after_history_ms - before_history_ms,
-                        total_ms: after_history_ms,
+                        setup_ms: (total_ms - timings.total_ms - history_ms).max(0.0),
+                        history_ms,
+                        total_ms,
                     });
                 }
                 Ok(result)
             }
             Err(error) => {
-                let app_error = AppError::from(error);
-                let _ = state.storage.insert_history(NewHistoryEntry {
-                    connection_id: Some(active.id),
-                    query: sql,
-                    duration_ms: 0,
-                    row_count: None,
-                    is_error: true,
-                    error_message: Some(app_error.message.clone()),
-                    result_json: None,
-                });
-                Err(app_error)
+                history.rejected(&sql, &error);
+                Err(AppError::from(error))
             }
         }
     }
@@ -430,6 +423,8 @@ async fn apply_row_updates(
     let cancellation = begin_operation(&state, &query_token).await;
     let outcome = async {
         let active = requested_connection(&state, Some(&connection_id)).await?;
+        let notify = |saved| notify_history(&app, saved);
+        let history = StatementHistory::new(&state.storage, &active.id, &notify);
         if active.options.read_only {
             return Err(CoreError::message(
                 "Cell editing is disabled for this read-only connection.",
@@ -441,16 +436,26 @@ async fn apply_row_updates(
             .await?;
         if let Some(session) = tx.as_ref() {
             check_transaction_connection(&session.connection_id, &active.id)?;
+            history.set_transaction(Some(session.history_id.clone()));
             let result = cancellation
                 .run(
                     &session.client,
                     session.ssl,
-                    apply_rows(&session.client, &updates, true, cancellation.flag()),
+                    apply_rows(
+                        &session.client,
+                        &updates,
+                        true,
+                        cancellation.flag(),
+                        Some(&history),
+                    ),
                 )
                 .await;
             state.cancels.lock().await.remove(&query_token);
+            if let Err(error) = &result {
+                history.interrupted(error);
+            }
             if must_discard(&result) || session.client.is_closed() {
-                discard_transaction(&mut tx);
+                discard_transaction(&app, &state, &mut tx);
                 invalidate_pool_reflection(&state, &active.id).await;
             }
             result.map_err(AppError::from)
@@ -459,14 +464,37 @@ async fn apply_row_updates(
             // manual transaction halfway through an independently committed batch.
             let pool = cancellation.setup(active_pool(&state, &active)).await?;
             let client = cancellation.setup(checkout_pool_client(&pool.pool)).await?;
+            let history_id = state.storage.start_history_transaction("review")?;
+            history.set_transaction(Some(history_id.clone()));
             let result = cancellation
                 .run(
                     &client,
                     active.ssl,
-                    apply_rows(&client, &updates, false, cancellation.flag()),
+                    apply_rows(
+                        &client,
+                        &updates,
+                        false,
+                        cancellation.flag(),
+                        Some(&history),
+                    ),
                 )
                 .await;
             state.cancels.lock().await.remove(&query_token);
+            if let Err(error) = &result {
+                history.interrupted(error);
+            }
+            finish_history(
+                &app,
+                &state.storage,
+                &history_id,
+                if must_discard(&result) || client.is_closed() {
+                    "interrupted"
+                } else if result.is_ok() {
+                    "finished"
+                } else {
+                    "rolledBack"
+                },
+            );
             release_client(client, &result);
             result.map_err(AppError::from)
         }
@@ -645,6 +673,19 @@ async fn history_page(
 }
 
 #[tauri::command]
+async fn history_transaction_page(
+    state: State<'_, AppState>,
+    id: String,
+    offset: u32,
+    limit: u32,
+) -> Result<HistoryPage, AppError> {
+    state
+        .storage
+        .history_transaction_page(&id, offset, limit)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 async fn history_stats(state: State<'_, AppState>) -> Result<HistoryStats, AppError> {
     state.storage.history_stats().map_err(Into::into)
 }
@@ -751,6 +792,26 @@ fn emit_pool_reset(app: &AppHandle) {
     let _ = app.emit("pool-reset", ());
 }
 
+fn notify_history(app: &AppHandle, saved: Result<(), CoreError>) {
+    match saved {
+        Ok(()) => {
+            let _ = app.emit("history-changed", ());
+        }
+        Err(error) => {
+            // SQL may already have committed. Never report a history-write
+            // failure as a query failure, which could encourage a duplicate write.
+            let _ = app.emit(
+                "history-error",
+                format!("SQL execution was not undone, but history could not be saved: {error}"),
+            );
+        }
+    }
+}
+
+fn finish_history(app: &AppHandle, storage: &Storage, id: &str, status: &str) {
+    notify_history(app, storage.finish_history_transaction(id, status));
+}
+
 async fn run_query_with_state(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -766,14 +827,19 @@ async fn run_query_with_state(
             let mut tx = cancellation
                 .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
                 .await?;
-            if tx.is_some() {
+            if let Some(session) = tx.as_ref() {
+                run.history
+                    .set_transaction(Some(session.history_id.clone()));
                 return Err(CoreError::message("Transaction already active"));
             }
 
             let client = cancellation.setup(checkout_pool_client(run.pool)).await?;
             let reflection = Arc::new(ReflectionCache::default());
+            let history_id = state.storage.start_history_transaction("manual")?;
+            run.history.set_transaction(Some(history_id.clone()));
             let result = execute_with_cancel(
                 state,
+                run.history,
                 &client,
                 &reflection,
                 run.ssl,
@@ -786,6 +852,7 @@ async fn run_query_with_state(
             let result = match result {
                 Ok(result) => result,
                 Err(error) => {
+                    finish_history(app, &state.storage, &history_id, "interrupted");
                     // BEGIN may have reached the server even when cancellation
                     // raced its response. Never recycle an ambiguous session.
                     drop(PooledPgClient::take(client));
@@ -794,6 +861,7 @@ async fn run_query_with_state(
             };
             let started_at = chrono::Utc::now().to_rfc3339();
             *tx = Some(TxSession {
+                history_id,
                 connection_id: run.active.id.clone(),
                 client,
                 ssl: run.ssl,
@@ -813,6 +881,7 @@ async fn run_query_with_state(
                 run.offset,
                 run.page_size,
                 &run.active.id,
+                run.history,
             )
             .await?;
             Ok(result)
@@ -826,6 +895,7 @@ async fn run_query_with_state(
                 run.offset,
                 run.page_size,
                 &run.active.id,
+                run.history,
             )
             .await?;
             Ok(result)
@@ -837,8 +907,11 @@ async fn run_query_with_state(
                     .await?;
                 if let Some(session) = tx.as_ref() {
                     check_transaction_connection(&session.connection_id, &run.active.id)?;
+                    run.history
+                        .set_transaction(Some(session.history_id.clone()));
                     let result = execute_with_cancel(
                         state,
+                        run.history,
                         &session.client,
                         &session.reflection,
                         session.ssl,
@@ -849,7 +922,7 @@ async fn run_query_with_state(
                     )
                     .await;
                     if must_discard(&result) || session.client.is_closed() {
-                        discard_transaction(&mut tx);
+                        discard_transaction(app, state, &mut tx);
                         invalidate_pool_reflection(state, &run.active.id).await;
                     }
                     drop(tx);
@@ -859,8 +932,15 @@ async fn run_query_with_state(
             }
 
             let client = cancellation.setup(checkout_pool_client(run.pool)).await?;
+            let batch_id = if split_statements(run.sql).len() > 1 {
+                Some(state.storage.start_history_transaction("batch")?)
+            } else {
+                None
+            };
+            run.history.set_transaction(batch_id.clone());
             let result = execute_with_cancel(
                 state,
+                run.history,
                 &client,
                 run.reflection,
                 run.ssl,
@@ -870,6 +950,20 @@ async fn run_query_with_state(
                 run.page_size,
             )
             .await;
+            if let Some(id) = batch_id {
+                finish_history(
+                    app,
+                    &state.storage,
+                    &id,
+                    if must_discard(&result) || client.is_closed() {
+                        "interrupted"
+                    } else if result.is_ok() {
+                        "finished"
+                    } else {
+                        "rolledBack"
+                    },
+                );
+            }
             release_client(client, &result);
             result
         }
@@ -910,13 +1004,14 @@ async fn execute_read_only_replay(
                     "Replay cancelled before execution.".into(),
                 )),
                 Ok(()) => {
-                    execute_on_client_with_reflection(
+                    execute_on_client_observed(
                         &client,
                         run.sql,
                         run.offset,
                         run.page_size,
                         Some(cancelled.flag()),
                         run.reflection,
+                        Some(run.history),
                     )
                     .await
                 }
@@ -942,6 +1037,7 @@ async fn execute_read_only_replay(
 #[allow(clippy::too_many_arguments)] // The cache must travel with the checked-out client.
 async fn execute_with_cancel(
     state: &State<'_, AppState>,
+    history: &StatementHistory<'_>,
     client: &PgClient,
     reflection: &ReflectionCache,
     ssl: bool,
@@ -955,20 +1051,25 @@ async fn execute_with_cancel(
         .run(
             client,
             ssl,
-            execute_on_client_with_reflection(
+            execute_on_client_observed(
                 client,
                 sql,
                 offset,
                 page_size,
                 Some(cancelled.flag()),
                 reflection,
+                Some(history),
             ),
         )
         .await;
+    if let Err(error) = &result {
+        history.interrupted(error);
+    }
     state.cancels.lock().await.remove(query_token);
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_tx_with_sql(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -977,6 +1078,7 @@ async fn finish_tx_with_sql(
     offset: usize,
     page_size: usize,
     connection_id: &str,
+    history: &StatementHistory<'_>,
 ) -> Result<QueryResult, CoreError> {
     let cancellation = register_cancel(state, query_token).await;
     let mut tx = cancellation
@@ -988,8 +1090,10 @@ async fn finish_tx_with_sql(
     let session = tx
         .as_ref()
         .ok_or_else(|| CoreError::message("No active transaction"))?;
+    history.set_transaction(Some(session.history_id.clone()));
     let result = execute_with_cancel(
         state,
+        history,
         &session.client,
         &session.reflection,
         session.ssl,
@@ -1000,9 +1104,19 @@ async fn finish_tx_with_sql(
     )
     .await;
     if must_discard(&result) || session.client.is_closed() {
-        discard_transaction(&mut tx);
+        discard_transaction(app, state, &mut tx);
         invalidate_pool_reflection(state, connection_id).await;
     } else if result.is_ok() {
+        finish_history(
+            app,
+            &state.storage,
+            &session.history_id,
+            if classify_statement(sql) == StatementKind::TxRollback {
+                "rolledBack"
+            } else {
+                "finished"
+            },
+        );
         *tx = None;
         invalidate_pool_reflection(state, connection_id).await;
     }
@@ -1023,8 +1137,9 @@ fn release_client<T>(client: PooledPgClient, result: &Result<T, CoreError>) {
     }
 }
 
-fn discard_transaction(tx: &mut Option<TxSession>) {
+fn discard_transaction(app: &AppHandle, state: &State<'_, AppState>, tx: &mut Option<TxSession>) {
     if let Some(session) = tx.take() {
+        finish_history(app, &state.storage, &session.history_id, "interrupted");
         drop(PooledPgClient::take(session.client));
     }
 }
@@ -1045,18 +1160,22 @@ async fn finish_tx(
     state: &State<'_, AppState>,
     sql: &str,
 ) -> Result<(), AppError> {
-    let mut tx = state.tx.lock().await;
-    let session = tx
-        .as_ref()
-        .ok_or_else(|| CoreError::message("No active transaction"))?;
-    execute_on_client(&session.client, sql, 0, 1)
+    let connection_id = state
+        .tx
+        .lock()
         .await
-        .map_err(AppError::from)?;
-    invalidate_pool_reflection(state, &session.connection_id).await;
-    *tx = None;
-    drop(tx);
-    let _ = app.emit("tx-changed", tx_status_inner(state).await);
-    Ok(())
+        .as_ref()
+        .map(|session| session.connection_id.clone())
+        .ok_or_else(|| CoreError::message("No active transaction"))?;
+    let notify = |saved| notify_history(app, saved);
+    let history = StatementHistory::new(&state.storage, &connection_id, &notify);
+    let token = uuid::Uuid::new_v4().to_string();
+    let result = finish_tx_with_sql(app, state, sql, &token, 0, 1, &connection_id, &history).await;
+    state.cancels.lock().await.remove(&token);
+    if let Err(error) = &result {
+        history.rejected(sql, error);
+    }
+    result.map(|_| ()).map_err(Into::into)
 }
 
 async fn active_connection(state: &State<'_, AppState>) -> Result<ConnectionRecord, AppError> {
@@ -1197,15 +1316,12 @@ async fn refresh_active(state: &State<'_, AppState>) -> Result<(), AppError> {
 }
 
 async fn tx_status_inner(state: &State<'_, AppState>) -> TxStatus {
-    let started_at = state
-        .tx
-        .lock()
-        .await
-        .as_ref()
-        .map(|session| session.started_at.clone());
+    let tx = state.tx.lock().await;
+    let started_at = tx.as_ref().map(|session| session.started_at.clone());
     TxStatus {
         active: started_at.is_some(),
         started_at,
+        transaction_id: tx.as_ref().map(|session| session.history_id.clone()),
     }
 }
 
@@ -1257,6 +1373,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let storage = Storage::open(data_dir.join("catabase.sqlite3"))?;
+            storage.interrupt_history_transactions()?;
             let active = storage.active_connection()?;
             let enabled = storage.get_settings()?.supermaven_enabled;
             let supermaven = Arc::new(SupermavenClient::new(data_dir.join("supermaven")));
@@ -1301,6 +1418,7 @@ pub fn run() {
             history_delete,
             history_get_result,
             history_page,
+            history_transaction_page,
             history_purge,
             history_stats,
             history_storage_stats,

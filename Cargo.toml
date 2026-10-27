@@ -11,6 +11,7 @@ license = "MIT"
 chrono = { version = "0.4", features = ["serde"] }
 deadpool-postgres = "0.14"
 fallible-iterator = "0.2"
+futures-util = "0.3"
 keyring = "3"
 percent-encoding = "2"
 postgres-protocol = "0.6"
