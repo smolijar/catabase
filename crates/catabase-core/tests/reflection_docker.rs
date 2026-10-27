@@ -156,6 +156,13 @@ async fn statement_history_records_manual_transactions_reviewed_edits_and_atomic
     assert!(!entries[0].is_error);
     assert!(entries[1].is_error);
     assert_eq!(entries[1].query, "SELECT 1/0;");
+    assert!(
+        entries[1]
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("division by zero")
+    );
     assert_eq!(
         client
             .query_one("SELECT note FROM catabase_history_probe", &[])
