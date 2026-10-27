@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en" data-theme="tuxedo" data-conn="none">
+  <head><meta charset="utf-8" /><title>Connection editor UX fixture</title></head>
+  <body>
+    <div id="fixture"></div>
+    <script type="module">
+      import { mount } from 'svelte';
+      import Preview from './ConnectionEditorPreview.svelte';
+      import '@fontsource/ibm-plex-sans/latin-400.css';
+      import '@fontsource/ibm-plex-sans/latin-600.css';
+      import '../../src/tokens.css';
+      import '../../src/app.css';
+      mount(Preview, { target: document.getElementById('fixture') });
+    </script>
+  </body>
+</html>

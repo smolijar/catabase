@@ -4,10 +4,10 @@
   import type { ConnectionAppearance } from '../lib/appearance';
   import type { ConnectionInput } from '../lib/types';
   import { connectionOptions } from '../lib/connectionOptions';
+  import { applyConnectionUrl, displayConnectionUrl, editsMaskedPassword, redactConnectionUrl } from '../lib/connectionUrl';
 
   export let connection: ConnectionInput;
   export let appearance: ConnectionAppearance;
-  export let url = '';
   export let feedback = '';
   export let saving = false;
   export let testing = false;
@@ -15,38 +15,76 @@
   export let onClose: () => void;
   export let onSave: () => void;
   export let onTest: () => void;
-  export let onImport: () => void;
-  export let onConnectionInput: () => void;
   let form: HTMLFormElement;
   let tablist: HTMLDivElement;
+  let body: HTMLDivElement;
+  let urlInput: HTMLInputElement;
+  let url = displayConnectionUrl(connection);
+  let urlError = '';
   const sections = ['connection', 'appearance', 'options'] as const;
   let options = connectionOptions(connection.options);
   $: connection.options = options;
+  $: urlInput?.setCustomValidity(urlError);
 
-  async function submit() {
+  async function onConnectionInput() {
+    // Svelte input bindings update after the event handler.
+    await tick();
+    url = displayConnectionUrl(connection);
+    urlError = '';
+  }
+
+  function updateUrl(value: string, cursor: number) {
+    const hasPassword = Boolean(connection.password);
+    const redacted = redactConnectionUrl(value, hasPassword);
+    const offset = redactConnectionUrl(value.slice(0, cursor), hasPassword).length;
+    url = redacted;
+    urlInput.value = redacted;
+    urlInput.setSelectionRange(Math.min(offset, redacted.length), Math.min(offset, redacted.length));
+    try { connection = applyConnectionUrl(redacted, connection); urlError = ''; }
+    catch (error) { urlError = (error as Error).message; }
+  }
+
+  function beforeUrlInput(event: InputEvent) {
+    if (editsMaskedPassword(url, urlInput.selectionStart ?? 0, urlInput.selectionEnd ?? 0, event.inputType)) event.preventDefault();
+  }
+
+  function pasteUrl(event: ClipboardEvent) {
+    event.preventDefault();
+    const start = urlInput.selectionStart ?? 0, end = urlInput.selectionEnd ?? 0;
+    if (editsMaskedPassword(url, start, end, 'insertFromPaste')) return;
+    const text = event.clipboardData?.getData('text/plain') ?? '';
+    updateUrl(url.slice(0, start) + text + url.slice(end), start + text.length);
+  }
+
+  function changeSection(next: typeof section) {
+    section = next;
+    if (body) body.scrollTop = 0;
+  }
+
+  async function submit(action = onSave) {
     // The Connection panel stays mounted so switching tabs preserves all fields.
     // Reveal invalid fields before reporting validity, even when saving Appearance.
     if (!form.checkValidity()) {
-      section = form.querySelector('input:invalid')?.closest('[role="tabpanel"]')?.id === 'connection-editor-options-panel' ? 'options' : 'connection';
+      changeSection(form.querySelector('input:invalid')?.closest('[role="tabpanel"]')?.id === 'connection-editor-options-panel' ? 'options' : 'connection');
       await tick();
       form.reportValidity();
       return;
     }
-    onSave();
+    action();
   }
 
   async function navigate(event: KeyboardEvent) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     const index = sections.indexOf(section);
-    section = event.key === 'Home' ? sections[0] : event.key === 'End' ? sections[sections.length - 1]
-      : sections[(index + (event.key === 'ArrowLeft' ? -1 : 1) + sections.length) % sections.length];
+    changeSection(event.key === 'Home' ? sections[0] : event.key === 'End' ? sections[sections.length - 1]
+      : sections[(index + (event.key === 'ArrowLeft' ? -1 : 1) + sections.length) % sections.length]);
     await tick();
     tablist.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus();
   }
 </script>
 
-<form class="modal" bind:this={form} novalidate on:submit|preventDefault={submit}>
+<form class="modal connection-editor" bind:this={form} novalidate on:submit|preventDefault={() => submit()}>
   <div class="panel-head">
     <h2>{connection.id ? 'Edit connection' : 'New connection'}</h2>
     <button type="button" disabled={saving} on:click={onClose}>Close</button>
@@ -55,11 +93,12 @@
     {#each sections as tab}
       <button type="button" role="tab" id={`connection-editor-${tab}-tab`} aria-controls={`connection-editor-${tab}-panel`}
         aria-selected={section === tab} tabindex={section === tab ? 0 : -1}
-        on:keydown={navigate} on:click={() => section = tab as typeof section}>
+        on:keydown={navigate} on:click={() => changeSection(tab)}>
         {tab === 'connection' ? 'Connection' : tab === 'appearance' ? 'Appearance' : 'Options'}
       </button>
     {/each}
   </div>
+  <div class="connection-editor-body" bind:this={body}>
   <div class="connection-panel" id="connection-editor-connection-panel" role="tabpanel" aria-labelledby="connection-editor-connection-tab" hidden={section !== 'connection'}>
     <label>Name <input disabled={saving} bind:value={connection.name} on:input={onConnectionInput} required /></label>
     <label>Host <input disabled={saving} bind:value={connection.host} on:input={onConnectionInput} required /></label>
@@ -70,8 +109,14 @@
     <label>Username <input disabled={saving} bind:value={connection.username} on:input={onConnectionInput} required /></label>
     <label>Password <input disabled={saving} type="password" bind:value={connection.password} on:input={onConnectionInput} /></label>
     <label class="checkbox"><input disabled={saving} type="checkbox" bind:checked={connection.ssl} on:change={onConnectionInput} /> Use SSL</label>
-    <label>Connection URL <input disabled={saving} bind:value={url} /></label>
-    <div class="row-actions"><button type="button" disabled={saving} on:click={onImport}>Import URL</button></div>
+    <label>Connection URL
+      <input disabled={saving} value={url} bind:this={urlInput} spellcheck="false" autocomplete="off"
+        aria-describedby="connection-url-help connection-url-error" aria-invalid={Boolean(urlError)}
+        on:beforeinput={beforeUrlInput} on:paste={pasteUrl}
+        on:input={() => updateUrl(urlInput.value, urlInput.selectionStart ?? urlInput.value.length)} />
+    </label>
+    <p id="connection-url-help">URL changes update the fields automatically. The password is hidden and can only be changed in the Password field; passwords in pasted URLs are ignored.</p>
+    <p id="connection-url-error" role="status">{urlError}</p>
   </div>
   <div class="connection-panel" id="connection-editor-appearance-panel" role="tabpanel" aria-labelledby="connection-editor-appearance-tab" hidden={section !== 'appearance'}>
     <p>Display preferences for <strong>{connection.name || 'this connection'}</strong>, saved on this device.</p>
@@ -103,14 +148,23 @@
     <p>Starts PostgreSQL transactions read-only and disables cell editing. Explicit SQL can override the session default; use a read-only database role for enforced access restrictions.</p>
     <p>Connection and option changes apply on Save and reset affected results and pooled sessions. Finish any open transaction first.</p>
   </div>
-  {#if feedback}<p class="muted" role="status">{feedback}</p>{/if}
-  <div class="row-actions">
-    {#if section === 'connection'}<button type="button" on:click={onTest} disabled={testing || saving}>{testing ? 'Testing…' : 'Test'}</button>{/if}
-    <button type="submit" class="primary" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+  </div>
+  <div class="connection-editor-footer">
+    {#if feedback}<p class="muted" role="status">{feedback}</p>{/if}
+    <div class="row-actions">
+      {#if section === 'connection'}<button type="button" on:click={() => submit(onTest)} disabled={testing || saving}>{testing ? 'Testing…' : 'Test'}</button>{/if}
+      <button type="submit" class="primary" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+    </div>
   </div>
 </form>
 
 <style>
+  .connection-editor { height: min(720px, calc(100dvh - 52px)); grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; }
+  .connection-editor-body { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 3px 5px 5px 3px; }
+  .connection-editor-footer { display: grid; gap: 8px; }
+  .connection-editor-footer .row-actions { justify-content: flex-end; }
+  .section-tabs { overflow-x: auto; flex-shrink: 0; }
   .connection-panel { display: grid; gap: 16px; }
   .connection-panel[hidden] { display: none; }
+  #connection-url-error:empty { display: none; }
 </style>

@@ -21,7 +21,7 @@ before(async () => {
   const { render } = await server.ssrLoadModule('svelte/server');
   renderEditor = (props = {}) => render(Editor, { props: {
     connection: { ...connection }, appearance: { color: 'blue', environment: 'LOCAL' },
-    onClose: () => {}, onSave: () => {}, onTest: () => {}, onImport: () => {}, onConnectionInput: () => {}, ...props
+    onClose: () => {}, onSave: () => {}, onTest: () => {}, ...props
   } }).body;
 });
 after(async () => { await server?.close(); });
@@ -47,6 +47,17 @@ test('appearance panel retains connection inputs but hides them and exposes save
   // Validation is handled after revealing hidden fields, not by the browser's
   // automatic submit validation while the required fields are inaccessible.
   assert.match(html, /<form[^>]*novalidate/);
+});
+
+test('connection editor has a separate scrolling body and pinned tabs/footer with safe live URL editing', () => {
+  const html = renderEditor({ connection: { ...connection, password: 'private-password' } });
+  assert.match(html, /class="modal connection-editor/);
+  assert.match(html, /class="connection-editor-body/);
+  assert.match(html, /class="connection-editor-footer/);
+  assert.match(html, /postgresql:\/\/zenbase:••••••@localhost:5432\/zenbase/);
+  assert.doesNotMatch(html.match(/<input[^>]*aria-describedby="connection-url-help[^>]*>/)?.[0] ?? '', /private-password/);
+  assert.doesNotMatch(html, /Import URL/);
+  assert.match(html, /passwords in pasted URLs are ignored/);
 });
 
 test('appearance drafts target the edited connection and cannot mutate saved preferences', () => {
