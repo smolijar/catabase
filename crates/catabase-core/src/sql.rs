@@ -338,7 +338,9 @@ fn strip_leading_comments(mut sql: &str) -> &str {
 
 fn push_statement(ranges: &mut Vec<StatementRange>, sql: &str, start: usize, end: usize) {
     let text = sql[start..end].trim().to_string();
-    if !text.is_empty() {
+    // PostgreSQL emits no CommandComplete for empty separators. Keep ranges
+    // aligned with actual statements (including when mapping streamed history).
+    if !text.trim_matches(';').trim().is_empty() {
         ranges.push(StatementRange { start, end, text });
     }
 }
@@ -424,6 +426,20 @@ fn dollar_tag_at(sql: &str, index: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_separators_are_not_statements() {
+        let statements =
+            split_statements("; ; -- comment\n SELECT ';';; /* comment */ SELECT 2; ;");
+        assert_eq!(
+            statements
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["SELECT ';';", "SELECT 2;"]
+        );
+        assert!(validate_transaction_sql("BEGIN;;").is_ok());
+    }
 
     #[test]
     fn splits_semicolons_outside_strings_and_comments() {

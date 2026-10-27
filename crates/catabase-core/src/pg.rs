@@ -702,9 +702,22 @@ async fn execute_simple(
                 let error = CoreError::from(error);
                 // PostgreSQL parses the entire batch before executing it. An
                 // initial syntax error can belong to a later statement.
-                let failed = error
-                    .pg_info()
-                    .and_then(|info| info.position)
+                let original_position = if index == 0 {
+                    match &error {
+                        CoreError::Postgres(pg) => {
+                            pg.as_db_error().and_then(|db| match db.position() {
+                                Some(tokio_postgres::error::ErrorPosition::Original(position)) => {
+                                    Some(*position as usize)
+                                }
+                                _ => None, // Internal positions refer to a function's SQL, not this batch.
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let failed = original_position
                     .and_then(|position| {
                         let byte = sql
                             .char_indices()
