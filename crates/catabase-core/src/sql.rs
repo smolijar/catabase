@@ -101,20 +101,27 @@ pub fn split_statements(sql: &str) -> Vec<StatementRange> {
 /// Editor-only boundaries for independent queries and transaction commands
 /// separated by blank lines.
 /// SQL execution and transaction validation still use semicolons exclusively.
-/// A WITH clause stays attached to its first top-level query, and set-operation
-/// operands, nested queries, strings and comments never introduce a boundary.
+/// A WITH clause stays attached to its first top-level query or write. Insert
+/// sources, upserts, row locks, MERGE actions, set-operation operands, nested
+/// queries, strings and comments never introduce a boundary.
 pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
     let bytes = sql.as_bytes();
     let mut ranges = Vec::new();
 
     for statement in split_statements(sql) {
         let kind = classify_statement(&statement.text);
+        let first_word = leading_keywords(&statement.text, 1)
+            .pop()
+            .unwrap_or_default();
         if !matches!(
             kind,
             StatementKind::SelectLike
                 | StatementKind::TxBegin
                 | StatementKind::TxCommit
                 | StatementKind::TxRollback
+        ) && !matches!(
+            first_word.as_str(),
+            "insert" | "update" | "delete" | "merge" | "rollback"
         ) {
             ranges.push(statement);
             continue;
@@ -123,8 +130,10 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
         let mut index = start;
         let mut depth = 0usize;
         let mut line_breaks = 0;
-        let mut query_body_seen = false;
-        let mut transaction_body_seen = kind != StatementKind::SelectLike;
+        let mut command = String::new();
+        let mut insert_source_pending = false;
+        let mut row_lock_pending = false;
+        let mut previous_word = String::new();
         let mut set_operand_pending = false;
         let mut case_depth = 0usize;
 
@@ -157,13 +166,27 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
                     let word = sql[word_start..index].to_ascii_lowercase();
                     let starts_query =
                         matches!(word.as_str(), "select" | "with" | "values" | "table");
+                    let starts_write =
+                        matches!(word.as_str(), "insert" | "update" | "delete" | "merge");
                     let starts_transaction = matches!(
                         word.as_str(),
                         "begin" | "commit" | "end" | "rollback" | "abort"
                     ) || (word == "start"
                         && classify_statement(&sql[word_start..]) == StatementKind::TxBegin);
-                    if (starts_query || starts_transaction)
-                        && (query_body_seen || transaction_body_seen)
+                    // These keywords can also continue the current statement:
+                    // INSERT's source, row locks, upserts, and MERGE actions.
+                    let continues_insert = starts_query && insert_source_pending;
+                    let continues_lock = word == "update" && row_lock_pending;
+                    let continues_upsert =
+                        command == "insert" && previous_word == "do" && word == "update";
+                    let continues_merge =
+                        command == "merge" && previous_word == "then" && starts_write;
+                    if (starts_query || starts_write || starts_transaction)
+                        && !command.is_empty()
+                        && !(continues_insert
+                            || continues_lock
+                            || continues_upsert
+                            || continues_merge)
                         && !set_operand_pending
                         && case_depth == 0
                         && line_breaks >= 2
@@ -171,8 +194,18 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
                         let end = start + sql[start..word_start].trim_end().len();
                         push_statement(&mut ranges, sql, start, end);
                         start = word_start;
-                        query_body_seen = false;
-                        transaction_body_seen = starts_transaction;
+                        command.clear();
+                        insert_source_pending = false;
+                        row_lock_pending = false;
+                    }
+                    if command.is_empty()
+                        && ((starts_query && word != "with") || starts_write || starts_transaction)
+                    {
+                        command = word.clone();
+                        insert_source_pending = word == "insert";
+                    }
+                    if continues_merge && word == "insert" {
+                        insert_source_pending = true;
                     }
                     // END in a multiline CASE expression is not COMMIT's alias.
                     if word == "case" {
@@ -181,11 +214,14 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
                         case_depth = case_depth.saturating_sub(1);
                     }
                     if matches!(word.as_str(), "select" | "values" | "table") {
-                        query_body_seen = true;
+                        insert_source_pending = false;
                         set_operand_pending = false;
                     } else if matches!(word.as_str(), "union" | "intersect" | "except") {
                         set_operand_pending = true;
                     }
+                    row_lock_pending = word == "for"
+                        || (row_lock_pending && matches!(word.as_str(), "no" | "key"));
+                    previous_word = word;
                 }
             } else if byte == b'\'' {
                 let escape_backslash = index > 0
@@ -551,6 +587,92 @@ SELECT name FROM LANDLORDS"#;
                 "BEGIN", "SELECT 1", "COMMIT", "BEGIN", "SELECT 2", "ROLLBACK"
             ]
         );
+    }
+
+    #[test]
+    fn editor_separates_select_from_reviewed_update_and_rollback() {
+        let select = "select * from landlords where id like '%qc%'";
+        let update = r#"UPDATE "public"."landlords" AS target SET "allow_after_cutoff_sign_up" = new_values."allow_after_cutoff_sign_up" FROM jsonb_populate_record(NULL::"public"."landlords", E'{"allow_after_cutoff_sign_up":true}'::jsonb) AS new_values WHERE target."id" = 'qc';"#;
+        let sql = format!("BEGIN\n\n{select}\n\n\n{update}\n\nROLLBACK");
+        let ranges = split_editor_statements(&sql);
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| range.text.as_str())
+                .collect::<Vec<_>>(),
+            ["BEGIN", select, update, "ROLLBACK"]
+        );
+        // Monaco's caret at the end of the SELECT must resolve to this range,
+        // never to a combined SELECT + UPDATE, with or without a final semicolon.
+        let cursor = sql.find(select).unwrap() + select.len();
+        assert_eq!(ranges[1].end, cursor);
+        assert!(ranges[2].start > cursor);
+        let without_semicolon = sql.replace(';', "");
+        assert_eq!(split_editor_statements(&without_semicolon).len(), 4);
+        // Explicit selection/batch execution does not gain implicit semicolons.
+        assert_eq!(split_statements(&without_semicolon).len(), 1);
+    }
+
+    #[test]
+    fn editor_splits_independent_writes_from_any_starting_command() {
+        let commands = [
+            "SELECT 'č🐈' AS label",
+            "UPDATE cats SET name = 'Milo' RETURNING *",
+            "INSERT INTO cats (name) VALUES ('Milo')",
+            "DELETE FROM cats WHERE name = 'Milo'",
+            "MERGE INTO cats USING kittens ON cats.id = kittens.id WHEN MATCHED THEN UPDATE SET name = kittens.name",
+            "ROLLBACK TO SAVEPOINT checkpoint",
+        ];
+        for first in commands {
+            for second in commands {
+                let sql = format!("{first}\r\n \t\r\n{second}\r\n\r\nROLLBACK");
+                let ranges = split_editor_statements(&sql);
+                assert_eq!(
+                    ranges
+                        .iter()
+                        .map(|range| range.text.as_str())
+                        .collect::<Vec<_>>(),
+                    [first, second, "ROLLBACK"],
+                    "{sql}"
+                );
+                for range in ranges {
+                    assert_eq!(&sql[range.start..range.end], range.text);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn editor_preserves_multiline_write_sources_locks_upserts_and_merge_actions() {
+        for query in [
+            "SELECT * FROM cats\n\nFOR\n\nUPDATE",
+            "SELECT * FROM cats FOR NO KEY\n\nUPDATE OF cats SKIP LOCKED",
+            "WITH c AS (SELECT 1)\n\nUPDATE cats SET id = c.id FROM c RETURNING *",
+            "WITH c AS (DELETE FROM cats RETURNING *)\n\nINSERT INTO kittens\n\nSELECT * FROM c",
+            "WITH c AS (SELECT 1)\n\nDELETE FROM cats USING c WHERE cats.id = c.id",
+            "INSERT INTO cats\n\nSELECT * FROM kittens\n\nUNION ALL\n\nSELECT * FROM old_cats",
+            "INSERT INTO cats\n\nWITH c AS (SELECT * FROM kittens)\n\nSELECT * FROM c",
+            "INSERT INTO cats\n\nTABLE kittens",
+            "INSERT INTO cats\n\nVALUES (1, 'Milo')\n\nON CONFLICT (id) DO\n\nUPDATE SET name = excluded.name RETURNING *",
+            "INSERT INTO cats DEFAULT\n\nVALUES",
+            "UPDATE cats SET name = CASE WHEN id = 1 THEN 'Milo'\n\nEND RETURNING *",
+            "MERGE INTO cats USING kittens ON cats.id = kittens.id WHEN MATCHED THEN\n\nUPDATE SET name = kittens.name WHEN NOT MATCHED THEN\n\nINSERT (id, name)\n\nVALUES (kittens.id, kittens.name)",
+            "MERGE INTO cats USING kittens ON cats.id = kittens.id WHEN MATCHED THEN\n\nDELETE",
+            "UPDATE cats SET name = E'Milo\\'s\n\nUPDATE cats'",
+            "UPDATE cats SET name = $tag$Milo\n\nDELETE FROM cats$tag$",
+            "UPDATE cats SET name = 'Milo' /* outer\n\nUPDATE /* nested */ cats */ RETURNING *",
+        ] {
+            let sql = format!("{query}\n\nUPDATE cats SET name = 'next'\n\nSELECT 2");
+            let ranges = split_editor_statements(&sql);
+            assert_eq!(
+                ranges
+                    .iter()
+                    .map(|range| range.text.as_str())
+                    .collect::<Vec<_>>(),
+                [query, "UPDATE cats SET name = 'next'", "SELECT 2"],
+                "{sql}"
+            );
+        }
     }
 
     #[test]
