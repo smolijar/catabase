@@ -1,9 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createInlineRequester, inlineEdit } from '../src/lib/supermavenInline.ts';
+import { canRequestSupermaven, createInlineRequester, inlineEdit } from '../src/lib/supermavenInline.ts';
 import type { SupermavenCompletion, SupermavenRequest } from '../src/lib/types.ts';
 
 const snapshot = { documentId: 'query-1', text: 'select ', position: 7 };
+
+test('edit requests can reconnect the agent without bypassing opt-in or activation', () => {
+  for (const state of ['ready', 'connecting', 'disconnected']) {
+    assert.equal(canRequestSupermaven({ enabled: true, state, message: '' }), true);
+    assert.equal(canRequestSupermaven({ enabled: false, state, message: '' }), false);
+    assert.equal(canRequestSupermaven({ enabled: true, state, message: '', activationUrl: 'https://supermaven.com/activate' }), false);
+  }
+  for (const state of ['off', 'starting', 'activation', 'error']) {
+    assert.equal(canRequestSupermaven({ enabled: true, state, message: '' }), false);
+  }
+});
 
 test('debounced requests send only the active SQL document and UTF-16 offset', async () => {
   const calls: SupermavenRequest[] = [];

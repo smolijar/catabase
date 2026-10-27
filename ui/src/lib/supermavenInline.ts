@@ -1,4 +1,9 @@
-import type { SupermavenCompletion, SupermavenRequest } from './types';
+import type { SupermavenCompletion, SupermavenRequest, SupermavenStatus } from './types';
+
+/** A new edit wakes the official agent's lazy connection/reconnection path. */
+export function canRequestSupermaven(status: SupermavenStatus): boolean {
+  return status.enabled && !status.activationUrl && ['ready', 'connecting', 'disconnected'].includes(status.state);
+}
 
 type Snapshot = Omit<SupermavenRequest, 'requestId'>;
 

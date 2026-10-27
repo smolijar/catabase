@@ -94,6 +94,8 @@ Suggestions appear as Monaco ghost text; Tab accepts, Escape dismisses, and Opti
 
 Table/column-name completion stops at the reflected identifier rather than appending invented filters, dates or IDs. After accepting a name, type the next SQL operator/clause to continue; explicitly request another suggestion with Option/Alt+\ when needed.
 
+After a service disconnect, the next edit or explicit suggestion request lets the official agent reconnect, as in Neovim; it does not continuously retry in the background. Settings distinguishes an agent startup failure from a service disconnect. Known WebSocket failures are classified into safe fixed messages without storing raw provider logs, account details or SQL. Retry restarts the agent; it cannot repair an unavailable upstream service.
+
 An opt-in live smoke test sends only synthetic SQL, never database data:
 
 ```sh
