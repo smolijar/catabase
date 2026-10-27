@@ -22,6 +22,7 @@
   import WorkspacePicker from './components/WorkspacePicker.svelte';
   import { APPEARANCE_KEY, connectionAppearanceDraft, workspaceAppearance, restoreAppearance, shortType } from './lib/appearance';
   import { connectionOptions, connectionTestTimeout } from './lib/connectionOptions';
+  import { hasNativeMacTitlebar } from './lib/nativeTitlebar';
   import { sameConnectionSettings } from './lib/connectionEditor';
   import type { ConnectionAppearance, ThemePreference } from './lib/appearance';
   import { serializeRows } from './lib/export';
@@ -79,6 +80,7 @@
   type Operation = { token: string; tabId: string; connectionId: string; kind: 'query' | 'load' | 'export' | 'apply'; startedAt: number; cancelling: boolean };
 
   let sidebar: SidebarTab = 'connections';
+  let nativeTitlebar = false;
   let sidebarOpen = true;
   let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
   let workspaceWidth = 1280;
@@ -233,6 +235,7 @@
 
   onMount(() => {
     mounted = true;
+    nativeTitlebar = hasNativeMacTitlebar(isTauri(), navigator.platform);
     const media = window.matchMedia('(prefers-color-scheme: light)');
     systemLight = media.matches;
     const onSystemTheme = (event: MediaQueryListEvent) => { systemLight = event.matches; };
@@ -1599,8 +1602,8 @@
 
 </script>
 
-<main class="app-shell" inert={closingWorkspace}>
-  <header class="toolbar">
+<main class="app-shell" class:native-titlebar={nativeTitlebar} inert={closingWorkspace}>
+  <header class="toolbar" data-tauri-drag-region={nativeTitlebar ? 'deep' : undefined}>
     <div class="brand" aria-label="catabase">
       <Cat mood={running ? 'prompt' : queryError ? 'error' : !activeConnection || result?.rowCount === 0 ? 'asleep' : 'awake'} />
       <span class="wordmark" aria-hidden="true"><b>CAT</b>ABASE<i></i></span>

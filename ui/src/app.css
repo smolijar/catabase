@@ -26,6 +26,10 @@ kbd { border: 1px solid var(--line); border-radius: 2px; background: var(--surfa
 .app-shell { display: grid; grid-template-rows: 40px minmax(0, 1fr) 24px; height: 100vh; background: var(--surface-1); }
 .toolbar, .status-bar, .tabs, .results-head, .panel-head, .row-actions, .brand { display: flex; align-items: center; }
 .toolbar { gap: 12px; padding: 0 12px; background: var(--surface-0); border-bottom: 1px solid var(--line); min-width: 0; }
+/* Native macOS controls are overlaid at x=14, y=20 (tauri.conf.json).
+   Leave them unobstructed and align the app header in the same titlebar row. */
+.app-shell.native-titlebar { grid-template-rows: 48px minmax(0, 1fr) 24px; }
+.native-titlebar > .toolbar { padding-left: 90px; user-select: none; -webkit-user-select: none; }
 html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); }
 .brand { gap: 8px; min-width: 0; flex-shrink: 0; }
 .wordmark { font: 16px/16px 'Silkscreen', var(--font-mono); letter-spacing: -.5px; white-space: nowrap; }
