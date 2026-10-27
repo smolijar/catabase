@@ -164,14 +164,12 @@
   let showConnectionModal = false;
   let connectionForm: ConnectionInput = emptyConnection();
   let connectionAppearanceForm = connectionAppearanceDraft({});
-  let connectionUrl = '';
   let modalFeedback = '';
   let testingConnection = false;
   let savingConnection = false;
   let connectionMutation: string | null = null;
   let txStatusRequest = 0;
   let draftTimer: ReturnType<typeof setTimeout> | null = null;
-  let urlTimer: ReturnType<typeof setTimeout> | null = null;
   let bootstrapTask = Promise.resolve();
   let closingWorkspace = false;
   let draftStatus: 'pending' | 'saving' | 'saved' | 'error' = 'saved';
@@ -892,7 +890,6 @@
     if (operation || connectionMutation) return;
     connectionForm = emptyConnection();
     connectionAppearanceForm = connectionAppearanceDraft({});
-    connectionUrl = '';
     modalFeedback = '';
     showConnectionModal = true;
   }
@@ -903,7 +900,6 @@
     connectionAppearanceForm = connectionAppearanceDraft(appearances, connection.id);
     modalFeedback = '';
     showConnectionModal = true;
-    void syncConnectionUrl();
   }
 
   async function copyConnection(connection: ConnectionRecord) {
@@ -942,30 +938,6 @@
       flash(`Could not duplicate connection: ${errorMessage(error)}`, true);
     } finally {
       connectionMutation = null;
-    }
-  }
-
-  function queueConnectionUrlSync() {
-    if (urlTimer) clearTimeout(urlTimer);
-    urlTimer = setTimeout(() => void syncConnectionUrl(), 250);
-  }
-
-  async function syncConnectionUrl() {
-    if (!connectionForm.host || !connectionForm.database || !connectionForm.username) return;
-    try {
-      connectionUrl = await api.buildConnectionUrl(connectionForm);
-    } catch {
-      // URL field remains manually editable while form is incomplete.
-    }
-  }
-
-  async function importConnectionUrl() {
-    try {
-      const parsed = await api.parseConnectionUrl(connectionUrl);
-      connectionForm = { ...connectionForm, ...parsed, options: connectionForm.options };
-      modalFeedback = 'URL imported.';
-    } catch (error) {
-      modalFeedback = errorMessage(error);
     }
   }
 
@@ -2049,9 +2021,8 @@
 
 {#if showConnectionModal}
   <Modal label={connectionForm.id ? 'Edit connection' : 'New connection'} locked={savingConnection} onClose={() => (showConnectionModal = false)}>
-    <ConnectionEditor bind:connection={connectionForm} bind:appearance={connectionAppearanceForm} bind:url={connectionUrl}
+    <ConnectionEditor bind:connection={connectionForm} bind:appearance={connectionAppearanceForm}
       feedback={modalFeedback} saving={savingConnection} testing={testingConnection}
-      onClose={() => showConnectionModal = false} onSave={saveConnection} onTest={testConnection}
-      onImport={importConnectionUrl} onConnectionInput={queueConnectionUrlSync} />
+      onClose={() => showConnectionModal = false} onSave={saveConnection} onTest={testConnection} />
   </Modal>
 {/if}
