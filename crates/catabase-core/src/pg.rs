@@ -5,6 +5,7 @@ use std::{
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio_postgres::{
@@ -16,8 +17,8 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use uuid::Uuid;
 
 use crate::{
-    ConnectionFields, CoreError, ReflectionCache, RowKey, row_keys::load_row_keys,
-    sql::auto_limit_sql,
+    ConnectionFields, CoreError, ReflectionCache, RowKey, StatementObserver,
+    row_keys::load_row_keys, sql::auto_limit_sql,
 };
 
 pub type PgClient = TokioPgClient;
@@ -58,6 +59,22 @@ pub struct QueryResult {
     pub has_more: bool,
     #[serde(default)]
     pub json_values_as_text: bool,
+}
+
+impl QueryResult {
+    pub fn command(row_count: usize, duration_ms: u128) -> Self {
+        Self {
+            columns: Vec::new(),
+            row_keys: Vec::new(),
+            rows: Vec::new(),
+            row_count,
+            duration_ms,
+            timings: None,
+            auto_limited: false,
+            has_more: false,
+            json_values_as_text: false,
+        }
+    }
 }
 
 /// Monotonic client-side spans, not PostgreSQL's EXPLAIN execution time.
@@ -250,6 +267,19 @@ pub async fn execute_on_client_with_reflection(
     cancelled: Option<&AtomicBool>,
     reflection: &ReflectionCache,
 ) -> Result<QueryResult, CoreError> {
+    execute_on_client_observed(client, sql, offset, page_size, cancelled, reflection, None).await
+}
+
+pub async fn execute_on_client_observed(
+    client: &PgClient,
+    sql: &str,
+    offset: usize,
+    page_size: usize,
+    cancelled: Option<&AtomicBool>,
+    reflection: &ReflectionCache,
+    observer: Option<&dyn StatementObserver>,
+) -> Result<QueryResult, CoreError> {
+    check_query_cancelled(cancelled)?;
     // Conservative for DDL, DO/CALL, savepoint rollbacks and compound batches.
     // Invalidate before AND after, including failures/partial batch execution.
     let invalidates = crate::split_statements(sql).iter().any(|statement| {
@@ -258,7 +288,21 @@ pub async fn execute_on_client_with_reflection(
     if invalidates {
         reflection.invalidate();
     }
-    let result = execute_reflected(client, sql, offset, page_size, cancelled, reflection).await;
+    let batch = crate::split_statements(sql).len() > 1;
+    let start = Instant::now();
+    if !batch && let Some(observer) = observer {
+        observer.started(sql);
+    }
+    let result = if batch {
+        // Keep PostgreSQL's single-message, implicit-transaction semantics.
+        // Splitting this into separate requests would commit partial batches.
+        execute_simple(client, sql, start, observer).await
+    } else {
+        execute_reflected(client, sql, offset, page_size, cancelled, reflection).await
+    };
+    if !batch && let Some(observer) = observer {
+        observer.finished(sql, result.as_ref(), start.elapsed().as_millis());
+    }
     if invalidates {
         reflection.invalidate();
     }
@@ -279,10 +323,6 @@ async fn execute_reflected(
     let auto_limited = limited_sql.is_some();
     let exec_sql = limited_sql.as_deref().unwrap_or(sql).trim();
     let start = Instant::now();
-
-    if exec_sql.contains(';') && crate::split_statements(exec_sql).len() > 1 {
-        return execute_simple(client, exec_sql, start).await;
-    }
 
     // Use a fresh unnamed Parse/Bind/Describe/Execute request for SELECT-like
     // SQL. This saves a round trip without caching stale column origins after
@@ -640,13 +680,70 @@ async fn execute_simple(
     client: &PgClient,
     sql: &str,
     start: Instant,
+    observer: Option<&dyn StatementObserver>,
 ) -> Result<QueryResult, CoreError> {
-    let messages = client.simple_query(sql).await?;
-    let fetched_at = Instant::now();
+    let statements = crate::split_statements(sql);
+    let mut index = 0;
+    let mut statement_start = start;
+    if let Some(observer) = observer {
+        observer.started(&statements[0].text);
+    }
+    let messages = client.simple_query_raw(sql).await?;
+    let mut messages = std::pin::pin!(messages);
     let mut columns = Vec::new();
     let mut rows = Vec::new();
-    for message in messages {
+    let mut last = QueryResult::command(0, 0);
+    let mut history_time = Duration::ZERO;
+    loop {
+        let message = match messages.try_next().await {
+            Ok(Some(message)) => message,
+            Ok(None) => break,
+            Err(error) => {
+                let error = CoreError::from(error);
+                // PostgreSQL parses the entire batch before executing it. An
+                // initial syntax error can belong to a later statement.
+                let failed = error
+                    .pg_info()
+                    .and_then(|info| info.position)
+                    .and_then(|position| {
+                        let byte = sql
+                            .char_indices()
+                            .nth(position.saturating_sub(1))
+                            .map(|(byte, _)| byte)?;
+                        statements
+                            .iter()
+                            .find(|statement| statement.start <= byte && byte < statement.end)
+                    })
+                    .or_else(|| statements.get(index));
+                if let (Some(observer), Some(failed)) = (observer, failed) {
+                    observer.finished(
+                        &failed.text,
+                        Err(&error),
+                        statement_start.elapsed().as_millis(),
+                    );
+                }
+                return Err(error);
+            }
+        };
         match message {
+            SimpleQueryMessage::RowDescription(description) => {
+                columns = description
+                    .iter()
+                    .map(|column| ColumnMeta {
+                        name: column.name().to_string(),
+                        source_name: None,
+                        type_oid: 0,
+                        type_name: "text".into(),
+                        table_oid: None,
+                        table_schema: None,
+                        table_name: None,
+                        column_id: None,
+                        nullable: None,
+                        generated: false,
+                        primary_key: false,
+                    })
+                    .collect();
+            }
             SimpleQueryMessage::Row(row) => {
                 if columns.is_empty() {
                     columns = row
@@ -677,34 +774,41 @@ async fn execute_simple(
                 }
                 rows.push(Value::Object(object));
             }
-            SimpleQueryMessage::CommandComplete(_) => {}
+            SimpleQueryMessage::CommandComplete(affected) => {
+                last = QueryResult {
+                    columns: std::mem::take(&mut columns),
+                    rows: std::mem::take(&mut rows),
+                    ..QueryResult::command(affected as usize, statement_start.elapsed().as_millis())
+                };
+                let save_start = Instant::now();
+                if let (Some(observer), Some(statement)) = (observer, statements.get(index)) {
+                    observer.finished(&statement.text, Ok(&last), last.duration_ms);
+                }
+                history_time += save_start.elapsed();
+                index += 1;
+                statement_start = Instant::now();
+                if let (Some(observer), Some(statement)) = (observer, statements.get(index)) {
+                    observer.started(&statement.text);
+                }
+            }
             _ => {}
         }
     }
 
-    let decoded_at = Instant::now();
-    let total_ms = decoded_at.duration_since(start).as_secs_f64() * 1000.0;
-    Ok(QueryResult {
-        row_count: rows.len(),
-        columns,
-        row_keys: Vec::new(),
-        rows,
-        duration_ms: total_ms as u128,
-        timings: Some(QueryTimings {
-            prepare_ms: 0.0,
-            metadata_ms: 0.0,
-            execute_fetch_ms: fetched_at.duration_since(start).as_secs_f64() * 1000.0,
-            decode_ms: decoded_at.duration_since(fetched_at).as_secs_f64() * 1000.0,
-            total_ms,
-            prepare_mode: PrepareMode::Separate,
-            metadata_source: MetadataSource::NotNeeded,
-            metadata_queries: 0,
-            command: None,
-        }),
-        auto_limited: false,
-        has_more: false,
-        json_values_as_text: false,
-    })
+    let total_ms = start.elapsed().saturating_sub(history_time).as_secs_f64() * 1000.0;
+    last.duration_ms = total_ms as u128;
+    last.timings = Some(QueryTimings {
+        prepare_ms: 0.0,
+        metadata_ms: 0.0,
+        execute_fetch_ms: total_ms,
+        decode_ms: 0.0,
+        total_ms,
+        prepare_mode: PrepareMode::Separate,
+        metadata_source: MetadataSource::NotNeeded,
+        metadata_queries: 0,
+        command: None,
+    });
+    Ok(last)
 }
 
 pub async fn connect_client(fields: &ConnectionFields) -> Result<PgClient, CoreError> {

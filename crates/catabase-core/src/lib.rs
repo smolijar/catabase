@@ -1,4 +1,6 @@
 mod cancellation;
+mod history;
+pub use history::{StatementHistory, StatementObserver};
 pub mod conn_url;
 pub mod error;
 pub mod foreign_key_values;
@@ -21,12 +23,14 @@ pub use pg::{
     PooledPgClient, PrepareMode, QueryResult, QueryTimings, SchemaColumn, SchemaForeignKey,
     SchemaItem, SchemaTree, cancel_query_token, checkout_pool_client, connect_client,
     connection_stats, create_pool, execute_on_client, execute_on_client_cancellable,
-    execute_on_client_with_reflection, execute_query, get_ddl, get_ddl_on_client,
-    introspect_schema, introspect_schema_on_client, test_connection,
+    execute_on_client_observed, execute_on_client_with_reflection, execute_query, get_ddl,
+    get_ddl_on_client, introspect_schema, introspect_schema_on_client, test_connection,
 };
 pub use reflection::ReflectionCache;
 pub use row_keys::RowKey;
-pub use row_updates::{ApplyUpdatesResult, RowUpdate, apply_row_updates};
+pub use row_updates::{
+    ApplyUpdatesResult, RowUpdate, apply_row_updates, apply_row_updates_observed,
+};
 pub use sql::{
     StatementKind, StatementRange, classify_statement, split_editor_statements, split_statements,
     validate_transaction_sql,

@@ -8,6 +8,7 @@ license.workspace = true
 chrono.workspace = true
 deadpool-postgres.workspace = true
 fallible-iterator.workspace = true
+futures-util.workspace = true
 keyring.workspace = true
 percent-encoding.workspace = true
 postgres-protocol.workspace = true

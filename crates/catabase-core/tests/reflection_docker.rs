@@ -15,6 +15,197 @@ use catabase_core::{
 
 #[tokio::test]
 #[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE pointing at the saved zenbase docker connection"]
+async fn statement_history_records_manual_transactions_reviewed_edits_and_atomic_batches()
+-> Result<(), Box<dyn Error>> {
+    use catabase_core::{
+        CoreError, StatementHistory, Storage, apply_row_updates_observed,
+        execute_on_client_observed,
+    };
+    use serde_json::json;
+    let client = connect_client(&docker_fields()?).await?;
+    // Session-local fixtures only: no writes to any existing Docker tables.
+    client.batch_execute("CREATE TEMP TABLE catabase_history_probe (id int PRIMARY KEY, note text, tags text[], payload jsonb); INSERT INTO catabase_history_probe VALUES (1, 'before', ARRAY['a'], '{\"old\":true}')").await?;
+    let storage = Storage::in_memory()?;
+    let notify = |saved: Result<(), CoreError>| saved.unwrap();
+    let history = StatementHistory::new(&storage, "docker", &notify);
+    let cache = ReflectionCache::default();
+    let cancelled = AtomicBool::new(false);
+    let manual = storage.start_history_transaction("manual")?;
+    history.set_transaction(Some(manual.clone()));
+    for sql in [
+        "BEGIN",
+        "SELECT * FROM catabase_history_probe",
+        "UPDATE catabase_history_probe SET note = 'manual' WHERE id = 1",
+        "SELECT * FROM catabase_history_probe",
+    ] {
+        execute_on_client_observed(&client, sql, 0, 200, None, &cache, Some(&history)).await?;
+    }
+    assert_eq!(storage.history_transaction_page(&manual, 0, 50)?.total, 4);
+    let fixture = execute_on_client_with_reflection(
+        &client,
+        "SELECT * FROM catabase_history_probe",
+        0,
+        200,
+        None,
+        &cache,
+    )
+    .await?;
+    let update = RowUpdate {
+        schema: fixture.columns[0].table_schema.clone().unwrap(), table: "catabase_history_probe".into(), key_columns: vec!["id".into()],
+        values: json!({"note":"quoted ' \\ $1 value", "tags": ["x,y", "NULL", null], "payload": {"test":"$2'\\"}}).as_object().unwrap().clone(),
+        original: fixture.rows[0].as_object().unwrap().clone(),
+    };
+    apply_row_updates_observed(
+        &client,
+        std::slice::from_ref(&update),
+        true,
+        &cancelled,
+        Some(&history),
+    )
+    .await?;
+    let manual_entries = storage.history_transaction_page(&manual, 0, 50)?.entries;
+    assert_eq!(manual_entries.len(), 7);
+    assert!(manual_entries[4].query.starts_with("SAVEPOINT"));
+    assert!(manual_entries[5].query.starts_with("UPDATE"));
+    assert_eq!(manual_entries[5].row_count, Some(1));
+    assert!(manual_entries[6].query.starts_with("RELEASE SAVEPOINT"));
+    assert!(
+        manual_entries
+            .iter()
+            .all(|entry| entry.transaction.as_ref().unwrap().id == manual)
+    );
+    execute_on_client_observed(&client, "END", 0, 200, None, &cache, Some(&history)).await?;
+    storage.finish_history_transaction(&manual, "finished")?;
+    assert_eq!(storage.history_transaction_page(&manual, 0, 50)?.total, 8);
+
+    // Replay the stored SQL to prove its literal values and casts are faithful.
+    client.batch_execute("UPDATE catabase_history_probe SET note = 'manual', tags = ARRAY['a'], payload = '{\"old\":true}'").await?;
+    assert_eq!(client.execute(&manual_entries[5].query, &[]).await?, 1);
+    let replayed = client
+        .query_one(
+            "SELECT note, tags, payload FROM catabase_history_probe",
+            &[],
+        )
+        .await?;
+    assert_eq!(replayed.get::<_, String>(0), "quoted ' \\ $1 value");
+    assert_eq!(
+        replayed.get::<_, Vec<Option<String>>>(1),
+        vec![Some("x,y".into()), Some("NULL".into()), None]
+    );
+    assert_eq!(
+        replayed.get::<_, serde_json::Value>(2),
+        update.values["payload"]
+    );
+
+    let auto = storage.start_history_transaction("review")?;
+    history.set_transaction(Some(auto.clone()));
+    let fixture = execute_on_client_with_reflection(
+        &client,
+        "SELECT * FROM catabase_history_probe",
+        0,
+        200,
+        None,
+        &cache,
+    )
+    .await?;
+    let mut auto_update = update.clone();
+    auto_update.original = fixture.rows[0].as_object().unwrap().clone();
+    auto_update.values = json!({"note": "automatic"}).as_object().unwrap().clone();
+    apply_row_updates_observed(
+        &client,
+        &[auto_update.clone()],
+        false,
+        &cancelled,
+        Some(&history),
+    )
+    .await?;
+    storage.finish_history_transaction(&auto, "finished")?;
+    let entries = storage.history_transaction_page(&auto, 0, 50)?.entries;
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].query, "BEGIN");
+    assert!(entries[1].query.starts_with("UPDATE"));
+    assert_eq!(entries[2].query, "COMMIT");
+
+    let failed_review = storage.start_history_transaction("review")?;
+    history.set_transaction(Some(failed_review.clone()));
+    // Stale original: the UPDATE and rollback are recorded, not a fake success.
+    assert!(
+        apply_row_updates_observed(&client, &[auto_update], false, &cancelled, Some(&history))
+            .await
+            .is_err()
+    );
+    storage.finish_history_transaction(&failed_review, "rolledBack")?;
+    let entries = storage
+        .history_transaction_page(&failed_review, 0, 50)?
+        .entries;
+    assert_eq!(entries.len(), 3);
+    assert!(entries[1].is_error);
+    assert_eq!(entries[2].query, "ROLLBACK");
+
+    let batch = storage.start_history_transaction("batch")?;
+    history.set_transaction(Some(batch.clone()));
+    let sql = "UPDATE catabase_history_probe SET note = 'must roll back'; SELECT 1/0; SELECT 999";
+    assert!(
+        execute_on_client_observed(&client, sql, 0, 200, None, &cache, Some(&history))
+            .await
+            .is_err()
+    );
+    storage.finish_history_transaction(&batch, "rolledBack")?;
+    let entries = storage.history_transaction_page(&batch, 0, 50)?.entries;
+    assert_eq!(entries.len(), 2);
+    assert!(!entries[0].is_error);
+    assert!(entries[1].is_error);
+    assert_eq!(entries[1].query, "SELECT 1/0;");
+    assert_eq!(
+        client
+            .query_one("SELECT note FROM catabase_history_probe", &[])
+            .await?
+            .get::<_, String>(0),
+        "automatic"
+    );
+
+    // PostgreSQL may buffer CommandComplete until subsequent output. A large
+    // row in the second statement flushes it before that statement's delay.
+    // Persist as soon as the completion arrives, not when the batch finishes.
+    let streamed = storage.start_history_transaction("batch")?;
+    history.set_transaction(Some(streamed.clone()));
+    let (result, ()) = tokio::join!(
+        execute_on_client_observed(
+            &client,
+            "SELECT 1 AS first; SELECT repeat('y', 20000) AS last, pg_sleep(CASE WHEN n = 2 THEN 1 ELSE 0 END) FROM generate_series(1,2) n",
+            0,
+            200,
+            None,
+            &cache,
+            Some(&history)
+        ),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert_eq!(
+                storage
+                    .history_transaction_page(&streamed, 0, 50)
+                    .unwrap()
+                    .total,
+                1
+            );
+        }
+    );
+    assert_eq!(result?.columns[0].name, "last");
+    let entries = storage.history_transaction_page(&streamed, 0, 50)?.entries;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        storage.history_result(entries[0].id)?.unwrap()["columns"][0]["name"],
+        "first"
+    );
+    assert_eq!(
+        storage.history_result(entries[1].id)?.unwrap()["columns"][0]["name"],
+        "last"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE pointing at the saved zenbase docker connection"]
 async fn connection_options_apply_to_direct_and_pooled_docker_sessions()
 -> Result<(), Box<dyn Error>> {
     use catabase_core::{ConnectionOptions, checkout_pool_client, create_pool};

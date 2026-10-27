@@ -1,12 +1,13 @@
 use std::{
     collections::{BTreeSet, HashMap},
     sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::{CoreError, PgClient, RowKey, row_keys::load_row_keys};
+use crate::{CoreError, PgClient, QueryResult, RowKey, StatementObserver, row_keys::load_row_keys};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +49,16 @@ pub async fn apply_row_updates(
     in_transaction: bool,
     cancelled: &AtomicBool,
 ) -> Result<ApplyUpdatesResult, CoreError> {
+    apply_row_updates_observed(client, updates, in_transaction, cancelled, None).await
+}
+
+pub async fn apply_row_updates_observed(
+    client: &PgClient,
+    updates: &[RowUpdate],
+    in_transaction: bool,
+    cancelled: &AtomicBool,
+    observer: Option<&dyn StatementObserver>,
+) -> Result<ApplyUpdatesResult, CoreError> {
     if updates.is_empty() || updates.len() > 1000 {
         return Err(CoreError::message(
             "Apply between 1 and 1,000 row changes at a time.",
@@ -60,13 +71,13 @@ pub async fn apply_row_updates(
     } else {
         "BEGIN".to_string()
     };
-    client.batch_execute(&begin).await?;
+    execute_control(client, &begin, observer).await?;
 
-    let outcome = apply_batch(client, updates, cancelled).await;
+    let outcome = apply_batch(client, updates, cancelled, observer).await;
     match outcome {
         Ok(()) => {
             if let Err(error) = check_cancelled(cancelled) {
-                rollback(client, in_transaction, &savepoint).await?;
+                rollback(client, in_transaction, &savepoint, observer).await?;
                 return Err(error);
             }
             let finish = if in_transaction {
@@ -74,9 +85,9 @@ pub async fn apply_row_updates(
             } else {
                 "COMMIT".to_string()
             };
-            if let Err(error) = client.batch_execute(&finish).await {
-                rollback(client, in_transaction, &savepoint).await?;
-                return Err(error.into());
+            if let Err(error) = execute_control(client, &finish, observer).await {
+                rollback(client, in_transaction, &savepoint, observer).await?;
+                return Err(error);
             }
             Ok(ApplyUpdatesResult {
                 updated_rows: updates.len(),
@@ -84,7 +95,7 @@ pub async fn apply_row_updates(
             })
         }
         Err(error) => {
-            rollback(client, in_transaction, &savepoint).await?;
+            rollback(client, in_transaction, &savepoint, observer).await?;
             Err(error)
         }
     }
@@ -94,14 +105,40 @@ async fn rollback(
     client: &PgClient,
     in_transaction: bool,
     savepoint: &str,
+    observer: Option<&dyn StatementObserver>,
 ) -> Result<(), CoreError> {
-    let sql = if in_transaction {
-        format!("ROLLBACK TO SAVEPOINT {savepoint}; RELEASE SAVEPOINT {savepoint}")
+    let statements = if in_transaction {
+        vec![
+            format!("ROLLBACK TO SAVEPOINT {savepoint}"),
+            format!("RELEASE SAVEPOINT {savepoint}"),
+        ]
     } else {
-        "ROLLBACK".to_string()
+        vec!["ROLLBACK".to_string()]
     };
-    client.batch_execute(&sql).await?;
+    for sql in statements {
+        execute_control(client, &sql, observer).await?;
+    }
     Ok(())
+}
+
+async fn execute_control(
+    client: &PgClient,
+    sql: &str,
+    observer: Option<&dyn StatementObserver>,
+) -> Result<(), CoreError> {
+    if let Some(observer) = observer {
+        observer.started(sql);
+    }
+    let start = Instant::now();
+    let result = client
+        .batch_execute(sql)
+        .await
+        .map(|_| QueryResult::command(0, start.elapsed().as_millis()))
+        .map_err(CoreError::from);
+    if let Some(observer) = observer {
+        observer.finished(sql, result.as_ref(), start.elapsed().as_millis());
+    }
+    result.map(|_| ())
 }
 
 fn check_cancelled(cancelled: &AtomicBool) -> Result<(), CoreError> {
@@ -117,6 +154,7 @@ async fn apply_batch(
     client: &PgClient,
     updates: &[RowUpdate],
     cancelled: &AtomicBool,
+    observer: Option<&dyn StatementObserver>,
 ) -> Result<(), CoreError> {
     let mut tables = HashMap::new();
     for (index, update) in updates.iter().enumerate() {
@@ -177,8 +215,24 @@ async fn apply_batch(
                 .iter()
                 .map(|value| value as &(dyn tokio_postgres::types::ToSql + Sync)),
         );
-        let affected = client.execute(&prepared.sql, &parameters).await?;
-        ensure_one_row(affected, index)?;
+        let history_sql = render_update_sql(&prepared, update);
+        if let Some(observer) = observer {
+            observer.started(&history_sql);
+        }
+        let start = Instant::now();
+        let result = async {
+            let affected = client.execute(&prepared.sql, &parameters).await?;
+            ensure_one_row(affected, index)?;
+            Ok::<_, CoreError>(QueryResult::command(
+                affected as usize,
+                start.elapsed().as_millis(),
+            ))
+        }
+        .await;
+        if let Some(observer) = observer {
+            observer.finished(&history_sql, result.as_ref(), start.elapsed().as_millis());
+        }
+        result?;
     }
     Ok(())
 }
@@ -314,6 +368,44 @@ fn json_parameter(value: &Value) -> Option<String> {
     }
 }
 
+/// Render the *actual* parameterized update for history/replay, including JSON
+/// and arrays. Only generated placeholders outside quoted identifiers are
+/// replaced; a value or identifier containing "$1" is never reinterpreted.
+fn render_update_sql(prepared: &PreparedUpdate, update: &RowUpdate) -> String {
+    let parameters = [
+        Some(Value::Object(update.values.clone()).to_string()),
+        Some(Value::Object(prepared.original.clone()).to_string()),
+    ]
+    .into_iter()
+    .chain(prepared.json_parameters.iter().cloned())
+    .collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut chars = prepared.sql.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            quoted = !quoted;
+        }
+        if ch == '$' && !quoted && chars.peek().is_some_and(char::is_ascii_digit) {
+            let mut digits = String::new();
+            while chars.peek().is_some_and(char::is_ascii_digit) {
+                digits.push(chars.next().unwrap());
+            }
+            let value = &parameters[digits.parse::<usize>().unwrap() - 1];
+            match value {
+                Some(value) => output.push_str(&format!(
+                    "E'{}'",
+                    value.replace('\\', "\\\\").replace('\'', "''")
+                )),
+                None => output.push_str("NULL"),
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
 fn quote_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -368,6 +460,19 @@ mod tests {
                 .unwrap()
                 .clone(),
         }
+    }
+
+    #[test]
+    fn history_rendering_preserves_parameter_values_and_dollar_identifiers() {
+        let prepared = PreparedUpdate {
+            sql: "UPDATE \"t$1\" SET \"a\"\"$2\" = $3, b = $4 FROM jsonb_populate_record(NULL::\"t$1\", $1::jsonb) v WHERE v.id = ($2::jsonb)->>'id'".into(),
+            original: serde_json::json!({"id": "x$1"}).as_object().unwrap().clone(),
+            json_parameters: vec![Some("$2\\'injected".into()), None],
+        };
+        let sql = render_update_sql(&prepared, &update());
+        assert!(sql.contains("UPDATE \"t$1\" SET \"a\"\"$2\" = E'$2\\\\''injected', b = NULL"));
+        assert!(sql.contains("E'{\"id\":\"x$1\"}'::jsonb"));
+        assert!(sql.contains("DROP TABLE orders")); // safely inside the JSON literal
     }
 
     #[test]
