@@ -1,5 +1,5 @@
 import type { editor } from 'monaco-editor';
-import type { AppError, ExecutionTarget, QueryResult } from './types';
+import type { AppError, ExecutionTarget, HistoryEntry, QueryResult } from './types';
 
 export interface ResultSession {
   data: QueryResult;
@@ -26,6 +26,7 @@ export interface WorkspaceTab {
   viewState: editor.ICodeEditorViewState | null;
   session: ResultSession | null;
   error: AppError | null;
+  historyContext?: Omit<ResultSession, 'data'> & { durationMs: number };
   originalRows: Record<string, unknown>[];
   pendingChanges: PendingChange[];
   editMode: boolean;
@@ -33,6 +34,23 @@ export interface WorkspaceTab {
 
 export function createQueryTab(id: string, title: string, sql = '', connectionId: string | null = null): WorkspaceTab {
   return { id, title, kind: 'query', sql, connectionId, viewState: null, session: null, error: null, originalRows: [], pendingChanges: [], editMode: false };
+}
+
+/** Failed executions have a saved error, not a QueryResult. Keep their context
+ * without inventing an empty successful result or re-running their SQL. */
+export function createHistoryTab(entry: HistoryEntry, result: QueryResult | null, connectionName: string): WorkspaceTab {
+  const tab = createQueryTab(`history:${entry.id}`, `History #${entry.id}`, entry.query, entry.connectionId ?? null);
+  const context = {
+    execution: { sql: entry.query, start: 0, end: entry.query.length },
+    connectionId: entry.connectionId ?? null, connectionName,
+    executedAt: entry.executedAt, snapshot: true
+  };
+  return {
+    ...tab, kind: 'reference',
+    historyContext: { ...context, durationMs: entry.durationMs },
+    session: !entry.isError && result ? { ...context, data: result } : null,
+    error: entry.isError ? { message: entry.errorMessage || 'This query failed, but no error message was saved.' } : null
+  };
 }
 
 // Duplicate a draft, not its database results, errors or staged writes.
