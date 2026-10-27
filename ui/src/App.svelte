@@ -14,6 +14,8 @@
   import Modal from './components/Modal.svelte';
   import QueryTimingDialog from './components/QueryTimingDialog.svelte';
   import HistoryStorageDialog from './components/HistoryStorageDialog.svelte';
+  import HistoryEntryCard from './components/HistoryEntryCard.svelte';
+  import HistoryTransactionGroup from './components/HistoryTransactionGroup.svelte';
   import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
   import SidebarResizer from './components/SidebarResizer.svelte';
@@ -28,7 +30,7 @@
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { formatRunningDuration } from './lib/status';
-  import { createHistorySearch, formatBytes, historyEntryBytes } from './lib/history';
+  import { createHistorySearch, groupHistory } from './lib/history';
   import type { HistorySearchState } from './lib/history';
   import { editorSearchShortcut } from './lib/editorSearch';
   import { DEFAULT_EDITOR_FONT_SIZE, EDITOR_FONT_STORAGE_KEY, fontSizeShortcut, resizeEditorFont, restoreEditorFontSize } from './lib/editorFont';
@@ -106,6 +108,7 @@
   let systemLight = false;
   let appearances: Record<string, ConnectionAppearance> = {};
   let picker: 'commands' | 'connections' | null = null;
+  let pickerHistoryQuery = '';
   let cursorLine = 1;
   let cursorColumn = 1;
   let running = false;
@@ -149,6 +152,10 @@
   let historySearch = '';
   let historyTotal = 0;
   let historyLoading = false;
+  let historyRevision = 0;
+  let historyRequest = 0;
+  let historySaveError = '';
+  let historyRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let historyTimer: ReturnType<typeof setTimeout> | null = null;
   let historyStorage: { entry: HistoryEntry | null; stats: HistoryStorageStats | null; error: string } | null = null;
   let pickerHistory: HistorySearchState = { entries: [], total: 0, loading: false, error: '' };
@@ -256,6 +263,7 @@
     layoutObserver.observe(workspaceElement);
     bootstrapTask = bootstrap();
     void registerNativeLifecycle();
+    void registerHistoryEvents();
     window.addEventListener('keydown', handleKeydown);
     window.addEventListener('beforeunload', flushDraftOnUnload);
     const statsInterval = window.setInterval(() => {
@@ -288,6 +296,7 @@
       if (toastTimer) window.clearTimeout(toastTimer);
       if (draftTimer) window.clearTimeout(draftTimer);
       if (historyTimer) window.clearTimeout(historyTimer);
+      if (historyRefreshTimer) window.clearTimeout(historyRefreshTimer);
       pickerHistorySearch.cancel();
       stopResultsResize();
     };
@@ -303,6 +312,27 @@
     ]);
     await loadDraft();
     workspaceLoaded = true;
+  }
+
+  async function registerHistoryEvents() {
+    if (!isTauri()) return;
+    const cleanups = await Promise.all([
+      listen('history-changed', () => {
+        // Coalesce bursts without waiting for the query/transaction to finish.
+        if (historyRefreshTimer) return;
+        historyRefreshTimer = setTimeout(() => {
+          historyRefreshTimer = null;
+          void refreshHistory();
+          if (picker === 'commands') searchPickerHistory(pickerHistoryQuery);
+        }, 50);
+      }),
+      listen<string>('history-error', event => {
+        historySaveError = event.payload;
+        flash(event.payload, true);
+      })
+    ]);
+    if (mounted) nativeCleanup.push(...cleanups);
+    else cleanups.forEach(cleanup => cleanup());
   }
 
   async function registerNativeLifecycle() {
@@ -1257,6 +1287,7 @@
   }
 
   function searchPickerHistory(search: string) {
+    pickerHistoryQuery = search;
     if (picker === 'commands') pickerHistorySearch.search(search);
   }
 
@@ -1274,17 +1305,20 @@
 
   async function refreshHistory(append = false) {
     const search = historySearch;
+    const request = ++historyRequest;
     historyLoading = true;
     try {
       const page = await api.historyPage(search || null, append ? history.length : 0, 50);
-      if (search !== historySearch) return;
+      if (request !== historyRequest || search !== historySearch) return;
       history = append ? [...history, ...page.entries] : page.entries;
       historyTotal = page.total;
-      historyStats = await api.historyStats();
+      historyRevision++;
+      const stats = await api.historyStats();
+      if (request === historyRequest) historyStats = stats;
     } catch {
-      if (!append) history = [];
+      if (request === historyRequest && !append) history = [];
     } finally {
-      historyLoading = false;
+      if (request === historyRequest) historyLoading = false;
     }
   }
 
@@ -1750,26 +1784,16 @@
             <input placeholder="Search query history…" bind:value={historySearch} on:input={queueHistorySearch} />
             {#if historySearch}<button aria-label="Clear history search" on:click={() => { historySearch = ''; void refreshHistory(); }}><Icon name="close" size={13} /></button>{/if}
           </label>
+          {#if historySaveError}<p class="error-text" role="alert">{historySaveError}</p>{/if}
           {#if history.length === 0}
             <div class="empty-state compact"><strong>No query history</strong><p>Executed queries will appear here.</p></div>
           {/if}
-          {#each history as entry (entry.id)}
-            <article class:error-card={entry.isError} class="history-card">
-              <div class="history-meta">
-                <span class:error-status={entry.isError} class="history-status">{entry.isError ? 'Error' : 'Success'}</span>
-                <time title={entry.executedAt}>{formatHistoryTime(entry.executedAt)}</time>
-              </div>
-              <code>{entry.query}</code>
-              <small>{entry.durationMs} ms{entry.rowCount != null ? ` · ${entry.rowCount} ${entry.rowCount === 1 ? 'row' : 'rows'}` : ''}</small>
-              <button class="history-storage-link" title="Show size, shared content and hashes for this execution" on:click={() => showHistoryStorage(entry)}>{formatBytes(historyEntryBytes(entry))}{entry.resultReferences > 1 ? ' · shared result' : entry.queryReferences > 1 ? ' · shared SQL' : ''}</button>
-              <small class="history-connection">{connections.find((connection) => connection.id === entry.connectionId)?.name ?? 'Unavailable connection'}</small>
-              {#if entry.errorMessage}<small class="history-error">{entry.errorMessage}</small>{/if}
-              <div class="row-actions">
-                <button on:click={() => restoreHistory(entry)}><Icon name="plus" size={14} /> New query</button>
-                <button disabled={!entry.hasResult} on:click={() => openHistory(entry)}>Open result</button>
-                <button class="danger-quiet" aria-label="Delete history entry" title="Delete history entry" on:click={() => deleteHistory(entry.id)}><Icon name="trash" size={14} /></button>
-              </div>
-            </article>
+          {#each groupHistory(history) as group (group.key)}
+            {#if group.transaction}
+              <HistoryTransactionGroup transaction={group.transaction} revision={historyRevision} {connections} connectionId={group.entries[0].connectionId} matches={group.entries} searching={Boolean(historySearch.trim())} onRestore={restoreHistory} onOpen={openHistory} onStorage={showHistoryStorage} onDelete={deleteHistory} />
+            {:else}
+              <HistoryEntryCard entry={group.entries[0]} {connections} onRestore={restoreHistory} onOpen={openHistory} onStorage={showHistoryStorage} onDelete={deleteHistory} />
+            {/if}
           {/each}
           {#if history.length < historyTotal}<button class="history-more" disabled={historyLoading} on:click={() => refreshHistory(true)}>{historyLoading ? 'Loading…' : `Load more (${history.length} of ${historyTotal})`}</button>{/if}
         {:else}
