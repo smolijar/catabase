@@ -1382,8 +1382,13 @@
     newQuery(`select *\nfrom ${quoteIdent(item.schema)}.${quoteIdent(item.name)};`, tabConnectionId, item.name);
   }
 
-  function restoreHistory(entry: HistoryEntry) {
-    newQuery(entry.query, entry.connectionId ?? null, `History #${entry.id}`);
+  async function copyHistorySql(entry: HistoryEntry) {
+    try {
+      await writeText(entry.query).catch(() => navigator.clipboard.writeText(entry.query));
+      flash('SQL copied to clipboard.');
+    } catch (error) {
+      flash(`Could not copy SQL: ${errorMessage(error)}`, true);
+    }
   }
 
   async function openHistory(entry: HistoryEntry) {
@@ -1391,8 +1396,7 @@
       // Errors already carry their saved message; they have no row snapshot.
       const result = entry.hasResult && !entry.isError ? (await api.historyGetResult(entry.id)).result : null;
       if (entry.hasResult && !entry.isError && !result) {
-        flash('No stored result for this entry.');
-        return;
+        flash('No stored result for this entry. Showing its saved SQL.');
       }
       displayReadonlyTab(createHistoryTab(entry, result,
         connections.find(connection => connection.id === entry.connectionId)?.name ?? 'Unavailable connection'));
@@ -1902,9 +1906,11 @@
             <div>
               <h2>History</h2>
               <p>{historyStats.total} queries · {historyStats.errors} errors</p>
-              <button class="history-storage-link" on:click={() => showHistoryStorage()} title="Show history disk usage and deduplication savings">Storage…</button>
             </div>
-            <button class="danger-quiet icon-label-button" on:click={purgeHistory}><Icon name="trash" size={14} /> Purge</button>
+            <div class="history-toolbar">
+              <button class="history-icon-button" aria-label="History storage" on:click={() => showHistoryStorage()} title="History storage usage"><Icon name="database" size={15} /></button>
+              <button class="history-icon-button danger-quiet" aria-label="Purge history" title="Purge all history" on:click={purgeHistory}><Icon name="trash" size={15} /></button>
+            </div>
           </div>
           <label class="search-field" aria-label="Search query history">
             <Icon name="search" size={15} />
@@ -1917,9 +1923,9 @@
           {/if}
           {#each groupHistory(history) as group (group.key)}
             {#if group.transaction}
-              <HistoryTransactionGroup transaction={group.transaction} revision={historyRevision} {connections} connectionId={group.entries[0].connectionId} matches={group.entries} searching={Boolean(historySearch.trim())} onRestore={restoreHistory} onOpen={openHistory} onStorage={showHistoryStorage} onDelete={deleteHistory} />
+              <HistoryTransactionGroup transaction={group.transaction} revision={historyRevision} {connections} connectionId={group.entries[0].connectionId} matches={group.entries} searching={Boolean(historySearch.trim())} onCopy={copyHistorySql} onOpen={openHistory} onDelete={deleteHistory} />
             {:else}
-              <HistoryEntryCard entry={group.entries[0]} {connections} onRestore={restoreHistory} onOpen={openHistory} onStorage={showHistoryStorage} onDelete={deleteHistory} />
+              <HistoryEntryCard entry={group.entries[0]} {connections} onCopy={copyHistorySql} onOpen={openHistory} onDelete={deleteHistory} />
             {/if}
           {/each}
           {#if history.length < historyTotal}<button class="history-more" disabled={historyLoading} on:click={() => refreshHistory(true)}>{historyLoading ? 'Loading…' : `Load more (${history.length} of ${historyTotal})`}</button>{/if}

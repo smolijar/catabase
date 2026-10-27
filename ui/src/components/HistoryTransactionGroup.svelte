@@ -10,9 +10,8 @@
   export let matches: HistoryEntry[] = [];
   export let searching = false;
   export let revision: number;
-  export let onRestore: (entry: HistoryEntry) => void;
+  export let onCopy: (entry: HistoryEntry) => void;
   export let onOpen: (entry: HistoryEntry) => void;
-  export let onStorage: (entry: HistoryEntry) => void;
   export let onDelete: (id: number) => void;
   let open = false;
   let entries: HistoryEntry[] = [];
@@ -53,14 +52,13 @@
 <details class="history-transaction" bind:open>
   <summary title={`Application transaction ID: ${transaction.id}`}>
     <span class="history-transaction-heading"><strong>{transactionLabel(transaction)}</strong><code>{transaction.id.slice(0, 8)}</code></span>
-    <span class="history-transaction-detail">{transaction.statementCount} {transaction.statementCount === 1 ? 'statement' : 'statements'} · {transactionStatus(transaction)}</span>
-    <span class="history-transaction-detail">{connections.find(connection => connection.id === connectionId)?.name ?? 'Unavailable connection'}</span>
+    <span class="history-transaction-detail" title={connections.find(connection => connection.id === connectionId)?.name ?? 'Unavailable connection'}>{transaction.statementCount} {transaction.statementCount === 1 ? 'statement' : 'statements'} · {transactionStatus(transaction)} · {connections.find(connection => connection.id === connectionId)?.name ?? 'Unavailable connection'}</span>
   </summary>
   {#if open}
     <div class="history-transaction-entries">
       <small class="history-transaction-note">{searching ? 'Matching statements · clear search for full transaction' : 'Execution order · success does not imply commit'}</small>
       {#each displayed as entry (entry.id)}
-        <HistoryEntryCard {entry} grouped {connections} {onRestore} {onOpen} {onStorage} {onDelete} />
+        <HistoryEntryCard {entry} grouped {connections} {onCopy} {onOpen} {onDelete} />
       {/each}
       {#if !searching}
         {#if error}<p class="error-text" role="alert">{error}</p><button on:click={() => load(transaction.id)}>Retry</button>{/if}
