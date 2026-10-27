@@ -208,6 +208,43 @@ async fn statement_history_records_manual_transactions_reviewed_edits_and_atomic
         storage.history_result(entries[1].id)?.unwrap()["columns"][0]["name"],
         "last"
     );
+    let separators = storage.start_history_transaction("batch")?;
+    history.set_transaction(Some(separators.clone()));
+    execute_on_client_observed(
+        &client,
+        "; SELECT 1 AS first;; -- separator\n SELECT 2 AS last; ;",
+        0,
+        200,
+        None,
+        &cache,
+        Some(&history),
+    )
+    .await?;
+    let entries = storage
+        .history_transaction_page(&separators, 0, 50)?
+        .entries;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].query, "SELECT 1 AS first;");
+    assert_eq!(entries[1].query, "SELECT 2 AS last;");
+
+    let syntax = storage.start_history_transaction("batch")?;
+    history.set_transaction(Some(syntax.clone()));
+    assert!(
+        execute_on_client_observed(
+            &client,
+            "SELECT '🐈'; SELECT +; SELECT 3",
+            0,
+            200,
+            None,
+            &cache,
+            Some(&history)
+        )
+        .await
+        .is_err()
+    );
+    let entries = storage.history_transaction_page(&syntax, 0, 50)?.entries;
+    assert_eq!(entries.len(), 1); // Whole batch rejected by PostgreSQL's parser.
+    assert_eq!(entries[0].query, "SELECT +;");
     Ok(())
 }
 
