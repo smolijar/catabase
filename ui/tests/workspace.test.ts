@@ -1,6 +1,64 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canUseResult, createDraftWriter, createQueryTab, duplicateQueryTab, restoreWorkspace, serializeWorkspace } from '../src/lib/workspace.ts';
+import { canUseResult, createDraftWriter, createHistoryTab, createQueryTab, duplicateQueryTab, restoreWorkspace, serializeWorkspace } from '../src/lib/workspace.ts';
+import type { HistoryEntry, QueryResult } from '../src/lib/types.ts';
+
+const failedHistory: HistoryEntry = {
+  id: 42, connectionId: 'docker', query: 'select * from missing_relation', durationMs: 12,
+  isError: true, errorMessage: 'relation "missing_relation" does not exist', hasResult: false,
+  executedAt: '2026-10-27T10:00:00Z', queryHash: 'query-hash', querySize: 30,
+  executionSize: 100, queryReferences: 1, resultReferences: 0
+};
+
+test('failed history opens exact SQL and its saved error in a read-only tab without fake result rows', () => {
+  const tab = createHistoryTab(failedHistory, null, 'zenbase docker');
+  assert.equal(tab.kind, 'reference');
+  assert.equal(tab.sql, failedHistory.query);
+  assert.equal(tab.connectionId, 'docker');
+  assert.deepEqual(tab.error, { message: failedHistory.errorMessage });
+  assert.equal(tab.session, null);
+  assert.equal(canUseResult(tab.session, tab.connectionId), false);
+  assert.deepEqual(tab.historyContext, {
+    execution: { sql: failedHistory.query, start: 0, end: failedHistory.query.length },
+    connectionId: 'docker', connectionName: 'zenbase docker',
+    executedAt: failedHistory.executedAt, durationMs: 12, snapshot: true
+  });
+  assert.deepEqual(tab.pendingChanges, []);
+  assert.equal(tab.editMode, false);
+});
+
+test('old failures with missing details or deleted connections still open with an honest fallback', () => {
+  const tab = createHistoryTab({ ...failedHistory, errorMessage: null, connectionId: null }, null, 'Unavailable connection');
+  assert.match(tab.error!.message, /failed, but no error message was saved/);
+  assert.equal(tab.connectionId, null);
+  assert.equal(tab.historyContext?.connectionName, 'Unavailable connection');
+});
+
+test('successful history still opens row snapshots; stale rows never masquerade as a failed result', () => {
+  const result: QueryResult = { columns: [], rows: [{ answer: 42 }], rowCount: 1, durationMs: 3, autoLimited: false, hasMore: false };
+  const success = createHistoryTab({ ...failedHistory, isError: false, errorMessage: null, hasResult: true }, result, 'Docker');
+  assert.equal(success.session?.data, result);
+  assert.equal(success.error, null);
+  assert.equal(success.session?.snapshot, true);
+  assert.equal(canUseResult(success.session, 'docker'), false);
+  assert.equal(createHistoryTab(failedHistory, result, 'Docker').session, null);
+});
+
+test('history previews survive tab capture but never contaminate fresh query drafts or saved workspace', () => {
+  const preview = createHistoryTab(failedHistory, null, 'Docker');
+  const captured = { ...preview, viewState: null };
+  assert.deepEqual(captured.error, preview.error);
+  assert.deepEqual(captured.historyContext, preview.historyContext);
+  const copy = duplicateQueryTab(preview, 'new', [preview]);
+  assert.equal(copy.kind, 'query');
+  assert.equal(copy.sql, failedHistory.query);
+  assert.equal(copy.error, null);
+  assert.equal(copy.historyContext, undefined);
+  const stored = serializeWorkspace([copy, preview], preview.id);
+  assert.equal(stored.includes('historyContext'), false);
+  assert.equal(stored.includes('does not exist'), false);
+  assert.equal(restoreWorkspace(stored)?.tabs.length, 1);
+});
 
 test('duplicating copies the draft and connection, never query results or staged edits', () => {
   const source = createQueryTab('one', 'Orders', 'select * from orders;', 'db-one');

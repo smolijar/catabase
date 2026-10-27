@@ -46,7 +46,7 @@
   import { assessRowEditing, buildRowUpdates, originalEditColumns } from './lib/rowEditing';
   import { sameCellValue } from './lib/resultsGrid';
   import type { EditTarget } from './lib/rowEditing';
-  import { canUseResult, createDraftWriter, createQueryTab, duplicateQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
+  import { canUseResult, createDraftWriter, createHistoryTab, createQueryTab, duplicateQueryTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
   import type { PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
   import type {
     SupermavenStatus,
@@ -218,11 +218,14 @@
   $: runningDuration = formatRunningDuration(operation?.startedAt, nowMs);
   $: transactionDuration = formatRunningDuration(txStatus.startedAt, nowMs);
   $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
+  $: historyContext = tabs.find(tab => tab.id === activeTab)?.historyContext ?? null;
+  $: resultContext = resultSession ?? historyContext;
   $: resultUsable = Boolean(activeConnection) && canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
   $: editEligibility = assessRowEditing(result, editMode ? originalRows : result?.rows);
   $: editableColumns = editEligibility.target?.editableColumns.map((column) => column.name) ?? [];
   $: editDisabledReason = running || connectionMutation ? 'Wait for the current operation to finish before editing.'
     : activeConnection?.options?.readOnly ? 'Cell editing is disabled for this read-only connection.'
+    : historyContext ? 'History snapshots are read-only. Open a new query to run this SQL again.'
     : resultSession?.snapshot ? 'History snapshots are read-only. Re-run the query to edit.'
     : result && !resultUsable ? 'Re-run this query on its original connection before editing.'
     : editEligibility.reason;
@@ -735,8 +738,7 @@
     if (id.startsWith('tab:')) { switchTab(id.slice(4)); return; }
     if (id.startsWith('history:')) {
       const entry = pickerHistory.entries.find(entry => `history:${entry.id}` === id);
-      if (entry?.hasResult) void openHistory(entry);
-      else if (entry) openReadonlyTab(`history:${entry.id}`, `History #${entry.id}`, entry.query, entry.connectionId ?? null);
+      if (entry) void openHistory(entry);
       return;
     }
     if (id.startsWith('table:')) {
@@ -1305,11 +1307,14 @@
     }
   }
 
-  function openReadonlyTab(id: string, title: string, content: string, connectionId = tabConnectionId, session: ResultSession | null = null) {
+  function displayReadonlyTab(tab: WorkspaceTab) {
     captureActive();
-    const tab = { ...createQueryTab(id, title, content, connectionId), kind: 'reference' as const, session };
-    tabs = tabs.some((item) => item.id === id) ? tabs.map((item) => item.id === id ? tab : item) : [...tabs, tab];
+    tabs = tabs.some((item) => item.id === tab.id) ? tabs.map((item) => item.id === tab.id ? tab : item) : [...tabs, tab];
     displayTab(tab);
+  }
+
+  function openReadonlyTab(id: string, title: string, content: string, connectionId = tabConnectionId) {
+    displayReadonlyTab({ ...createQueryTab(id, title, content, connectionId), kind: 'reference' });
   }
 
   function browseTable(item: SchemaItem) {
@@ -1322,14 +1327,14 @@
 
   async function openHistory(entry: HistoryEntry) {
     try {
-      const payload = await api.historyGetResult(entry.id);
-      if (!payload.result) {
+      // Errors already carry their saved message; they have no row snapshot.
+      const result = entry.hasResult && !entry.isError ? (await api.historyGetResult(entry.id)).result : null;
+      if (entry.hasResult && !entry.isError && !result) {
         flash('No stored result for this entry.');
         return;
       }
-      const session: ResultSession = { data: payload.result, execution: { sql: entry.query, start: 0, end: entry.query.length }, connectionId: entry.connectionId ?? null,
-        connectionName: connections.find((connection) => connection.id === entry.connectionId)?.name ?? 'Unavailable connection', executedAt: entry.executedAt, snapshot: true };
-      openReadonlyTab(`history:${entry.id}`, `History #${entry.id}`, entry.query, entry.connectionId ?? null, session);
+      displayReadonlyTab(createHistoryTab(entry, result,
+        connections.find(connection => connection.id === entry.connectionId)?.name ?? 'Unavailable connection'));
     } catch (error) {
       flash(errorMessage(error));
     }
@@ -1973,6 +1978,10 @@
               <span class="running-state"><span class="spinner"></span> {operation.cancelling ? 'Cancelling…' : operation.kind === 'load' ? 'Loading' : 'Running'} {runningDuration}</span>
             {:else if result}
               <span>{result.rowCount}{result.hasMore ? '+' : ''} {result.rowCount === 1 ? 'row' : 'rows'} · {result.durationMs} ms</span>
+            {:else if queryError}
+              <span>Failed{historyContext ? ` · ${historyContext.durationMs} ms` : ''}</span>
+            {:else if historyContext}
+              <span>No snapshot stored · {historyContext.durationMs} ms</span>
             {:else}
               <span>No query run</span>
             {/if}
@@ -1988,13 +1997,13 @@
             {/if}
           </div>
         </div>
-        {#if resultSession}
+        {#if resultContext}
           <div class="result-context">
-            <span>{resultSession.connectionName}</span>
-            <time title={resultSession.executedAt}>{formatHistoryTime(resultSession.executedAt)}</time>
-            {#if resultSession.snapshot}<span class="snapshot-badge">History snapshot · read only</span>{/if}
-            {#if !resultSession.snapshot && resultSession.connectionId !== tabConnectionId}<span class="context-warning">Different connection · run the query to refresh</span>{/if}
-            <details><summary>Executed SQL</summary><pre>{resultSession.execution.sql}</pre></details>
+            <span>{resultContext.connectionName}</span>
+            <time title={resultContext.executedAt}>{formatHistoryTime(resultContext.executedAt)}</time>
+            {#if resultContext.snapshot}<span class="snapshot-badge">History snapshot · read only</span>{/if}
+            {#if !resultContext.snapshot && resultContext.connectionId !== tabConnectionId}<span class="context-warning">Different connection · run the query to refresh</span>{/if}
+            <details><summary>Executed SQL</summary><pre>{resultContext.execution.sql}</pre></details>
           </div>
         {/if}
         {#if editMode}
@@ -2033,8 +2042,8 @@
         {:else}
           <div class="empty-state results-empty">
             <Cat mood={queryError ? 'error' : 'asleep'} size={52} muted />
-            <strong>{tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
-            {#if tabKind === 'query'}<p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>{:else}<button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>{/if}
+            <strong>{queryError ? 'Query failed' : tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
+            {#if tabKind !== 'query'}<button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>{:else if !queryError}<p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>{/if}
           </div>
         {/if}
       </section>

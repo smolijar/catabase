@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>History results preview</title></head>
+  <body>
+    <div id="app"></div>
+    <output id="probe" style="position:fixed;bottom:30px;right:12px;z-index:100;background:#191a1d;color:#fff;padding:4px 8px;font:12px monospace">Preview only · SQL executions: 0</output>
+    <script type="module">
+      // The real app with synthetic IPC responses. No database/network requests
+      // or native storage writes; unexpected commands fail instead of executing.
+      const base = { connectionId: 'preview', durationMs: 12, executedAt: '2026-10-27T10:00:00Z', queryHash: 'preview', querySize: 32, executionSize: 100, queryReferences: 1, resultReferences: 0 };
+      const entries = [
+        { ...base, id: 42, query: 'select * from missing_relation', isError: true, errorMessage: 'relation "missing_relation" does not exist', hasResult: false },
+        { ...base, id: 41, query: 'select 42 as answer', isError: false, hasResult: true, rowCount: 1 },
+        { ...base, id: 40, query: 'select invalid_column from landlords', isError: true, errorMessage: 'column "invalid_column" does not exist', hasResult: false, transaction: { id: 'preview-transaction', kind: 'manual', status: 'rolledBack', statementCount: 1 } }
+      ];
+      let executions = 0;
+      window.__TAURI_INTERNALS__ = { invoke: async (command, args = {}) => {
+        switch (command) {
+          case 'list_connections': return [{ id: 'preview', name: 'zenbase docker (preview)', host: 'localhost', port: 5432, database: 'zenbase', username: 'zenbase', ssl: false, isActive: true, createdAt: base.executedAt, updatedAt: base.executedAt }];
+          case 'get_settings': return { poolSize: 1, supermavenEnabled: false };
+          case 'tx_status': return { active: false, startedAt: null };
+          case 'supermaven_status': return { enabled: false, state: 'off', message: 'Preview only' };
+          case 'load_draft': return JSON.stringify({ version: 1, activeId: 'draft', tabs: [{ id: 'draft', title: 'Untouched draft', sql: 'select 1 as original_draft', connectionId: 'preview', viewState: null }] });
+          case 'save_draft': case 'test_connection': return;
+          case 'introspect_schema': return { schemas: [] };
+          case 'connection_stats': return { active: 0, idle: 1, poolSize: 1 };
+          case 'history_stats': return { total: 3, errors: 2, lastExecutedAt: base.executedAt };
+          case 'history_page': {
+            const found = entries.filter(entry => !args.search || `${entry.query} ${entry.errorMessage ?? ''}`.includes(args.search));
+            return { entries: found, total: found.length };
+          }
+          case 'history_transaction_page': return { entries: entries.filter(entry => entry.transaction?.id === args.id), total: 1 };
+          case 'history_get_result': return { result: { columns: [{ name: 'answer', typeOid: 23, typeName: 'int4', generated: false, primaryKey: false }], rows: [{ answer: 42 }], rowCount: 1, durationMs: 12, autoLimited: false, hasMore: false } };
+          case 'execute_query':
+            document.getElementById('probe').textContent = `Preview only · SQL executions: ${++executions}`;
+            throw new Error('This preview never runs SQL.');
+          default: throw new Error(`Unexpected preview command: ${command}`);
+        }
+      }};
+      await import('../../src/main.ts');
+    </script>
+  </body>
+</html>

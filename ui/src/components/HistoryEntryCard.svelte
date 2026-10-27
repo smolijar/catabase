@@ -26,7 +26,7 @@
   {#if entry.errorMessage}<small class="history-error">{entry.errorMessage}</small>{/if}
   <div class="row-actions">
     <button on:click={() => onRestore(entry)}><Icon name="plus" size={14} /> New query</button>
-    <button disabled={!entry.hasResult} on:click={() => onOpen(entry)}>Open result</button>
+    <button disabled={!entry.hasResult && !entry.isError} on:click={() => onOpen(entry)}>Open result</button>
     <button class="danger-quiet" aria-label="Delete history entry" title="Delete history entry" on:click={() => onDelete(entry.id)}><Icon name="trash" size={14} /></button>
   </div>
 </article>
