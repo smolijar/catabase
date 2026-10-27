@@ -4,15 +4,17 @@
   <body>
     <div id="app"></div>
     <output id="probe" style="position:fixed;bottom:30px;right:12px;z-index:100;background:#191a1d;color:#fff;padding:4px 8px;font:12px monospace">Preview only · SQL executions: 0</output>
+    <output id="clipboard-probe" aria-label="Copied SQL" style="position:fixed;bottom:65px;right:12px;z-index:100;max-width:400px;white-space:pre-wrap;background:#191a1d;color:#fff;font:12px monospace"></output>
     <label style="position:fixed;bottom:30px;left:70px;z-index:100;background:#191a1d;color:#fff;padding:4px 8px;font:12px monospace"><input id="fail-save" type="checkbox" /> Fail archive save</label>
     <script type="module">
       // The real app with synthetic IPC responses. No database/network requests
       // or native storage writes; unexpected commands fail instead of executing.
       const base = { connectionId: 'preview', durationMs: 12, executedAt: '2026-10-27T10:00:00Z', queryHash: 'preview', querySize: 32, executionSize: 100, queryReferences: 1, resultReferences: 0 };
-      const entries = [
+      let entries = [
         { ...base, id: 42, query: 'select * from missing_relation', isError: true, errorMessage: 'relation "missing_relation" does not exist', hasResult: false },
-        { ...base, id: 41, query: 'select 42 as answer', isError: false, hasResult: true, rowCount: 1 },
-        { ...base, id: 40, query: 'select invalid_column from landlords', isError: true, errorMessage: 'column "invalid_column" does not exist', hasResult: false, transaction: { id: 'preview-transaction', kind: 'manual', status: 'rolledBack', statementCount: 1 } }
+        { ...base, id: 41, query: 'select 42 as answer\n-- preserved line break', isError: false, hasResult: true, rowCount: 1 },
+        { ...base, id: 40, query: 'select invalid_column from landlords', isError: true, errorMessage: 'column "invalid_column" does not exist', hasResult: false, transaction: { id: 'preview-transaction', kind: 'manual', status: 'rolledBack', statementCount: 1 } },
+        { ...base, id: 39, query: 'BEGIN', isError: false, hasResult: false }
       ];
       let executions = 0;
       const draftKey = 'catabase.test.history-results.workspace';
@@ -33,14 +35,16 @@
             return;
           }
           case 'test_connection': return;
+          case 'plugin:clipboard-manager|write_text': document.getElementById('clipboard-probe').textContent = args.text; return;
           case 'introspect_schema': return { schemas: [] };
           case 'connection_stats': return { active: 0, idle: 1, poolSize: 1 };
-          case 'history_stats': return { total: 3, errors: 2, lastExecutedAt: base.executedAt };
+          case 'history_stats': return { total: entries.length, errors: entries.filter(entry => entry.isError).length, lastExecutedAt: base.executedAt };
           case 'history_page': {
             const found = entries.filter(entry => !args.search || `${entry.query} ${entry.errorMessage ?? ''}`.includes(args.search));
             return { entries: found, total: found.length };
           }
           case 'history_transaction_page': return { entries: entries.filter(entry => entry.transaction?.id === args.id), total: 1 };
+          case 'history_delete': entries = entries.filter(entry => entry.id !== args.id); return;
           case 'history_get_result': return { result: { columns: [{ name: 'answer', typeOid: 23, typeName: 'int4', generated: false, primaryKey: false }], rows: [{ answer: 42 }], rowCount: 1, durationMs: 12, autoLimited: false, hasMore: false } };
           case 'execute_query':
             document.getElementById('probe').textContent = `Preview only · SQL executions: ${++executions}`;

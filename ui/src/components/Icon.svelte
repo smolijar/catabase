@@ -14,6 +14,7 @@
     | 'explain'
     | 'key'
     | 'link'
+    | 'open'
     | 'plus'
     | 'play'
     | 'refresh'
@@ -95,6 +96,8 @@
   {:else if name === 'copy'}
     <rect x="8" y="8" width="11" height="11" rx="2" />
     <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" />
+  {:else if name === 'open'}
+    <path d="M14 3h7v7M21 3 10 14M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5" />
   {:else if name === 'download'}
     <path d="M12 3v12M7 10l5 5 5-5M5 21h14" />
   {:else if name === 'chevron'}
