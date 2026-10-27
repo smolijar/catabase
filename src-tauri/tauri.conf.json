@@ -13,6 +13,10 @@
     "windows": [
       {
         "title": "catabase",
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 14, "y": 20 },
         "width": 1280,
         "height": 840,
         "minWidth": 960,
