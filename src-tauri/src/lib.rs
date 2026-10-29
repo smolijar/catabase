@@ -1,3 +1,5 @@
+mod updater;
+
 use std::{
     collections::HashMap,
     sync::{
@@ -31,6 +33,7 @@ struct AppState {
     tx: Mutex<Option<TxSession>>,
     cancels: Mutex<HashMap<String, CancelEntry>>,
     supermaven: Arc<SupermavenClient>,
+    updates: updater::UpdateState,
     exit_guard_enabled: AtomicBool,
     exit_confirmed: AtomicBool,
 }
@@ -162,6 +165,7 @@ async fn save_connection(
     state: State<'_, AppState>,
     input: ConnectionInput,
 ) -> Result<ConnectionRecord, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     let _tx_guard = ensure_no_transaction(&state).await?;
     let record = state
         .storage
@@ -178,6 +182,7 @@ async fn duplicate_connection(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<ConnectionRecord, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     // A duplicate is inactive configuration only. The existing pool, checked-out
     // transaction and active connection must not be reset by creating it.
     state.storage.duplicate_connection(&id).map_err(Into::into)
@@ -189,6 +194,7 @@ async fn delete_connection(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     let _tx_guard = ensure_no_transaction(&state).await?;
     state
         .storage
@@ -206,6 +212,7 @@ async fn activate_connection(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<ConnectionRecord, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     let _tx_guard = ensure_no_transaction(&state).await?;
     let record = state
         .storage
@@ -223,6 +230,7 @@ async fn disconnect_connection(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     // Serialize against a new operation starting. Refuse active work rather than
     // silently ending a transaction or abandoning a possible write.
     let operations = state.cancels.lock().await;
@@ -270,7 +278,11 @@ async fn disconnect_connection(
 }
 
 #[tauri::command]
-async fn test_connection(input: ConnectionInput) -> Result<(), AppError> {
+async fn test_connection(
+    state: State<'_, AppState>,
+    input: ConnectionInput,
+) -> Result<(), AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     test_pg_connection(&ConnectionFields::from(&input))
         .await
         .map_err(Into::into)
@@ -297,6 +309,7 @@ async fn set_pool_size(
     state: State<'_, AppState>,
     pool_size: u32,
 ) -> Result<u32, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     let _tx_guard = ensure_no_transaction(&state).await?;
     let normalized = state
         .storage
@@ -312,6 +325,7 @@ async fn set_supermaven_enabled(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<SupermavenStatus, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     if !enabled {
         let status = state.supermaven.set_enabled(false).await?;
         state.storage.set_supermaven_enabled(false)?;
@@ -346,6 +360,7 @@ async fn execute_query(
     connection_id: Option<String>,
     read_only_replay: Option<bool>,
 ) -> Result<QueryResult, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     let command_start = Instant::now();
     let cancellation = begin_operation(&state, &query_token).await;
     let outcome = async {
@@ -420,6 +435,7 @@ async fn apply_row_updates(
     query_token: String,
     updates: Vec<RowUpdate>,
 ) -> Result<ApplyUpdatesResult, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     let cancellation = begin_operation(&state, &query_token).await;
     let outcome = async {
         let active = requested_connection(&state, Some(&connection_id)).await?;
@@ -510,6 +526,7 @@ async fn cancel_query(
     state: State<'_, AppState>,
     query_token: String,
 ) -> Result<CancelResult, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     let mut cancels = state.cancels.lock().await;
     prune_pending_cancels(&mut cancels);
     let entry = cancels
@@ -566,6 +583,7 @@ async fn tx_status(state: State<'_, AppState>) -> Result<TxStatus, AppError> {
 
 #[tauri::command]
 async fn tx_commit(app: AppHandle, state: State<'_, AppState>) -> Result<TxStatus, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     finish_tx(&app, &state, "COMMIT").await?;
     let status = tx_status_inner(&state).await;
     let _ = app.emit("tx-changed", &status);
@@ -574,6 +592,7 @@ async fn tx_commit(app: AppHandle, state: State<'_, AppState>) -> Result<TxStatu
 
 #[tauri::command]
 async fn tx_rollback(app: AppHandle, state: State<'_, AppState>) -> Result<TxStatus, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     finish_tx(&app, &state, "ROLLBACK").await?;
     let status = tx_status_inner(&state).await;
     let _ = app.emit("tx-changed", &status);
@@ -585,6 +604,7 @@ async fn introspect_schema(
     state: State<'_, AppState>,
     connection_id: Option<String>,
 ) -> Result<SchemaTree, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     let active = requested_connection(&state, connection_id.as_deref()).await?;
     // Reflect uncommitted DDL on the held transaction client, without borrowing
     // its one-client pool or publishing private metadata to the shared cache.
@@ -614,6 +634,7 @@ async fn foreign_key_values(
     query_token: String,
     request: ForeignKeyLookup,
 ) -> Result<ForeignKeyValues, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     let cancelled = begin_operation(&state, &query_token).await;
     let outcome = async {
         let active = requested_connection(&state, Some(&connection_id)).await?;
@@ -651,6 +672,7 @@ async fn get_ddl(
     name: String,
     connection_id: Option<String>,
 ) -> Result<String, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     let active = requested_connection(&state, connection_id.as_deref()).await?;
     let pool = active_pool(&state, &active).await?;
     let client = checkout_pool_client(&pool.pool)
@@ -711,11 +733,13 @@ async fn history_get_result(
 
 #[tauri::command]
 async fn history_delete(state: State<'_, AppState>, id: i64) -> Result<(), AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     state.storage.history_delete(id).map_err(Into::into)
 }
 
 #[tauri::command]
 async fn history_purge(state: State<'_, AppState>) -> Result<(), AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     state.storage.history_purge().map_err(Into::into)
 }
 
@@ -725,6 +749,7 @@ async fn save_draft(
     tab_kind: String,
     content: String,
 ) -> Result<(), AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     state
         .storage
         .save_draft(&tab_kind, &content)
@@ -746,6 +771,9 @@ fn enable_exit_guard(state: State<'_, AppState>) {
 
 #[tauri::command]
 fn finish_exit(app: AppHandle, state: State<'_, AppState>) {
+    if state.updates.is_installing() {
+        return;
+    }
     state.exit_confirmed.store(true, Ordering::Release);
     app.exit(0);
 }
@@ -757,6 +785,7 @@ async fn supermaven_status(state: State<'_, AppState>) -> Result<SupermavenStatu
 
 #[tauri::command]
 async fn supermaven_use_free(state: State<'_, AppState>) -> Result<(), AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     state
         .supermaven
         .use_free_version()
@@ -769,6 +798,7 @@ async fn supermaven_complete(
     state: State<'_, AppState>,
     request: SupermavenRequest,
 ) -> Result<Option<SupermavenCompletion>, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     state.supermaven.complete(request).await.map_err(Into::into)
 }
 
@@ -780,11 +810,17 @@ async fn supermaven_cancel(state: State<'_, AppState>, request_id: String) -> Re
 
 #[tauri::command]
 async fn supermaven_open_activation(state: State<'_, AppState>) -> Result<(), AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     state.supermaven.open_activation().await.map_err(Into::into)
 }
 
 #[tauri::command]
-async fn export_write_file(path: String, content: String) -> Result<(), AppError> {
+async fn export_write_file(
+    state: State<'_, AppState>,
+    path: String,
+    content: String,
+) -> Result<(), AppError> {
+    let _workspace = state.updates.workspace_operation()?;
     tokio::fs::write(path, content).await.map_err(Into::into)
 }
 
@@ -1361,6 +1397,14 @@ fn application_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::W
 pub fn run() {
     tauri::Builder::default()
         .menu(application_menu)
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && let Some(state) = window.app_handle().try_state::<AppState>()
+                && state.updates.is_installing()
+            {
+                api.prevent_close();
+            }
+        })
         .on_menu_event(|app, event| {
             if event.id() == "catabase-quit" {
                 app.exit(0);
@@ -1370,6 +1414,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(|app| {
+            updater::setup(app.handle())?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let storage = Storage::open(data_dir.join("catabase.sqlite3"))?;
@@ -1390,12 +1435,17 @@ pub fn run() {
                 tx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
                 supermaven,
+                updates: updater::UpdateState::default(),
                 exit_guard_enabled: AtomicBool::new(false),
                 exit_confirmed: AtomicBool::new(false),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            updater::updater_status,
+            updater::check_for_update,
+            updater::install_update,
+            updater::open_releases,
             activate_connection,
             apply_row_updates,
             supermaven_complete,
@@ -1442,6 +1492,10 @@ pub fn run() {
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 let state = app.state::<AppState>();
+                if code != Some(tauri::RESTART_EXIT_CODE) && state.updates.is_installing() {
+                    api.prevent_exit();
+                    return;
+                }
                 if code != Some(tauri::RESTART_EXIT_CODE)
                     && state.exit_guard_enabled.load(Ordering::Acquire)
                     && !state.exit_confirmed.load(Ordering::Acquire)

@@ -8,6 +8,7 @@
       // storage, credentials, or external autocomplete service is accessed.
       // Unknown IPC calls fail closed; this page is not a database connection.
       const timestamp = '2026-10-29T10:00:00Z';
+      const updateDemo = new URLSearchParams(location.search).get('updates');
       const sql = `select
     id, title, price,
     in_stock, published_on
@@ -70,6 +71,12 @@ order by id;`;
       localStorage.setItem('catabase.connectionAppearance', JSON.stringify({ showcase: { color: 'none', environment: 'DEMO' } }));
       window.__TAURI_INTERNALS__ = { invoke: async (command, args = {}) => {
         switch (command) {
+          case 'updater_status': return { currentVersion: '0.1.0', enabled: Boolean(updateDemo), unavailableReason: 'Updates are not configured in the documentation demo.' };
+          case 'check_for_update':
+            if (updateDemo === 'error') throw new Error('Could not reach the update service.');
+            return { currentVersion: '0.1.0', update: updateDemo === 'available' ? { version: '0.1.1', notes: 'Changes since v0.1.0:\n- Add app updates\n- Improve query history', publishedAt: timestamp } : null };
+          case 'install_update': throw new Error('This browser fixture cannot install updates. Your workspace is unchanged.');
+          case 'open_releases': return;
           case 'list_connections': return [connection];
           case 'get_settings': return { poolSize: 5, supermavenEnabled: false };
           case 'tx_status': return { active: false, startedAt: null };

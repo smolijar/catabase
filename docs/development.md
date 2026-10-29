@@ -31,9 +31,9 @@ The normal app requires the native Tauri bridge for database and persistence com
 
 Start `pnpm --dir ui dev`, then open `http://127.0.0.1:1420/tests/fixtures/showcase.html`. This fixture renders the real workspace with fictional bookshop data through a mock Tauri bridge. It does not connect to a database, native storage or an autocomplete service.
 
-Run the seeded Book catalog query, open Schema and expand `books`. The title and date columns can be widened with the grid's resize controls. For the edit review, enable **Edit cells**, change the first price from `24.00` to `26.00`, stage it, and select **Review 1 edit**. The fixture supports these screenshots, not arbitrary SQL execution; applying updates is intentionally unsupported.
+Run the seeded Book catalog query, open Schema and expand `books`. The title and date columns can be widened with the grid's resize controls. The fixture supports this screenshot, not arbitrary SQL execution; applying updates is intentionally unsupported.
 
-Save captures to `docs/images/workspace.jpg` and `docs/images/review-edits.jpg`. Keep the fictional-data caption in the README, and keep private queries, connection details and real database rows out of documentation images.
+Save the capture to `docs/images/workspace.jpg`. Keep the fictional-data caption in the README, and keep private queries, connection details and real database rows out of documentation images.
 
 ## Build
 
@@ -120,7 +120,7 @@ Snapshot serialization borrows results and stops at the 256 KiB cap. A raw-size 
 
 Each completed statement is recorded before its result returns to the UI, rather than waiting for transaction commit. Reviewed cell updates use the same history mechanisms. Unfinished transaction history is marked interrupted when the app starts again.
 
-The workspace close path waits for pending tab archiving, finalizes rename state and flushes saved drafts. Native restart currently bypasses that exit guard. An eventual auto-updater must explicitly flush workspace state and guard active queries, transactions and staged edits before installing/relaunching; it must not call restart directly.
+The workspace close path waits for pending tab archiving, finalizes rename state and flushes saved drafts. The updater freezes workspace controls and flushes this same state before invoking its guarded native install command. A native operation gate rejects concurrent database/storage work, checks transaction state, and blocks exit during replacement. Do not add an unguarded restart path; native restart bypasses the ordinary exit handshake.
 
 ## Timing instrumentation
 

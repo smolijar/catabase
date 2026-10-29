@@ -16,6 +16,7 @@
   import HistoryStorageDialog from './components/HistoryStorageDialog.svelte';
   import HistoryEntryCard from './components/HistoryEntryCard.svelte';
   import HistoryTransactionGroup from './components/HistoryTransactionGroup.svelte';
+  import AppUpdates from './components/AppUpdates.svelte';
   import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
   import SidebarResizer from './components/SidebarResizer.svelte';
@@ -30,6 +31,8 @@
   import type { ConnectionAppearance, ThemePreference } from './lib/appearance';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
+  import { AUTO_UPDATE_CHECK_KEY, createUpdateChecker, initialUpdateState, updateInstallBlock } from './lib/appUpdates';
+  import type { UpdateProgress } from './lib/appUpdates';
   import { formatRunningDuration } from './lib/status';
   import { canRequestSupermaven } from './lib/supermavenInline';
   import { createHistorySearch, groupHistory } from './lib/history';
@@ -187,6 +190,16 @@
   let draftTimer: ReturnType<typeof setTimeout> | null = null;
   let bootstrapTask = Promise.resolve();
   let closingWorkspace = false;
+  let updateState = initialUpdateState();
+  let automaticUpdates = true;
+  let updateFocused = false;
+  let updateInstalling = false;
+  let updateInstallError = '';
+  let updateProgress: UpdateProgress | null = null;
+  const updateChecker = createUpdateChecker(
+    { status: api.updaterStatus, check: api.checkForUpdate },
+    state => { updateState = state; }, errorMessage
+  );
   let draftStatus: 'pending' | 'saving' | 'saved' | 'error' = 'saved';
   let draftRevision = 0;
   const writeWorkspaceDraft = createDraftWriter((content) => api.saveDraft('workspace.v1', content));
@@ -219,6 +232,14 @@
     ];
   $: if (picker !== 'commands') pickerHistorySearch.cancel();
   $: running = operation !== null;
+  $: updateBlocked = updateInstallBlock({
+    ready: workspaceLoaded,
+    busy: Boolean(operation || connectionMutation || showConnectionModal || schemaLoading || showUpdatePreview || discardRunConfirmation || tabCloseTask || closingWorkspace),
+    transactionKnown: txStatusKnown,
+    transactionActive: txStatus.active,
+    stagedEdits: tabs.reduce((count, tab) => count + (tab.id === activeTab ? pendingChanges.length : tab.pendingChanges.length), 0),
+    cellEditing: tabs.some(tab => tab.id === activeTab ? editMode : tab.editMode)
+  });
   $: visibleSidebarWidth = clampSidebarWidth(sidebarWidth, workspaceWidth);
   $: runningDuration = formatRunningDuration(operation?.startedAt, nowMs);
   $: transactionDuration = formatRunningDuration(txStatus.startedAt, nowMs);
@@ -263,6 +284,7 @@
       appearances = restoreAppearance(localStorage.getItem(APPEARANCE_KEY));
     } catch { /* Appearance controls remain usable without storage. */ }
     try { editorFontSize = restoreEditorFontSize(localStorage.getItem(EDITOR_FONT_STORAGE_KEY)); } catch { /* Font controls still work without storage. */ }
+    try { automaticUpdates = localStorage.getItem(AUTO_UPDATE_CHECK_KEY) !== 'false'; } catch { /* Keep the default for this session. */ }
     const savedResultsHeight = Number(localStorage.getItem('catabase.resultsHeight'));
     if (Number.isFinite(savedResultsHeight) && savedResultsHeight >= 180) resultsHeight = savedResultsHeight;
     sidebarWidth = restoreSidebarWidth(localStorage.getItem('catabase.sidebarWidth'));
@@ -277,7 +299,7 @@
     window.addEventListener('keydown', handleKeydown);
     window.addEventListener('beforeunload', flushDraftOnUnload);
     const statsInterval = window.setInterval(() => {
-      if (activeConnection) void loadConnectionStats();
+      if (activeConnection && !closingWorkspace) void loadConnectionStats();
     }, 5000);
     let nextRunningStatsAt = 0;
     const runningInterval = window.setInterval(() => {
@@ -288,7 +310,7 @@
         void loadConnectionStats();
       }
     }, 100);
-    const aiInterval = window.setInterval(checkSupermaven, 2000);
+    const aiInterval = window.setInterval(() => { if (!closingWorkspace) void checkSupermaven(); }, 2000);
     const healthcheck = createConnectionHealthcheck(() => ({
       connectionId: activeConnection?.id ?? null,
       state: activeConnection ? connectionTests[activeConnection.id] ?? null : null,
@@ -299,7 +321,11 @@
       const connection = connections.find(candidate => candidate.id === id);
       if (connection) void testSavedConnection(connection);
     });
-    const nativeFocus = createWindowFocusTracker(() => getCurrentWindow().isFocused(), healthcheck.setFocused);
+    const nativeFocus = createWindowFocusTracker(() => getCurrentWindow().isFocused(), focused => {
+      updateFocused = focused;
+      healthcheck.setFocused(focused);
+      pollAppUpdates();
+    });
     // Native window focus is authoritative: a background WebView may still
     // report itself visible/focused. DOM blur also closes the event-delivery gap.
     // A returning WebView may regain DOM focus without a new native-window
@@ -328,12 +354,14 @@
     const healthInterval = window.setInterval(() => {
       nowMs = Date.now();
       healthcheck.poll();
+      pollAppUpdates();
     }, 1000);
 
     return () => {
       flushDraftOnUnload();
       mounted = false;
       healthcheck.dispose();
+      updateChecker.dispose();
       nativeFocus.dispose();
       window.removeEventListener('focus', onWindowFocus);
       window.removeEventListener('blur', onWindowBlur);
@@ -362,7 +390,8 @@
       loadConnections(),
       refreshHistory(),
       checkSupermaven(),
-      refreshTxStatus()
+      refreshTxStatus(),
+      updateChecker.initialize()
     ]);
     await loadDraft();
     workspaceLoaded = true;
@@ -419,6 +448,11 @@
       });
       if (!mounted) { unlistenExit(); return; }
       nativeCleanup.push(unlistenExit);
+      const unlistenUpdate = await listen<UpdateProgress>('catabase:update-progress', event => {
+        if (updateInstalling) updateProgress = event.payload;
+      });
+      if (!mounted) { unlistenUpdate(); return; }
+      nativeCleanup.push(unlistenUpdate);
       await api.enableExitGuard();
     } catch (error) {
       flash(`Draft protection on close is unavailable: ${errorMessage(error)}`, true);
@@ -431,6 +465,36 @@
     if (renamingTab) finishRename(false);
     await tick();
     await persistDraftNow();
+  }
+
+  function pollAppUpdates() {
+    updateChecker.poll({ automatic: automaticUpdates, foreground: updateFocused && document.visibilityState === 'visible', idle: !updateBlocked });
+  }
+
+  function setAutomaticUpdates(enabled: boolean) {
+    automaticUpdates = enabled;
+    try { localStorage.setItem(AUTO_UPDATE_CHECK_KEY, String(enabled)); } catch { /* Preference still applies in this session. */ }
+    pollAppUpdates();
+  }
+
+  async function installAppUpdate() {
+    if (updateInstalling || updateBlocked || !updateState.update || updateState.checking) return;
+    const version = updateState.update.version;
+    // Freeze editor shortcuts and workspace controls before taking the final
+    // draft snapshot. Native code checks activity again under an exclusive gate.
+    closingWorkspace = true;
+    updateInstalling = true;
+    updateInstallError = '';
+    updateProgress = null;
+    try {
+      await flushWorkspaceForClose();
+      await api.installUpdate(version);
+    } catch (error) {
+      updateInstallError = errorMessage(error);
+      updateInstalling = false;
+      closingWorkspace = false;
+      updateProgress = null;
+    }
   }
 
   function flushDraftOnUnload() {
@@ -904,6 +968,7 @@
   }
 
   async function runQuery() {
+    if (closingWorkspace) return;
     if (discardRunConfirmation) return;
     if (connectionMutation) { flash(connectionMutation); return; }
     if (operation) {
@@ -1924,6 +1989,9 @@
           <TabsPanel tabs={tabs.map(tab => tab.id === activeTab ? { ...tab, sql, connectionId: tabConnectionId } : tab)} {archivedTabs} {connections} activeId={activeTab} onSelect={switchTab} onReopen={reopenTab} onNew={() => newQuery()} />
         {:else}
           <div class="panel-head"><div><h2>Settings</h2><p>Workspace preferences</p></div></div>
+          <AppUpdates state={updateState} automatic={automaticUpdates} blocked={updateBlocked} installError={updateInstallError}
+            onCheck={() => void updateChecker.check()} onAutomatic={setAutomaticUpdates} onInstall={() => void installAppUpdate()}
+            onReleases={() => void api.openReleases().catch(error => flash(errorMessage(error), true))} />
           <section class="settings-card">
             <div class="settings-card-head"><strong>Appearance</strong></div>
             <div class="theme-options" role="group" aria-label="Theme">
@@ -2122,6 +2190,7 @@
     {#if activeConnection}<button class="status-link" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
     <button class="status-link" title="Open schema browser" on:click={() => { sidebar = 'schema'; sidebarOpen = true; }}>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : 'Schema'}</button>
     <span class="draft-status">{!workspaceLoaded ? 'restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'saving drafts…' : draftStatus === 'pending' ? 'saving drafts…' : draftStatus === 'error' ? 'draft save failed' : 'drafts saved'}</span>
+    {#if updateState.update}<button class="status-link" title={`Catabase ${updateState.update.version} is available`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>Update available</button>{/if}
     {#if running}<span>Running {runningDuration}</span>{/if}
     <span class="cursor-position">Ln {cursorLine}, Col {cursorColumn}</span>
     {#if statusTiming}
@@ -2131,6 +2200,20 @@
     {/if}
   </footer>
 </main>
+
+{#if updateInstalling}
+  <Modal label="Updating Catabase" locked onClose={() => {}}>
+    <div class="modal">
+      <h2>Updating Catabase</h2>
+      <p role="status">{updateProgress?.phase === 'restarting' ? 'Restarting…' : updateProgress?.phase === 'installing' ? 'Installing verified update…' : updateProgress ? 'Downloading update…' : 'Saving SQL drafts…'}</p>
+      {#if updateProgress?.phase === 'downloading' && updateProgress.totalBytes}
+        <progress aria-label="Update download" value={updateProgress.downloadedBytes} max={updateProgress.totalBytes}></progress>
+        <p>{Math.min(100, Math.floor(updateProgress.downloadedBytes / updateProgress.totalBytes * 100))}% downloaded</p>
+      {/if}
+      <p>Catabase will reopen when the update is installed.</p>
+    </div>
+  </Modal>
+{/if}
 
 {#if historyStorage}
   <HistoryStorageDialog entry={historyStorage.entry} stats={historyStorage.stats} error={historyStorage.error} onClose={() => historyStorage = null} />
