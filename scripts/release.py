@@ -82,6 +82,36 @@ def signing_mode(env):
     return bool(apple), private
 
 
+def build_environment(plan, env):
+    result = dict(env)
+    if plan["apple"]:
+        missing = [key for key in APPLE_KEYS if not result.get(key, "").strip()]
+        if missing or result.get("APPLE_SIGNING_IDENTITY", "").strip() == "-":
+            raise ValueError("Apple signing credentials are missing from the build environment.")
+    else:
+        # Presence, even with an empty value, makes Tauri attempt certificate
+        # import/notarization. Ad-hoc builds must omit these variables entirely.
+        for key in (*APPLE_KEYS, "APPLE_API_ISSUER", "APPLE_API_KEY", "APPLE_API_KEY_PATH", "APPLE_KEYCHAIN_PROFILE"):
+            result.pop(key, None)
+        result["APPLE_SIGNING_IDENTITY"] = "-"
+    if plan["updater"]:
+        if not result.get("TAURI_SIGNING_PRIVATE_KEY", "").strip():
+            raise ValueError("Updater private key is missing from the build environment.")
+        # An empty updater password is valid and is preserved if explicitly set.
+    else:
+        for key in ("TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "TAURI_SIGNING_PRIVATE_KEY_PATH"):
+            result.pop(key, None)
+    return result
+
+
+def build(plan_path):
+    plan = json.loads(plan_path.read_text())
+    command = ["pnpm", "tauri", "build", "--ci", "--target", "universal-apple-darwin", "--bundles", "app,dmg", "--config", str(plan_path.with_suffix(".config.json")), "--", "--locked"]
+    # Inherit stdout/stderr so compiler progress remains visible in Actions.
+    # Signing credentials stay in the child environment, never command arguments.
+    subprocess.run(command, cwd=ROOT, env=build_environment(plan, os.environ), check=True)
+
+
 def validate_signing_continuity(previous, apple, updater, public_key):
     if not previous:
         return
@@ -358,7 +388,7 @@ def publish(plan_path, artifact_dir):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("source", "prepare", "assets", "publish"))
+    parser.add_argument("command", choices=("source", "prepare", "build", "assets", "publish"))
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", "smolijar/catabase"))
     parser.add_argument("--run-id", default=os.environ.get("CI_RUN_ID"))
     parser.add_argument("--plan", type=Path, default=Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "catabase-release.json")
@@ -371,6 +401,8 @@ def main():
             output("sha", validate_run(github(args.repo, f"actions/runs/{args.run_id}"), args.repo))
         elif args.command == "prepare":
             prepare(args.repo, args.plan)
+        elif args.command == "build":
+            build(args.plan)
         elif args.command == "assets":
             make_assets(args.plan, args.artifacts.resolve())
         else:

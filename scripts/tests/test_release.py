@@ -76,6 +76,45 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(keys=list(invalid)), self.assertRaises(ValueError):
                 RELEASE.signing_mode(invalid)
 
+    def test_ad_hoc_build_omits_empty_and_disabled_credentials(self):
+        source = dict.fromkeys(RELEASE.APPLE_KEYS, "") | {
+            "PATH": "/example/bin", "TAURI_SIGNING_PRIVATE_KEY": "",
+            "TAURI_SIGNING_PRIVATE_KEY_PASSWORD": "", "TAURI_SIGNING_PRIVATE_KEY_PATH": "/unused",
+            "APPLE_API_KEY": "unused", "APPLE_API_ISSUER": "unused", "APPLE_API_KEY_PATH": "/unused",
+            "APPLE_KEYCHAIN_PROFILE": "unused",
+        }
+        result = RELEASE.build_environment(self.plan, source)
+        self.assertEqual(result, {"PATH": "/example/bin", "APPLE_SIGNING_IDENTITY": "-"})
+        self.assertEqual(source["APPLE_SIGNING_IDENTITY"], "")
+        self.assertIn("APPLE_CERTIFICATE", source)
+
+    def test_apple_build_retains_complete_credentials(self):
+        source = dict.fromkeys(RELEASE.APPLE_KEYS, "configured") | {"PATH": "/example/bin"}
+        self.assertEqual(RELEASE.build_environment(self.plan | {"apple": True}, source), source)
+        with self.assertRaisesRegex(ValueError, "Apple signing credentials"):
+            RELEASE.build_environment(self.plan | {"apple": True}, source | {"APPLE_CERTIFICATE": ""})
+
+    def test_updater_build_retains_key_and_optional_empty_password(self):
+        for password in (None, "", "passphrase"):
+            source = {"TAURI_SIGNING_PRIVATE_KEY": "private"}
+            if password is not None:
+                source["TAURI_SIGNING_PRIVATE_KEY_PASSWORD"] = password
+            result = RELEASE.build_environment(self.plan | {"updater": True}, source)
+            self.assertEqual(result, source | {"APPLE_SIGNING_IDENTITY": "-"})
+        with self.assertRaisesRegex(ValueError, "Updater private key"):
+            RELEASE.build_environment(self.plan | {"updater": True}, {"TAURI_SIGNING_PRIVATE_KEY": ""})
+
+    def test_combined_signing_keeps_both_sets_and_build_streams_output(self):
+        source = dict.fromkeys(RELEASE.APPLE_KEYS, "configured") | {"TAURI_SIGNING_PRIVATE_KEY": "private", "TAURI_SIGNING_PRIVATE_KEY_PASSWORD": ""}
+        plan = self.plan | {"apple": True, "updater": True}
+        self.assertEqual(RELEASE.build_environment(plan, source), source)
+        plan_path = self.root / "plan.json"
+        plan_path.write_text(json.dumps(plan))
+        with patch.dict(os.environ, source, clear=True), patch.object(RELEASE.subprocess, "run") as runner:
+            RELEASE.build(plan_path)
+            self.assertEqual(runner.call_args.kwargs, {"cwd": RELEASE.ROOT, "env": source, "check": True})
+            self.assertEqual(runner.call_args.args[0], ["pnpm", "tauri", "build", "--ci", "--target", "universal-apple-darwin", "--bundles", "app,dmg", "--config", str(plan_path.with_suffix(".config.json")), "--", "--locked"])
+
     def test_signed_release_cannot_silently_lose_or_rotate_signing(self):
         public_key = "public"
         digest = hashlib.sha256(public_key.encode()).hexdigest()
