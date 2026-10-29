@@ -123,7 +123,7 @@ jobs:
       - name: Verify signed universal app and notarization
         run: |
           app=target/universal-apple-darwin/release/bundle/macos/Catabase.app
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/catabase"
+          lipo "$app/Contents/MacOS/catabase" -verify_arch arm64 x86_64
           codesign --verify --deep --strict "$app"
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose "$app"
