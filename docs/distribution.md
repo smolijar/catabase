@@ -1,65 +1,85 @@
 # Distribution
 
-## What works before signing is configured
+## Main → release
 
-The [CI workflow](https://github.com/smolijar/catabase/actions/workflows/ci.yml) runs on pull requests, pushes to `main`, and manual dispatch. It checks Rust formatting, Clippy, Rust tests, Svelte/TypeScript, frontend tests, the frontend build, and release-version consistency. It does not access a saved database connection or enable the opt-in Docker/history/Supermaven tests.
+A successful [CI](https://github.com/smolijar/catabase/actions/workflows/ci.yml) run on `main` automatically starts [Release macOS](https://github.com/smolijar/catabase/actions/workflows/release.yml). Pull requests run checks without publishing. The release workflow verifies the successful run belongs to this repository and checks out its exact commit.
 
-After the checks pass, main/manual runs build a universal macOS application containing both Apple Silicon and Intel binaries. Open a successful run and download **Catabase-macos-universal-preview-…** under **Artifacts**. It contains:
+The workflow:
 
-- `Catabase-macos-universal-preview.app.zip`, containing the complete app bundle with executable permissions preserved;
-- a DMG;
-- `SHA256SUMS` for verifying the files with `shasum -a 256 -c SHA256SUMS`.
+1. Allocates a version: the checked-in version for the first release; afterward, the next patch above the latest published release, or the checked-in version if it is higher.
+2. Updates the Cargo workspace, its lockfile package versions, UI package and Tauri configuration **inside the build checkout only**. It does not commit version bumps back to `main`.
+3. Builds one universal macOS app for Apple Silicon and Intel. Complete Apple credentials enable Developer ID signing and notarization; otherwise the app is explicitly labeled as an ad-hoc-signed preview.
+4. Verifies the app version, both architectures and its code signature, plus notarization when enabled. Produces the downloads and SHA-256 checksums.
+5. Creates a draft, uploads and verifies every asset, then publishes it as the latest GitHub release. Notes list commits since the preceding release, with commit and comparison links.
 
-Preview artifacts expire after 14 days and require a GitHub login to download. They are ad-hoc signed, without Apple Developer ID signing or notarization, so macOS may block them. They are for testing the packaging pipeline and do not create a public GitHub Release or update feed. They are not suitable as the endpoint of a public `curl | sh` installer.
+Downloads are public on [Releases](https://github.com/smolijar/catabase/releases):
 
-Node 24, pnpm 10.33.0, Tauri CLI 2.11.4, Rust 1.96.1, and macOS 15 runners are used in CI. JavaScript and Rust builds use the checked-in lockfiles. The existing pnpm dependency-age policy remains enabled. Actions are pinned to commit hashes.
+| Asset | Purpose |
+| --- | --- |
+| `Catabase-macos-universal.app.zip` | Complete app bundle used by the one-line installer. |
+| `Catabase-macos-universal.dmg` | Drag-to-Applications installer. |
+| `SHA256SUMS` | Checksums; run `shasum -a 256 -c SHA256SUMS` after downloading all listed files. |
+| `Catabase.app.tar.gz`, `.sig`, `latest.json` | Included when updater signing is configured. The manifest covers both Mac architectures. |
 
-## Signing setup for the first release
+The release tag points to the tested source commit; the packaged version is the version allocated by CI. Building that tag directly from source uses the checked-in base version unless you apply the released version yourself. The tag's release page and app version identify the distributed build.
 
-The [Release macOS workflow](https://github.com/smolijar/catabase/actions/workflows/release.yml) runs when a `v*` tag is pushed. It can also be rerun manually on an existing version tag. Its preflight fails with the names of missing credentials before any release build starts. Regular CI and preview builds need none of these secrets.
+Release jobs are serialized. GitHub can coalesce pending runs during rapid pushes; all intervening commits are included in the next published changelog. A run older than the latest released source is skipped. Re-running a published source leaves its tag and artifacts untouched; a failed draft can be retried. To retry manually, supply a successful main **CI run ID** to Release macOS. A failed CI run is never eligible.
 
-Add these repository secrets under **Settings → Secrets and variables → Actions** when ready:
+Workflow artifacts are retained for 14 days for diagnostics; published release downloads do not share that expiry. An incomplete upload stays a draft and never becomes the update feed. Do not manually publish incomplete drafts or move published version tags.
+
+## Installation
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/smolijar/catabase/main/install.sh | sh
+```
+
+The installer resolves one release version, downloads its app ZIP and checksums from that exact tag, verifies the bundle/version/architecture/signature, and installs it in `~/Applications`. It refuses to replace a running app and keeps the previous app until the replacement succeeds. It does not change Catabase's data directory or remove macOS quarantine/security attributes. To choose a different writable folder, download `install.sh` and run `sh install.sh --dir /absolute/path`. The [README](../README.md) also links the manual DMG download.
+
+Ad-hoc previews are **not Apple notarized**. macOS may block them; the installer does not bypass Gatekeeper. Add Apple credentials below for normal distribution.
+
+## Signing setup
+
+Apple signing and updater signing are independent. Main releases work without either, but partial configuration fails early instead of silently producing a differently signed build. Once a published release enables either, later releases cannot silently drop it. Changing the updater public key is also blocked: existing clients need a deliberate key-rotation migration.
+
+Add these repository secrets under **Settings → Secrets and variables → Actions**:
 
 | Secret | Value |
 | --- | --- |
-| `APPLE_CERTIFICATE` | Base64-encoded exported Developer ID Application `.p12` certificate, including its private key. |
+| `APPLE_CERTIFICATE` | Base64-encoded exported Developer ID Application `.p12`, including its private key. |
 | `APPLE_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12`. |
-| `APPLE_SIGNING_IDENTITY` | Full `Developer ID Application: … (TEAMID)` identity. Ad-hoc `-` is rejected. |
+| `APPLE_SIGNING_IDENTITY` | Full `Developer ID Application: … (TEAMID)` identity. Ad-hoc `-` is rejected when Apple credentials are configured. |
 | `APPLE_ID` | Apple Developer account email for notarization. |
-| `APPLE_PASSWORD` | Apple app-specific password for notarization, not the account's normal password. |
+| `APPLE_PASSWORD` | Apple app-specific password for notarization. |
 | `APPLE_TEAM_ID` | Apple Developer team ID. |
 | `TAURI_SIGNING_PRIVATE_KEY` | Contents of the Tauri updater private key. |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for that updater key, if it has one; otherwise leave unset. |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Updater-key password, if set. |
 
-Also add the repository **variable** `TAURI_SIGNING_PUBLIC_KEY` containing the public key paired with `TAURI_SIGNING_PRIVATE_KEY`. Tauri's build checks require it to generate and verify updater signatures. CI writes it into a temporary release configuration; no placeholder key is committed.
+Add the repository **variable** `TAURI_SIGNING_PUBLIC_KEY` containing the matching updater public key. The build embeds this key and the fixed endpoint:
 
-Apple signing and updater signing are separate. Follow the official [macOS signing guide](https://v2.tauri.app/distribute/sign/macos/) to create/export the Apple certificate and configure notarization, and the [updater guide](https://v2.tauri.app/plugin/updater/) to generate and securely back up the update-signing key pair. Keep private keys out of Git and workflow artifacts. The same public updater key must be used when the in-app updater is implemented.
+```text
+https://github.com/smolijar/catabase/releases/latest/download/latest.json
+```
 
-The workflow passes Apple credentials to Tauri's signing/notarization integration. It waits for notarization, checks the resulting app's signatures and stapled ticket, and creates a **draft** GitHub release with the DMG, signed updater archive/signature, and `latest.json`. A failed build may leave an incomplete draft; publish only after the whole workflow is green and both architectures have been tested. First-time Apple notarization can be slow; a timeout leaves the release unpublished and can be retried.
+Follow the official [macOS signing guide](https://v2.tauri.app/distribute/sign/macos/) to create/export the Apple certificate. Generate the separate update-signing key using the pinned Tauri CLI:
 
-## Release process
+```sh
+pnpm tauri signer generate -w /secure/path/catabase-updater.key
+```
 
-1. Update the version together in `Cargo.toml` (`workspace.package.version`), `src-tauri/tauri.conf.json`, and `ui/package.json`. Run Cargo to update the workspace package versions in `Cargo.lock`; include that change in the same commit.
-2. Run the checks in the [development guide](development.md#checks), including `python3 scripts/check-release-version.py --tag vX.Y.Z`. Prerelease tags such as `v0.2.0-beta.1` are supported; build-metadata suffixes are not.
-3. Commit and push the version change to `main`, then create and push the matching tag. For example, after setting the version to `0.2.0`:
+Back up the private key and password securely; store the public `.pub` file contents in `TAURI_SIGNING_PUBLIC_KEY`. Keep private keys out of Git and workflow artifacts. Existing apps trust the embedded public key, so changing or losing its private counterpart breaks their ability to accept updates. See the [Tauri updater guide](https://v2.tauri.app/plugin/updater/) for key details.
 
-   ```sh
-   git tag v0.2.0
-   git push origin v0.2.0
-   ```
+## In-app updates
 
-4. Wait for **Release macOS** to succeed. Download and test the draft's packages on Apple Silicon and Intel. Check that existing connections, history and SQL drafts survive an upgrade.
-5. Review the generated release notes and publish the draft from GitHub. Prerelease tags create prerelease drafts.
+The app checks the published release feed and offers an update from Settings. Installation requires updater signing to be configured **in the installed build**. An older build without the public key needs one manual upgrade to a signed-updater build before future in-app installation works.
 
-Do not move a published version tag or replace its assets. Use a new version for a fix. Keep the app identifier (`com.catabase.app`) and credential service stable so installed versions continue using the existing data and credentials.
+Release validation checks the generated signature belongs to the configured public key (the pinned CLI otherwise only warns on a mismatch). The runtime updater cryptographically checks the archive signature against that embedded key. Feed URLs point to immutable version tags, not the moving `latest` archive. Installing an update must wait for active work to finish and save workspace drafts before relaunch. Replacing the app does not replace local connections/history; a binary downgrade alone is not a database rollback strategy.
 
-## Next distribution steps
+Before declaring the update channel ready, test an actual older-version → newer-version upgrade and preservation of saved SQL, connections and history. The pipeline can build updater artifacts as soon as its keypair is configured; Apple notarization remains a separate distribution requirement.
 
-This change establishes CI and the signed-release pipeline. It does not yet add a public installer or in-app version/update controls. Once the first signed release is available:
+## Development and platform scope
 
-- Add the HTTPS installer that downloads/verifies the correct release and installs the app bundle.
-- Integrate Tauri's updater with the public signing key and `https://github.com/smolijar/catabase/releases/latest/download/latest.json`.
-- Route installation/restart through workspace persistence and query/transaction/staged-edit checks. The current native restart path bypasses the ordinary exit guard, so it must not be used directly by an updater.
-- Test an actual old-version → new-version upgrade, including storage migration. Replacing the application does not replace its data directory, and binary downgrade alone is not a database rollback strategy.
+Use the [development checks](development.md#checks) before pushing. CI uses Node 24, pnpm 10.33.0, Rust 1.96.1 and macOS 15 runners, with checked-in lockfiles and pinned actions. It does not access saved database connections or enable live Docker/Supermaven tests.
 
-Windows and Linux distribution are deferred; this pipeline targets macOS only.
+To start a new minor/major release line, raise the common version in `Cargo.toml`, `Cargo.lock`, `ui/package.json` and `src-tauri/tauri.conf.json`; `scripts/check-release-version.py` validates them. Routine main pushes do not need manual version changes.
+
+Windows and Linux packages are deferred; distribution currently targets macOS only.
