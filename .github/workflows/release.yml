@@ -1,37 +1,61 @@
 name: Release macOS
 
 on:
-  push:
-    tags: ['v*']
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Successful main CI run ID to release or retry
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
+# Serialize version allocation and publication. Never cancel an active release.
+# GitHub may coalesce pending runs; skipped commits enter the next changelog.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-macos-main
   cancel-in-progress: false
 
 jobs:
-  preflight:
-    name: Check version and signing setup
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
+  release:
+    name: Publish universal macOS release
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch'))
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Check out release tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: main
           persist-credentials: false
-      - name: Require a version tag
+      - name: Verify successful trusted CI run
+        id: source
         env:
-          RELEASE_REF_TYPE: ${{ github.ref_type }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          if [ "$RELEASE_REF_TYPE" != tag ]; then
-            echo '::error::Run this workflow on a vX.Y.Z tag. Use CI for an unsigned preview build.'
-            exit 1
-          fi
-          python3 scripts/check-release-version.py --tag "$RELEASE_TAG"
-      - name: Require signing credentials
+          CI_RUN_ID: ${{ github.event.workflow_run.id || inputs.ci_run_id }}
+        run: python3 scripts/release.py source
+      - name: Check out the tested source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Allocate version and configure signing
+        id: plan
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -42,70 +66,26 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           TAURI_SIGNING_PUBLIC_KEY: ${{ vars.TAURI_SIGNING_PUBLIC_KEY }}
-        run: |
-          python3 - <<'PY'
-          import os
-          import sys
-          required = (
-              'APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_SIGNING_IDENTITY',
-              'APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID', 'TAURI_SIGNING_PRIVATE_KEY',
-          )
-          missing = [name for name in required if not os.environ.get(name, '').strip()]
-          for name in missing:
-              print(f'::error::Missing repository secret: {name}. See docs/distribution.md.')
-          if not os.environ.get('TAURI_SIGNING_PUBLIC_KEY', '').strip():
-              print('::error::Missing repository variable: TAURI_SIGNING_PUBLIC_KEY. See docs/distribution.md.')
-              missing.append('TAURI_SIGNING_PUBLIC_KEY')
-          if os.environ.get('APPLE_SIGNING_IDENTITY', '').strip() == '-':
-              print('::error::A release requires a Developer ID Application identity, not ad-hoc signing.')
-              sys.exit(1)
-          sys.exit(bool(missing))
-          PY
-
-  checks:
-    needs: preflight
-    uses: ./.github/workflows/ci.yml
-
-  release:
-    name: Build signed macOS release
-    needs: [preflight, checks]
-    runs-on: macos-15
-    timeout-minutes: 90
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
+        run: python3 scripts/release.py prepare
       - uses: ./.github/actions/setup-frontend
+        if: steps.plan.outputs.skip != 'true'
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        if: steps.plan.outputs.skip != 'true'
         with:
           toolchain: '1.96.1'
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: steps.plan.outputs.skip != 'true'
         with:
           key: universal-release
-      - name: Configure signed updater artifacts
-        env:
-          TAURI_SIGNING_PUBLIC_KEY: ${{ vars.TAURI_SIGNING_PUBLIC_KEY }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          config = {
-              'bundle': {'createUpdaterArtifacts': True},
-              'plugins': {'updater': {'pubkey': os.environ['TAURI_SIGNING_PUBLIC_KEY'].strip()}},
-          }
-          (Path(os.environ['RUNNER_TEMP']) / 'catabase-release.json').write_text(json.dumps(config))
-          PY
-      - name: Build, notarize and upload draft release
+          cache-on-failure: true
+      - name: Build and optionally notarize
+        if: steps.plan.outputs.skip != 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.plan.outputs.apple == 'true' && secrets.APPLE_SIGNING_IDENTITY || '-' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -113,17 +93,33 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: pnpm tauri
-          args: --ci --target universal-apple-darwin --bundles app,dmg --config ${{ runner.temp }}/catabase-release.json -- --locked
-          tagName: ${{ github.ref_name }}
-          releaseName: Catabase ${{ github.ref_name }}
-          releaseDraft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          generateReleaseNotes: true
-          uploadUpdaterJson: true
-      - name: Verify signed universal app and notarization
+          args: --ci --target universal-apple-darwin --bundles app,dmg --config ${{ runner.temp }}/catabase-release.config.json -- --locked
+          # Build only. Nothing is published before local validation succeeds.
+          uploadUpdaterJson: false
+      - name: Verify app architecture and signature
+        if: steps.plan.outputs.skip != 'true'
         run: |
           app=target/universal-apple-darwin/release/bundle/macos/Catabase.app
           lipo "$app/Contents/MacOS/catabase" -verify_arch arm64 x86_64
           codesign --verify --deep --strict "$app"
+      - name: Verify Apple notarization
+        if: steps.plan.outputs.skip != 'true' && steps.plan.outputs.apple == 'true'
+        run: |
+          app=target/universal-apple-darwin/release/bundle/macos/Catabase.app
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose "$app"
+      - name: Package release assets and checksums
+        if: steps.plan.outputs.skip != 'true'
+        run: python3 scripts/release.py assets
+      - name: Keep build artifacts for diagnostics
+        if: steps.plan.outputs.skip != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Catabase-${{ steps.plan.outputs.tag }}-macos-universal
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Upload draft and publish complete release
+        if: steps.plan.outputs.skip != 'true'
+        run: python3 scripts/release.py publish
