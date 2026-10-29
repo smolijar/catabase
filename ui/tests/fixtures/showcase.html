@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>Catabase · documentation showcase</title></head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      // The real workspace UI with fictional bookshop data. No database, native
+      // storage, credentials, or external autocomplete service is accessed.
+      // Unknown IPC calls fail closed; this page is not a database connection.
+      const timestamp = '2026-10-29T10:00:00Z';
+      const sql = `select
+    id, title, price,
+    in_stock, published_on
+from public.books
+order by id;`;
+      const key = { schema: 'public', table: 'books', columns: ['id'], primaryKey: true, nullsNotDistinct: false };
+      const fk = { name: 'books_author_id_fkey', columns: ['author_id'], referencedSchema: 'public', referencedTable: 'authors', referencedColumns: ['id'] };
+      const column = (name, typeName, typeOid, primaryKey = false) => ({
+        name, sourceName: name, typeName, typeOid, primaryKey, nullable: false, generated: false,
+      });
+      const bookColumns = [column('id', 'int4', 23, true), column('title', 'text', 25), column('author_id', 'int4', 23),
+        column('price', 'numeric', 1700), column('in_stock', 'bool', 16), column('published_on', 'date', 1082), column('tags', '_text', 1009)];
+      const rows = [
+        [1, 'The Midnight Library Cat', 101, '24.00', true, '2026-03-14', '{fiction,cats}'],
+        [2, 'A Map of Quiet Places', 102, '18.50', true, '2026-04-02', '{travel,essays}'],
+        [3, 'Small Gardens, Big Ideas', 103, '32.00', true, '2026-04-18', '{gardening,design}'],
+        [4, 'Postcards from Tomorrow', 104, '21.00', false, '2026-05-09', '{fiction,scifi}'],
+        [5, 'The Art of Slow Mornings', 102, '16.75', true, '2026-05-22', '{essays,life}'],
+        [6, 'Under the Copper Sky', 105, '27.50', true, '2026-06-06', '{fiction,adventure}'],
+        [7, 'Bread, Butter & Rain', 106, '29.00', false, '2026-06-21', '{cooking,memoir}'],
+        [8, 'A Field Guide to Wonder', 103, '34.00', true, '2026-07-03', '{nature,science}'],
+        [9, 'Notes from the Window Seat', 104, '19.25', true, '2026-07-17', '{travel,poetry}'],
+        [10, 'The Shape of a Good Day', 106, '22.00', true, '2026-08-01', '{essays,design}'],
+        [11, 'Practical PostgreSQL Patterns', 101, '42.00', true, '2026-08-15', '{technology,sql}'],
+        [12, 'Somewhere Beyond the Pines', 105, '25.50', false, '2026-09-04', '{fiction,nature}'],
+      ].map(values => Object.fromEntries(bookColumns.map((field, index) => [field.name, values[index]])));
+      const authors = [
+        { id: '101', name: 'Alex Rowan' }, { id: '102', name: 'Sam Bell' },
+        { id: '103', name: 'Robin Vale' }, { id: '104', name: 'Taylor Reed' },
+        { id: '105', name: 'Morgan Lake' }, { id: '106', name: 'Jamie Ellis' },
+      ];
+      const table = (name, columns, extra = {}) => ({ schema: 'public', name, kind: 'table', columns, ...extra });
+      const schema = { schemas: [
+        table('authors', [column('id', 'int4', 23, true), column('name', 'text', 25)]),
+        table('books', bookColumns, { tableOid: 1000, rowKeys: [key], foreignKeys: [fk] }),
+        table('customers', [column('id', 'int4', 23, true), column('name', 'text', 25), column('joined_at', 'timestamptz', 1184)]),
+        table('order_items', [column('order_id', 'int4', 23, true), column('book_id', 'int4', 23), column('quantity', 'int4', 23)]),
+        table('orders', [column('id', 'int4', 23, true), column('customer_id', 'int4', 23), column('total', 'numeric', 1700)]),
+      ] };
+      const result = {
+        columns: bookColumns.map((field, index) => ({ ...field, columnId: index + 1, tableOid: 1000, tableSchema: 'public', tableName: 'books' }))
+          .filter(field => !['author_id', 'tags'].includes(field.name)),
+        rowKeys: [key], rows, rowCount: rows.length, durationMs: 12, autoLimited: true, hasMore: false,
+      };
+      const connection = { id: 'showcase', name: 'Bookshop', host: 'localhost', port: 5432, database: 'bookshop', username: 'demo',
+        ssl: false, isActive: true, createdAt: timestamp, updatedAt: timestamp };
+      const draft = JSON.stringify({ version: 2, activeId: 'catalog', tabs: [
+        { id: 'catalog', title: 'Book catalog', sql, connectionId: connection.id, viewState: null },
+        { id: 'orders', title: 'Recent orders', sql: 'select * from public.orders\norder by id desc;', connectionId: connection.id, viewState: null },
+        { id: 'authors', title: 'Authors', sql: 'select * from public.authors;', connectionId: connection.id, viewState: null },
+      ], archivedTabs: [] });
+      const history = [sql, 'select * from public.authors;', 'select count(*) from public.orders;'].map((query, index) => ({
+        id: 3 - index, connectionId: connection.id, query, durationMs: 12, rowCount: rows.length,
+        isError: false, hasResult: true, executedAt: timestamp, queryHash: `demo-${index}`, querySize: query.length,
+        executionSize: 100, resultSize: 2400, queryReferences: 1, resultReferences: 1,
+      }));
+      localStorage.setItem('catabase.theme', new URLSearchParams(location.search).get('theme') === 'snow' ? 'snow' : 'tuxedo');
+      localStorage.setItem('catabase.resultsHeight', '460');
+      localStorage.setItem('catabase.sidebarWidth', '250');
+      localStorage.setItem('catabase.connectionAppearance', JSON.stringify({ showcase: { color: 'none', environment: 'DEMO' } }));
+      window.__TAURI_INTERNALS__ = { invoke: async (command, args = {}) => {
+        switch (command) {
+          case 'list_connections': return [connection];
+          case 'get_settings': return { poolSize: 5, supermavenEnabled: false };
+          case 'tx_status': return { active: false, startedAt: null };
+          case 'supermaven_status': return { enabled: false, state: 'off', message: 'Disabled in the documentation demo.' };
+          case 'load_draft': return draft;
+          case 'save_draft': case 'test_connection': return;
+          case 'introspect_schema': return structuredClone(schema);
+          case 'connection_stats': return { active: 0, idle: 1, poolSize: 5 };
+          case 'split_sql': return [{ start: 0, end: args.sql.length, text: args.sql }];
+          case 'execute_query': return structuredClone(result);
+          case 'history_stats': return { total: history.length, errors: 0, lastExecutedAt: timestamp };
+          case 'history_page': return { entries: history, total: history.length };
+          case 'history_get_result': return { result: structuredClone(result) };
+          case 'foreign_key_values': return { foreignKey: fk, previewColumns: ['name'],
+            rows: authors.filter(row => `${row.id} ${row.name}`.toLowerCase().includes(args.request.search.toLowerCase())), hasMore: false };
+          default: throw new Error(`Unsupported showcase command: ${command}`);
+        }
+      }};
+      await import('../../src/main.ts');
+    </script>
+  </body>
+</html>

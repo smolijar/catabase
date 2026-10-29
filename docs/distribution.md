@@ -40,7 +40,7 @@ The workflow passes Apple credentials to Tauri's signing/notarization integratio
 ## Release process
 
 1. Update the version together in `Cargo.toml` (`workspace.package.version`), `src-tauri/tauri.conf.json`, and `ui/package.json`. Run Cargo to update the workspace package versions in `Cargo.lock`; include that change in the same commit.
-2. Run the checks in the README, including `python3 scripts/check-release-version.py --tag vX.Y.Z`. Prerelease tags such as `v0.2.0-beta.1` are supported; build-metadata suffixes are not.
+2. Run the checks in the [development guide](development.md#checks), including `python3 scripts/check-release-version.py --tag vX.Y.Z`. Prerelease tags such as `v0.2.0-beta.1` are supported; build-metadata suffixes are not.
 3. Commit and push the version change to `main`, then create and push the matching tag. For example, after setting the version to `0.2.0`:
 
    ```sh
