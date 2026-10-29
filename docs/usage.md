@@ -117,6 +117,14 @@ On macOS, the workspace header shares a row with the native traffic-light contro
 
 Editor zoom changes only the SQL font, from 8 to 48 px, and is saved locally. Option/Alt+Left/Right retains word navigation in the editor. Ordinary text copy/paste continues to work inside SQL and rename inputs.
 
+## App updates
+
+**Settings → App updates** shows the installed version, checks for a newer release and displays its release notes. Builds with an embedded updater signing key check automatically while the workspace is idle and in the foreground, at most once every four hours. Turn off **Check automatically** to use manual checks only. A failed check leaves the app usable and follows the same retry interval.
+
+**Update & restart** downloads and verifies the signed package, installs it, then reopens Catabase. It first saves SQL tabs and editor positions. Finish running operations, commit or roll back transactions, close connection dialogs, and finish cell editing in every tab before updating. Apply or discard any staged edits first. Live result grids are cleared by the restart; saved history remains available. A save or download failure keeps the current workspace open.
+
+Source builds and releases without an updater signing key show why in-app updates are unavailable, with a button to open GitHub Releases. Update signatures and Apple Developer ID/notarization are separate; see [distribution](distribution.md) for setup and the signing status of current releases.
+
 ## Optional Supermaven suggestions
 
 Supermaven is off by default. Local schema completion works independently. Enabling Supermaven in Settings downloads and launches its official agent using the [Neovim plugin's protocol](https://github.com/supermaven-inc/supermaven-nvim). Suggestions depend on a working provider connection and account; enabling the integration does not guarantee service availability.
