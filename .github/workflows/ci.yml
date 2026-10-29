@@ -80,6 +80,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: universal-preview
+          cache-on-failure: true
       - name: Build app and disk image
         # Ad-hoc signing needs no credentials. This is not a notarized release.
         env:
@@ -88,7 +89,7 @@ jobs:
       - name: Archive and verify universal app
         run: |
           bundle=target/universal-apple-darwin/release/bundle
-          lipo -verify_arch arm64 x86_64 "$bundle/macos/Catabase.app/Contents/MacOS/catabase"
+          lipo "$bundle/macos/Catabase.app/Contents/MacOS/catabase" -verify_arch arm64 x86_64
           codesign --verify --deep --strict "$bundle/macos/Catabase.app"
           mkdir -p artifacts
           ditto -c -k --sequesterRsrc --keepParent "$bundle/macos/Catabase.app" artifacts/Catabase-macos-universal-preview.app.zip
