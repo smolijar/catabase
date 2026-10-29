@@ -81,21 +81,18 @@ jobs:
           cache-on-failure: true
       - name: Build and optionally notarize
         if: steps.plan.outputs.skip != 'true'
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ steps.plan.outputs.apple == 'true' && secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tauriScript: pnpm tauri
-          args: --ci --target universal-apple-darwin --bundles app,dmg --config ${{ runner.temp }}/catabase-release.config.json -- --locked
-          # Build only. Nothing is published before local validation succeeds.
-          uploadUpdaterJson: false
+        # Empty GitHub secrets are still present environment variables. The
+        # wrapper removes disabled credentials before invoking the pinned CLI.
+        run: python3 scripts/release.py build
       - name: Verify app architecture and signature
         if: steps.plan.outputs.skip != 'true'
         run: |
