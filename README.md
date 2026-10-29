@@ -4,10 +4,10 @@ Catabase is a desktop PostgreSQL query workspace built with Rust, Tauri 2, Svelt
 
 ## Prerequisites
 
-- Rust toolchain with Cargo
+- Rust toolchain with Cargo (CI uses 1.96.1)
 - Node.js 24+
 - pnpm 10+
-- Tauri CLI: `cargo install tauri-cli --version '^2'`
+- The pinned Tauri CLI is installed by `pnpm install`
 - Tauri platform prerequisites for your OS
 
 ## Dependency Policy
@@ -25,7 +25,7 @@ pnpm install
 ## Run Desktop App
 
 ```sh
-cargo tauri dev
+pnpm tauri dev
 ```
 
 Equivalent frontend-only dev server:
@@ -37,9 +37,14 @@ pnpm --dir ui dev
 ## Build
 
 ```sh
-pnpm --dir ui build
-cargo tauri build
+pnpm tauri build
 ```
+
+## CI and distribution
+
+[CI](https://github.com/smolijar/catabase/actions/workflows/ci.yml) checks pull requests and pushes to `main`. Successful main/manual runs also provide a universal macOS app and DMG for Apple Silicon and Intel in the run's **Artifacts** section. These previews are ad-hoc signed and are not notarized releases.
+
+Version tags run the separate [release workflow](https://github.com/smolijar/catabase/actions/workflows/release.yml), which requires Apple signing/notarization credentials and a Tauri updater signing key before building a draft release. See [distribution setup](docs/distribution.md) for download instructions, required secrets, and the release process. The public one-line installer and in-app updater are not enabled yet.
 
 ## Verify
 
@@ -50,6 +55,8 @@ cargo test --workspace
 pnpm --dir ui run check
 node --experimental-strip-types --test ui/tests/*.test.ts
 pnpm --dir ui run build
+python3 scripts/check-release-version.py
+python3 -B -m unittest discover -s scripts/tests
 ```
 
 Opt-in Docker reflection test (uses only the saved `zenbase docker` connection; all write fixtures are temporary and rolled back):
