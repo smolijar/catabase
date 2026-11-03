@@ -328,7 +328,10 @@ fn leading_keywords(mut sql: &str, limit: usize) -> Vec<String> {
 }
 
 pub fn auto_limit_sql(sql: &str, offset: usize, page_size: usize) -> Option<String> {
-    if classify_statement(sql) != StatementKind::SelectLike || has_limit_or_fetch(sql) {
+    if classify_statement(sql) != StatementKind::SelectLike
+        || crate::requires_transaction(sql)
+        || has_limit_or_fetch(sql)
+    {
         return None;
     }
 

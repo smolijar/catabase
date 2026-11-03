@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod auto_transaction_tests;
 mod updater;
 
 use std::{
@@ -19,8 +21,8 @@ use catabase_core::{
     checkout_pool_client, classify_statement, connection_stats as load_connection_stats,
     create_pool, execute_on_client_observed, get_ddl_on_client as load_ddl,
     lookup_foreign_key_values as lookup_fk_values, parse_connection_url as parse_url,
-    split_editor_statements, split_statements, test_connection as test_pg_connection,
-    validate_transaction_sql,
+    requires_transaction, split_editor_statements, split_statements,
+    test_connection as test_pg_connection, validate_transaction_sql,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -53,6 +55,7 @@ struct TxSession {
     ssl: bool,
     started_at: String,
     reflection: Arc<ReflectionCache>,
+    automatic: bool,
 }
 
 struct CancelEntry {
@@ -99,6 +102,7 @@ struct AppError {
 #[serde(rename_all = "camelCase")]
 struct TxStatus {
     active: bool,
+    automatic: bool,
     started_at: Option<String>,
     transaction_id: Option<String>,
 }
@@ -304,6 +308,15 @@ async fn get_settings(state: State<'_, AppState>) -> Result<Settings, AppError> 
 }
 
 #[tauri::command]
+async fn set_auto_transaction(state: State<'_, AppState>, enabled: bool) -> Result<bool, AppError> {
+    let _workspace = state.updates.workspace_operation()?;
+    // Changing the policy only affects later executions. It must never commit
+    // or roll back the transaction that is already open.
+    state.storage.set_auto_transaction(enabled)?;
+    Ok(enabled)
+}
+
+#[tauri::command]
 async fn set_pool_size(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -407,7 +420,13 @@ async fn execute_query(
             }
             Err(error) => {
                 history.rejected(&sql, &error);
-                Err(AppError::from(error))
+                let mut error = AppError::from(error);
+                if error.code.as_deref() == Some("25001")
+                    && state.tx.lock().await.as_ref().is_some_and(|session| session.automatic)
+                {
+                    error.hint = Some("This statement must run outside a transaction. Roll back the open transaction, turn off Auto TX, then run it again.".into());
+                }
+                Err(error)
             }
         }
     }
@@ -450,6 +469,26 @@ async fn apply_row_updates(
         let mut tx = cancellation
             .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
             .await?;
+        if tx.is_none() && state.storage.get_settings()?.auto_transaction && !updates.is_empty() {
+            let pool = cancellation.setup(active_pool(&state, &active)).await?;
+            let run = QueryRun {
+                history: &history,
+                active: &active,
+                pool: &pool.pool,
+                reflection: &pool.reflection,
+                ssl: active.ssl,
+                sql: "BEGIN",
+                query_token: &query_token,
+                offset: 0,
+                page_size: 1,
+                read_only_replay: false,
+            };
+            let (session, _) =
+                begin_transaction_session(&state.storage, &run, "BEGIN", true, &cancellation)
+                    .await?;
+            *tx = Some(session);
+            let _ = app.emit("tx-changed", transaction_status(tx.as_ref()));
+        }
         if let Some(session) = tx.as_ref() {
             check_transaction_connection(&session.connection_id, &active.id)?;
             history.set_transaction(Some(session.history_id.clone()));
@@ -848,6 +887,76 @@ fn finish_history(app: &AppHandle, storage: &Storage, id: &str, status: &str) {
     notify_history(app, storage.finish_history_transaction(id, status));
 }
 
+/// The caller holds the transaction-state lock until this session is installed
+/// and the requested statement has run. Keep the same cancellation signal for
+/// BEGIN and the statement; a cancellation between them must not be lost.
+async fn begin_transaction_session(
+    storage: &Storage,
+    run: &QueryRun<'_>,
+    sql: &str,
+    automatic: bool,
+    cancellation: &QueryCancellation,
+) -> Result<(TxSession, QueryResult), CoreError> {
+    let client = cancellation.setup(checkout_pool_client(run.pool)).await?;
+    let reflection = Arc::new(ReflectionCache::default());
+    let history_id =
+        storage.start_history_transaction(if automatic { "auto" } else { "manual" })?;
+    run.history.set_transaction(Some(history_id.clone()));
+    let result = cancellation
+        .run(
+            &client,
+            run.ssl,
+            execute_on_client_observed(
+                &client,
+                sql,
+                0,
+                1,
+                Some(cancellation.flag()),
+                &reflection,
+                Some(run.history),
+            ),
+        )
+        .await;
+    match result {
+        Ok(result) => Ok((
+            TxSession {
+                history_id,
+                connection_id: run.active.id.clone(),
+                client,
+                ssl: run.ssl,
+                started_at: chrono::Utc::now().to_rfc3339(),
+                reflection,
+                automatic,
+            },
+            result,
+        )),
+        Err(error) => {
+            run.history.interrupted(&error);
+            run.history.finish_transaction("interrupted");
+            // BEGIN may have reached PostgreSQL even if its response was lost.
+            // Closing the transport rolls back; recycling it would leak a tx.
+            drop(PooledPgClient::take(client));
+            Err(error)
+        }
+    }
+}
+
+/// Called with the tx lock held. A mode change only controls whether to open a
+/// new session; it never replaces or finishes an existing session.
+async fn maybe_begin_automatic_transaction(
+    storage: &Storage,
+    tx: &mut Option<TxSession>,
+    run: &QueryRun<'_>,
+    cancellation: &QueryCancellation,
+) -> Result<bool, CoreError> {
+    if tx.is_some() || !storage.get_settings()?.auto_transaction || !requires_transaction(run.sql) {
+        return Ok(false);
+    }
+    let (session, _) = begin_transaction_session(storage, run, "BEGIN", true, cancellation).await?;
+    *tx = Some(session);
+    Ok(true)
+}
+
 async fn run_query_with_state(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -869,41 +978,10 @@ async fn run_query_with_state(
                 return Err(CoreError::message("Transaction already active"));
             }
 
-            let client = cancellation.setup(checkout_pool_client(run.pool)).await?;
-            let reflection = Arc::new(ReflectionCache::default());
-            let history_id = state.storage.start_history_transaction("manual")?;
-            run.history.set_transaction(Some(history_id.clone()));
-            let result = execute_with_cancel(
-                state,
-                run.history,
-                &client,
-                &reflection,
-                run.ssl,
-                run.sql,
-                run.query_token,
-                run.offset,
-                run.page_size,
-            )
-            .await;
-            let result = match result {
-                Ok(result) => result,
-                Err(error) => {
-                    finish_history(app, &state.storage, &history_id, "interrupted");
-                    // BEGIN may have reached the server even when cancellation
-                    // raced its response. Never recycle an ambiguous session.
-                    drop(PooledPgClient::take(client));
-                    return Err(error);
-                }
-            };
-            let started_at = chrono::Utc::now().to_rfc3339();
-            *tx = Some(TxSession {
-                history_id,
-                connection_id: run.active.id.clone(),
-                client,
-                ssl: run.ssl,
-                started_at,
-                reflection,
-            });
+            let (session, result) =
+                begin_transaction_session(&state.storage, &run, run.sql, false, &cancellation)
+                    .await?;
+            *tx = Some(session);
             drop(tx);
             let _ = app.emit("tx-changed", tx_status_inner(state).await);
             Ok(result)
@@ -937,34 +1015,42 @@ async fn run_query_with_state(
             Ok(result)
         }
         _ => {
+            // Serialize the routing decision with BEGIN/COMMIT and reviewed
+            // writes, including the standalone path. A concurrent request must
+            // not slip outside a transaction that has just been opened.
+            let mut tx = cancellation
+                .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
+                .await?;
+            if maybe_begin_automatic_transaction(&state.storage, &mut tx, &run, &cancellation)
+                .await?
             {
-                let mut tx = cancellation
-                    .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
-                    .await?;
-                if let Some(session) = tx.as_ref() {
-                    check_transaction_connection(&session.connection_id, &run.active.id)?;
-                    run.history
-                        .set_transaction(Some(session.history_id.clone()));
-                    let result = execute_with_cancel(
-                        state,
-                        run.history,
-                        &session.client,
-                        &session.reflection,
-                        session.ssl,
-                        run.sql,
-                        run.query_token,
-                        run.offset,
-                        run.page_size,
-                    )
-                    .await;
-                    if must_discard(&result) || session.client.is_closed() {
-                        discard_transaction(app, state, &mut tx);
-                        invalidate_pool_reflection(state, &run.active.id).await;
-                    }
-                    drop(tx);
-                    let _ = app.emit("tx-changed", tx_status_inner(state).await);
-                    return result;
+                // Show the transaction while a long-running write is executing,
+                // without trying to acquire the lock we already hold.
+                let _ = app.emit("tx-changed", transaction_status(tx.as_ref()));
+            }
+            if let Some(session) = tx.as_ref() {
+                check_transaction_connection(&session.connection_id, &run.active.id)?;
+                run.history
+                    .set_transaction(Some(session.history_id.clone()));
+                let result = execute_with_cancel(
+                    state,
+                    run.history,
+                    &session.client,
+                    &session.reflection,
+                    session.ssl,
+                    run.sql,
+                    run.query_token,
+                    run.offset,
+                    run.page_size,
+                )
+                .await;
+                if must_discard(&result) || session.client.is_closed() {
+                    discard_transaction(app, state, &mut tx);
+                    invalidate_pool_reflection(state, &run.active.id).await;
                 }
+                drop(tx);
+                let _ = app.emit("tx-changed", tx_status_inner(state).await);
+                return result;
             }
 
             let client = cancellation.setup(checkout_pool_client(run.pool)).await?;
@@ -1007,7 +1093,10 @@ async fn run_query_with_state(
 }
 
 fn validate_replay_sql(sql: &str) -> Result<(), CoreError> {
-    if split_statements(sql).len() != 1 || classify_statement(sql) != StatementKind::SelectLike {
+    if split_statements(sql).len() != 1
+        || classify_statement(sql) != StatementKind::SelectLike
+        || requires_transaction(sql)
+    {
         return Err(CoreError::message(
             "Automatic paging and export can only replay one read-only query. Run this SQL explicitly instead.",
         ));
@@ -1101,7 +1190,8 @@ async fn execute_with_cancel(
     if let Err(error) = &result {
         history.interrupted(error);
     }
-    state.cancels.lock().await.remove(query_token);
+    // The outer command owns the token for its entire lifetime (including an
+    // automatic BEGIN). Removing it here would lose cancellation between phases.
     result
 }
 
@@ -1353,11 +1443,16 @@ async fn refresh_active(state: &State<'_, AppState>) -> Result<(), AppError> {
 
 async fn tx_status_inner(state: &State<'_, AppState>) -> TxStatus {
     let tx = state.tx.lock().await;
-    let started_at = tx.as_ref().map(|session| session.started_at.clone());
+    transaction_status(tx.as_ref())
+}
+
+fn transaction_status(tx: Option<&TxSession>) -> TxStatus {
+    let started_at = tx.map(|session| session.started_at.clone());
     TxStatus {
         active: started_at.is_some(),
+        automatic: tx.is_some_and(|session| session.automatic),
         started_at,
-        transaction_id: tx.as_ref().map(|session| session.history_id.clone()),
+        transaction_id: tx.map(|session| session.history_id.clone()),
     }
 }
 
@@ -1480,6 +1575,7 @@ pub fn run() {
             save_connection,
             save_draft,
             set_supermaven_enabled,
+            set_auto_transaction,
             set_pool_size,
             split_sql,
             test_connection,
@@ -1550,13 +1646,13 @@ mod tests {
         assert!(validate_replay_sql("select 1; COMMIT; DELETE FROM accounts").is_err());
         assert!(validate_replay_sql("UPDATE accounts SET name = 'changed' RETURNING *").is_err());
         assert!(validate_replay_sql("BEGIN").is_err());
-        // This syntactically select-like form is deliberately delegated to the
-        // server's READ ONLY transaction enforcement, not trusted by its prefix.
+        // An outer SELECT cannot hide a writing CTE in automatic replay. The
+        // server also enforces READ ONLY for the statements we permit.
         assert!(
             validate_replay_sql(
                 "WITH changed AS (DELETE FROM accounts RETURNING *) SELECT * FROM changed"
             )
-            .is_ok()
+            .is_err()
         );
     }
 

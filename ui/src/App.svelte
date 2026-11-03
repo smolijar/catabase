@@ -17,6 +17,7 @@
   import HistoryEntryCard from './components/HistoryEntryCard.svelte';
   import HistoryTransactionGroup from './components/HistoryTransactionGroup.svelte';
   import AppUpdates from './components/AppUpdates.svelte';
+  import AutoTransactionToggle from './components/AutoTransactionToggle.svelte';
   import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
   import SidebarResizer from './components/SidebarResizer.svelte';
@@ -144,7 +145,8 @@
     (id, state) => { connectionTests = { ...connectionTests, [id]: state }; },
     errorMessage
   );
-  let settings: Settings = { poolSize: 5, supermavenEnabled: false };
+  let settings: Settings = { poolSize: 5, supermavenEnabled: false, autoTransaction: true };
+  let autoTransactionSaving = false;
   let poolStats: ConnectionStats | null = null;
   let poolStatsConnectionId: string | null = null;
   let poolStatsRequest = 0;
@@ -412,6 +414,13 @@
       listen<string>('history-error', event => {
         historySaveError = event.payload;
         flash(event.payload, true);
+      }),
+      listen<TxStatus>('tx-changed', event => {
+        // An automatically opened transaction is visible while the triggering
+        // statement is still running. Ignore older in-flight status responses.
+        txStatusRequest++;
+        txStatus = event.payload;
+        txStatusKnown = true;
       })
     ]);
     if (mounted) nativeCleanup.push(...cleanups);
@@ -869,7 +878,8 @@
 
   async function loadSettings() {
     try {
-      settings = await api.getSettings();
+      const loaded = await api.getSettings();
+      settings = { ...loaded, autoTransaction: loaded.autoTransaction ?? true };
       poolSizeInput = settings.poolSize;
     } catch (error) {
       flash(`Settings unavailable: ${errorMessage(error)}`);
@@ -968,7 +978,7 @@
   }
 
   async function runQuery() {
-    if (closingWorkspace) return;
+    if (closingWorkspace || !workspaceLoaded) return;
     if (discardRunConfirmation) return;
     if (connectionMutation) { flash(connectionMutation); return; }
     if (operation) {
@@ -1282,6 +1292,22 @@
     } catch (error) {
       flash(errorMessage(error));
     } finally {
+      connectionMutation = null;
+    }
+  }
+
+  async function setAutoTransaction(enabled: boolean) {
+    if (!workspaceLoaded || closingWorkspace || operation || connectionMutation) return;
+    autoTransactionSaving = true;
+    connectionMutation = 'Saving auto-transaction mode…';
+    try {
+      const saved = await api.setAutoTransaction(enabled);
+      settings = { ...settings, autoTransaction: saved };
+      flash(`Auto transaction ${saved ? 'on' : 'off'}.${txStatus.active ? ' The open transaction remains active.' : ''}`);
+    } catch (error) {
+      flash(`Could not save auto-transaction mode: ${errorMessage(error)}`, true);
+    } finally {
+      autoTransactionSaving = false;
       connectionMutation = null;
     }
   }
@@ -1993,6 +2019,12 @@
             onCheck={() => void updateChecker.check()} onAutomatic={setAutomaticUpdates} onInstall={() => void installAppUpdate()}
             onReleases={() => void api.openReleases().catch(error => flash(errorMessage(error), true))} />
           <section class="settings-card">
+            <div class="settings-card-head"><strong>Transactions</strong></div>
+            <AutoTransactionToggle enabled={settings.autoTransaction} busy={autoTransactionSaving} disabled={!workspaceLoaded || running || Boolean(connectionMutation) || closingWorkspace} onChange={setAutoTransaction} />
+            <p>Read-only queries run normally. Writes, including those inside CTEs, and unrecognized SQL open a transaction until you Commit or Rollback.</p>
+            <p>On by default. Turning it off keeps any open transaction active. Disable it before running commands that require execution outside a transaction.</p>
+          </section>
+          <section class="settings-card">
             <div class="settings-card-head"><strong>Appearance</strong></div>
             <div class="theme-options" role="group" aria-label="Theme">
               {#each ['tuxedo', 'snow', 'system'] as choice}
@@ -2056,7 +2088,7 @@
         <button aria-label="Find in SQL editor" title="Find in SQL editor (Cmd/Ctrl+F)" disabled={!workspaceLoaded} on:click={() => editorRef?.find()}><Icon name="search" size={16} /></button>
         <button aria-label="Format SQL" title="Format selected SQL, or the entire draft" disabled={!workspaceLoaded || tabKind !== 'query'} on:click={formatSql}><Icon name="format" size={16} /><span class="action-label">Format SQL</span></button>
         <span class="deferred-action" title="Explain — coming later. A query-plan dialog is planned."><button disabled aria-label="Explain (coming later)"><Icon name="explain" size={16} /><span class="action-label">Explain</span></button></span>
-        <button class="primary run-button" class:cancel-button={running} on:click={runQuery} disabled={Boolean(connectionMutation) || operation?.cancelling || (!running && (!activeConnection || tabKind !== 'query'))} title={activeConnection ? 'Run current statement (Cmd/Ctrl+Enter)' : 'Add or activate a connection first'}>
+        <button class="primary run-button" class:cancel-button={running} on:click={runQuery} disabled={!workspaceLoaded || Boolean(connectionMutation) || operation?.cancelling || (!running && (!activeConnection || tabKind !== 'query'))} title={activeConnection ? 'Run current statement (Cmd/Ctrl+Enter)' : 'Add or activate a connection first'}>
           <Icon name={running ? 'stop' : 'play'} size={14} /><span>{operation?.cancelling ? 'Cancelling…' : running ? 'Cancel' : 'Run'}</span><kbd>⌘↵</kbd>
         </button>
       </div>
@@ -2065,7 +2097,7 @@
       <div class="editor-pane">
         {#if txStatus.active}
           <div class="tx-banner">
-            <strong>Transaction active</strong>
+            <strong>{txStatus.automatic ? 'Auto transaction active' : 'Transaction active'}</strong>
             <span title={txStatus.startedAt ? `Started ${formatHistoryTime(txStatus.startedAt)}` : undefined}>{transactionDuration}</span>
             <button disabled={running || Boolean(connectionMutation)} on:click={commitTransaction}>Commit</button>
             <button disabled={running || Boolean(connectionMutation)} on:click={rollbackTransaction}>Rollback</button>
@@ -2187,6 +2219,7 @@
 
   <footer class="status-bar">
     <ConnectionPill connection={activeConnection} state={activeConnection ? connectionTests[activeConnection.id] ?? null : null} activity={operation?.connectionId === tabConnectionId ? operation.cancelling ? 'cancelling' : 'running' : null} now={nowMs} compact disabled={Boolean(connectionMutation)} onTest={testCurrentConnection} onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }} />
+    <AutoTransactionToggle compact enabled={settings.autoTransaction} busy={autoTransactionSaving} disabled={!workspaceLoaded || running || Boolean(connectionMutation) || closingWorkspace} onChange={setAutoTransaction} />
     {#if activeConnection}<button class="status-link" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
     <button class="status-link" title="Open schema browser" on:click={() => { sidebar = 'schema'; sidebarOpen = true; }}>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : 'Schema'}</button>
     <span class="draft-status">{!workspaceLoaded ? 'restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'saving drafts…' : draftStatus === 'pending' ? 'saving drafts…' : draftStatus === 'error' ? 'draft save failed' : 'drafts saved'}</span>
@@ -2239,6 +2272,9 @@
     <div class="modal update-review">
       <div class="panel-head"><h2>Review cell edits</h2><button disabled={running} on:click={() => (showUpdatePreview = false)}>Close</button></div>
       <p>{pendingChanges.length} staged {pendingChanges.length === 1 ? 'change' : 'changes'} on {resultSession?.connectionName}. Rows are identified by {editEligibility.target?.key.primaryKey ? 'primary' : 'unique'} key ({editEligibility.target?.key.columns.join(', ')}); changed cells must still match their original values.</p>
+      {#if txStatus.active || settings.autoTransaction}
+        <p class="context-warning">{txStatus.active ? 'Changes will use the open transaction.' : 'Auto transaction will open a transaction for these changes.'} Commit to save them, or Rollback to undo them.</p>
+      {/if}
       <pre>{generateUpdateSql()}</pre>
       {#if !detectEditTarget()}<p class="context-warning">Apply is unavailable without an unambiguous source table and a complete primary or unique key.</p>{/if}
       <div class="row-actions"><button disabled={running} on:click={() => (showUpdatePreview = false)}>Back to results</button><button class="primary" disabled={!canApplyUpdates()} on:click={applyUpdates}>{running ? 'Applying…' : 'Apply changes'}</button></div>

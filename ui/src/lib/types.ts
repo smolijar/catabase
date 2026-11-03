@@ -39,6 +39,7 @@ export interface ConnectionRecord extends ConnectionFields {
 export interface Settings {
   poolSize: number;
   supermavenEnabled: boolean;
+  autoTransaction: boolean;
 }
 
 export interface ColumnMeta {
@@ -130,7 +131,7 @@ export interface HistoryEntry {
 
 export interface HistoryTransaction {
   id: string;
-  kind: 'manual' | 'review' | 'batch';
+  kind: 'manual' | 'auto' | 'review' | 'batch';
   status: 'active' | 'finished' | 'rolledBack' | 'interrupted';
   statementCount: number;
 }
@@ -225,6 +226,7 @@ export interface ExecutionTarget {
 
 export interface TxStatus {
   active: boolean;
+  automatic?: boolean;
   startedAt?: string | null;
   transactionId?: string | null;
 }

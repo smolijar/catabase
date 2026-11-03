@@ -45,7 +45,11 @@ Relationships are not inferred from similarly named columns. Derived tables and 
 
 ### Transactions and cancellation
 
-Manual `BEGIN`, `COMMIT`/`END` and `ROLLBACK` use the held transaction connection. The transaction banner shows elapsed time. Statements enter history as they finish, including transaction commands and updates applied through the cell-edit review. Related entries share a transaction ID and can be expanded as a group.
+**Auto transaction** is on by default. Toggle **Auto TX on/off** in the status bar or use **Settings → Transactions**; the preference is saved. Read-only queries, including read-only CTEs, execute normally. Writes, including nested write CTEs, row-locking queries and SQL that cannot be recognized as read-only open a transaction if one is not already active. Unknown or user-defined functions are treated conservatively and may open a transaction even when they only read. Reviewed cell edits follow the same mode. Use **Commit** to save these changes or **Rollback** to undo them; the transaction stays open across subsequent queries.
+
+Turning auto transaction off does not finish an open transaction. Commit or roll back first when you need to run commands such as `VACUUM` that PostgreSQL requires outside a transaction.
+
+Manual `BEGIN`, `COMMIT`/`END` and `ROLLBACK` still use the held transaction connection. The transaction banner distinguishes automatically opened transactions and shows elapsed time. Statements enter history as they finish, including transaction commands and updates applied through the cell-edit review. Related entries share a transaction ID and can be expanded as a group; automatically opened groups are labeled **Auto transaction**.
 
 Cancel sends PostgreSQL's cancellation signal. An unresponsive connection is closed rather than returned to the pool. If the app cannot confirm cancellation, it reports an unknown write/commit outcome; check the database before retrying that operation.
 
@@ -55,7 +59,7 @@ Results show their connection, execution time and executed SQL. The grid support
 
 Column headers show compact type information and primary/foreign-key indicators, with details in tooltips. The cell inspector distinguishes SQL NULL, empty text, JSON, arrays and scalar values. PostgreSQL array values use array literals so dimensions, lower bounds and NULL elements can be preserved.
 
-Export offers CSV, TSV and JSON. You can export loaded rows or explicitly re-run a read-only export up to 10,000 rows. Paging and re-run exports are unavailable during a manual transaction; commit or roll back first.
+Export offers CSV, TSV and JSON. You can export loaded rows or explicitly re-run a read-only export up to 10,000 rows. Paging and re-run exports are unavailable during an open transaction; commit or roll back first.
 
 ### Review updates before applying
 
@@ -65,7 +69,7 @@ Stage values in the cell inspector, then review the generated SQL before applyin
 
 Foreign-key cells use a searchable picker of existing rows rather than free-form input. Choices include a compact row preview and key; the first 50 matches are shown. Composite picks stage all projected components together. An incomplete composite selection explains which columns are missing. These previews show committed rows, not uncommitted changes in a manual transaction.
 
-Applying changes is atomic. Inside a manual transaction, applied edits remain pending until you commit. Running a new query with staged edits asks before discarding them.
+Applying changes is atomic. With auto transaction enabled, or inside an existing transaction, applied edits remain pending until you commit. Running a new query with staged edits asks before discarding them.
 
 ### Query timing
 

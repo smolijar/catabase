@@ -45,6 +45,13 @@ impl<'a> StatementHistory<'a> {
         self.state.lock().unwrap().transaction_id = id;
     }
 
+    pub fn finish_transaction(&self, status: &str) {
+        let id = self.state.lock().unwrap().transaction_id.clone();
+        if let Some(id) = id {
+            (self.notify)(self.storage.finish_history_transaction(&id, status));
+        }
+    }
+
     pub fn save_time_ms(&self) -> f64 {
         self.state.lock().unwrap().save_time.as_secs_f64() * 1000.0
     }

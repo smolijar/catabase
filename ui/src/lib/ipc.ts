@@ -39,6 +39,7 @@ export const api = {
   parseConnectionUrl: (input: string) => invoke<ConnectionFields>('parse_connection_url', { input }),
   buildConnectionUrl: (fields: ConnectionFields) => invoke<string>('build_connection_url', { fields }),
   getSettings: () => invoke<Settings>('get_settings'),
+  setAutoTransaction: (enabled: boolean) => invoke<boolean>('set_auto_transaction', { enabled }),
   setPoolSize: (poolSize: number) => invoke<number>('set_pool_size', { poolSize }),
   setSupermavenEnabled: (enabled: boolean) => invoke<SupermavenStatus>('set_supermaven_enabled', { enabled }),
   splitSql: (sql: string) => invoke<StatementRange[]>('split_sql', { sql }),

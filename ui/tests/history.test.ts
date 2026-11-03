@@ -20,6 +20,7 @@ test('transactions group across interleaved entries/pages without hiding standal
   assert.equal(transactionLabel(transaction), 'Transaction');
   assert.equal(transactionLabel({ ...transaction, kind: 'review' }), 'Reviewed edits');
   assert.equal(transactionLabel({ ...transaction, kind: 'batch' }), 'SQL batch');
+  assert.equal(transactionLabel({ ...transaction, kind: 'auto' }), 'Auto transaction');
   assert.equal(transactionStatus(transaction), 'Active');
   assert.equal(transactionStatus({ ...transaction, status: 'finished' }), 'Finished');
   assert.match(transactionStatus({ ...transaction, status: 'interrupted' }), /unconfirmed/);

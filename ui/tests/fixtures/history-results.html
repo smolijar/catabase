@@ -25,7 +25,7 @@
       window.__TAURI_INTERNALS__ = { invoke: async (command, args = {}) => {
         switch (command) {
           case 'list_connections': return [{ id: 'preview', name: 'zenbase docker (preview)', host: 'localhost', port: 5432, database: 'zenbase', username: 'zenbase', ssl: false, isActive: true, createdAt: base.executedAt, updatedAt: base.executedAt }];
-          case 'get_settings': return { poolSize: 1, supermavenEnabled: false };
+          case 'get_settings': return { poolSize: 1, supermavenEnabled: false, autoTransaction: true };
           case 'tx_status': return { active: false, startedAt: null };
           case 'supermaven_status': return { enabled: false, state: 'off', message: 'Preview only' };
           case 'load_draft': return sessionStorage.getItem(draftKey) ?? initialDraft;

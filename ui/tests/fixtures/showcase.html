@@ -9,6 +9,9 @@
       // Unknown IPC calls fail closed; this page is not a database connection.
       const timestamp = '2026-10-29T10:00:00Z';
       const updateDemo = new URLSearchParams(location.search).get('updates');
+      const transactionDemo = new URLSearchParams(location.search).get('transaction');
+      let autoTransaction = localStorage.getItem('catabase.demo.autoTransaction') !== 'false';
+      let transaction = { active: transactionDemo === 'auto', automatic: transactionDemo === 'auto', startedAt: transactionDemo === 'auto' ? new Date(Date.now() - 15000).toISOString() : null };
       const sql = `select
     id, title, price,
     in_stock, published_on
@@ -78,8 +81,17 @@ order by id;`;
           case 'install_update': throw new Error('This browser fixture cannot install updates. Your workspace is unchanged.');
           case 'open_releases': return;
           case 'list_connections': return [connection];
-          case 'get_settings': return { poolSize: 5, supermavenEnabled: false };
-          case 'tx_status': return { active: false, startedAt: null };
+          case 'get_settings': return { poolSize: 5, supermavenEnabled: false, autoTransaction };
+          case 'set_auto_transaction':
+            await new Promise(resolve => setTimeout(resolve, 300));
+            if (transactionDemo === 'save-error') throw new Error('Demo settings write failed.');
+            autoTransaction = args.enabled;
+            localStorage.setItem('catabase.demo.autoTransaction', String(autoTransaction));
+            return autoTransaction;
+          case 'tx_status': return transaction;
+          case 'tx_commit': case 'tx_rollback':
+            transaction = { active: false, automatic: false, startedAt: null };
+            return transaction;
           case 'supermaven_status': return { enabled: false, state: 'off', message: 'Disabled in the documentation demo.' };
           case 'load_draft': return draft;
           case 'save_draft': case 'test_connection': return;

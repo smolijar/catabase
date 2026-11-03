@@ -78,6 +78,13 @@ CATABASE_TEST_CONNECTION_STORE="/path/to/catabase.sqlite3" \
   cargo test -p catabase-core --test reflection_docker -- --ignored --nocapture
 ```
 
+The native auto-transaction suite uses the same guarded Docker connection and session-local temporary tables. It checks read/write routing, transaction reuse, rollback, reviewed edits, cancellation and history:
+
+```sh
+CATABASE_TEST_CONNECTION_STORE="/path/to/catabase.sqlite3" \
+  cargo test -p catabase --lib auto_transaction_tests -- --ignored --test-threads=1
+```
+
 A separate provider smoke test sends synthetic SQL to the official Supermaven agent:
 
 ```sh
@@ -103,6 +110,8 @@ Do not enable these tests in ordinary CI or point them at production connections
 ## Execution and metadata
 
 SELECT-like queries combine fresh preparation, result description and execution in one extended-protocol request. Empty results use a description-only fallback to retain column headers; SQL is not executed twice. Other statements, transaction commands and compound batches retain their own execution paths.
+
+Auto-transaction mode classifies SQL with a recursive PostgreSQL AST visitor before execution. Read-only CTEs stay outside a held transaction; nested writes, row locks, unsupported syntax and unknown functions trigger a tracked `BEGIN`. Static classification is a UX safeguard, not a database permission boundary: PostgreSQL still resolves custom function overloads, operators and casts. Automatic paging/export rejects statements classified as unsafe and also uses a server-enforced read-only transaction.
 
 Schema reflection includes table OIDs, column identifiers/types, complete usable primary/unique keys and foreign keys. Result columns, including aliases and joins, are mapped through this connection-scoped metadata. Missing or expired metadata is refreshed in batches rather than with per-column catalog queries. Cache entries expire after 60 seconds; explicit schema refresh, pool/configuration changes and non-read statements invalidate relevant metadata. Manual transactions have separate caches tied to their held client. Applying edits validates fresh catalog metadata instead of relying on cached keys.
 

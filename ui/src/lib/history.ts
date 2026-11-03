@@ -23,7 +23,7 @@ export function groupHistory(entries: HistoryEntry[]): HistoryGroup[] {
 }
 
 export function transactionLabel(transaction: HistoryTransaction): string {
-  return transaction.kind === 'review' ? 'Reviewed edits' : transaction.kind === 'batch' ? 'SQL batch' : 'Transaction';
+  return transaction.kind === 'review' ? 'Reviewed edits' : transaction.kind === 'batch' ? 'SQL batch' : transaction.kind === 'auto' ? 'Auto transaction' : 'Transaction';
 }
 
 export function transactionStatus(transaction: HistoryTransaction): string {

@@ -116,6 +116,7 @@ pub struct Storage {
 pub struct Settings {
     pub pool_size: u32,
     pub supermaven_enabled: bool,
+    pub auto_transaction: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -316,9 +317,14 @@ impl Storage {
             .clamp(1, 32);
         let supermaven_enabled =
             setting_value(&conn, "supermaven_enabled")?.as_deref() == Some("true");
+        // Existing installations opt in too. Only an explicit saved opt-out
+        // allows statements to run without automatic transaction protection.
+        let auto_transaction =
+            setting_value(&conn, "auto_transaction")?.as_deref() != Some("false");
         Ok(Settings {
             pool_size,
             supermaven_enabled,
+            auto_transaction,
         })
     }
 
@@ -336,6 +342,12 @@ impl Storage {
     pub fn set_supermaven_enabled(&self, enabled: bool) -> Result<(), CoreError> {
         let conn = self.lock()?;
         conn.execute("INSERT INTO settings (key, value) VALUES ('supermaven_enabled', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![enabled.to_string()])?;
+        Ok(())
+    }
+
+    pub fn set_auto_transaction(&self, enabled: bool) -> Result<(), CoreError> {
+        let conn = self.lock()?;
+        conn.execute("INSERT INTO settings (key, value) VALUES ('auto_transaction', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![enabled.to_string()])?;
         Ok(())
     }
 
@@ -1457,6 +1469,21 @@ mod tests {
 
         assert_eq!(settings.pool_size, 5);
         assert!(!settings.supermaven_enabled);
+        assert!(settings.auto_transaction);
+    }
+
+    #[test]
+    fn auto_transaction_defaults_on_and_persists_opt_out_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.sqlite3");
+        let storage = Storage::open(&path).unwrap();
+        assert!(storage.get_settings().unwrap().auto_transaction);
+        storage.set_auto_transaction(false).unwrap();
+        drop(storage);
+        let storage = Storage::open(&path).unwrap();
+        assert!(!storage.get_settings().unwrap().auto_transaction);
+        storage.set_auto_transaction(true).unwrap();
+        assert!(storage.get_settings().unwrap().auto_transaction);
     }
 
     #[test]

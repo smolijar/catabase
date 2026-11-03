@@ -9,6 +9,7 @@ pub mod reflection;
 pub mod row_keys;
 pub mod row_updates;
 pub mod sql;
+mod sql_safety;
 pub mod storage;
 pub mod supermaven;
 
@@ -35,6 +36,7 @@ pub use sql::{
     StatementKind, StatementRange, classify_statement, split_editor_statements, split_statements,
     validate_transaction_sql,
 };
+pub use sql_safety::requires_transaction;
 pub use storage::{
     ConnectionInput, ConnectionRecord, HistoryEntry, HistoryPage, HistoryStats,
     HistoryStorageStats, NewHistoryEntry, Settings, Storage,
