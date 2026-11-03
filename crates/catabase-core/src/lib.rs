@@ -3,6 +3,7 @@ mod history;
 pub use history::{StatementHistory, StatementObserver};
 pub mod conn_url;
 pub mod error;
+mod explain;
 pub mod foreign_key_values;
 pub mod pg;
 pub mod reflection;
@@ -18,6 +19,7 @@ mod connection_options;
 pub use conn_url::{ConnectionFields, build_connection_url, parse_connection_url};
 pub use connection_options::ConnectionOptions;
 pub use error::{CoreError, PgErrorInfo};
+pub use explain::{DEFAULT_EXPLAIN_PREAMBLE, build_explain_sql, extract_explain_plan};
 pub use foreign_key_values::{ForeignKeyLookup, ForeignKeyValues, lookup_foreign_key_values};
 pub use pg::{
     ColumnMeta, CommandTimings, ConnectionStats, MetadataSource, PgCancelToken, PgClient, PgPool,

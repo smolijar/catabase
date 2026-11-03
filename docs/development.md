@@ -85,6 +85,20 @@ CATABASE_TEST_CONNECTION_STORE="/path/to/catabase.sqlite3" \
   cargo test -p catabase --lib auto_transaction_tests -- --ignored --test-threads=1
 ```
 
+Explain's native suite uses the same temporary Docker fixtures. It verifies the second result, JSON/text plans, transaction bypass/reuse, history and cancellation during either pass:
+
+```sh
+CATABASE_TEST_CONNECTION_STORE="/path/to/catabase.sqlite3" \
+  cargo test -p catabase --lib explain::tests -- --ignored --test-threads=1
+```
+
+The separate Dalibo smoke test publishes one synthetic `SELECT 1` plan, with no saved SQL, connection details or database rows:
+
+```sh
+CATABASE_DALIBO_LIVE_TEST=1 \
+  cargo test -p catabase --lib dalibo::tests::service_accepts_synthetic_plan_and_returns_a_public_link -- --ignored --exact
+```
+
 A separate provider smoke test sends synthetic SQL to the official Supermaven agent:
 
 ```sh
@@ -112,6 +126,8 @@ Do not enable these tests in ordinary CI or point them at production connections
 SELECT-like queries combine fresh preparation, result description and execution in one extended-protocol request. Empty results use a description-only fallback to retain column headers; SQL is not executed twice. Other statements, transaction commands and compound batches retain their own execution paths.
 
 Auto-transaction mode classifies SQL with a recursive PostgreSQL AST visitor before execution. Read-only CTEs stay outside a held transaction; nested writes, row locks, unsupported syntax and unknown functions trigger a tracked `BEGIN`. Static classification is a UX safeguard, not a database permission boundary: PostgreSQL still resolves custom function overloads, operators and casts. Automatic paging/export rejects statements classified as unsafe and also uses a server-enforced read-only transaction.
+
+The dedicated Explain command validates the editable preamble and selected statement separately before bypassing automatic transaction creation. It runs one or two passes on the same client, preserving existing transactions and one cancellation signal throughout. Each EXPLAIN enters history normally. Sharing happens after query execution through Dalibo's fixed HTTPS `/new.json` endpoint; an upload error retains the plan, and upload-only retries cannot execute SQL. No application database plan is sent by ordinary tests.
 
 Schema reflection includes table OIDs, column identifiers/types, complete usable primary/unique keys and foreign keys. Result columns, including aliases and joins, are mapped through this connection-scoped metadata. Missing or expired metadata is refreshed in batches rather than with per-column catalog queries. Cache entries expire after 60 seconds; explicit schema refresh, pool/configuration changes and non-read statements invalidate relevant metadata. Manual transactions have separate caches tied to their held client. Applying edits validates fresh catalog metadata instead of relying on cached keys.
 

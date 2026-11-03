@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { UpdaterStatus, UpdateCheck } from './appUpdates';
+import type { ExplainRequest, ExplainResult, ShareExplainRequest } from './explain';
 import type {
   SupermavenStatus,
   SupermavenRequest,
@@ -45,6 +46,9 @@ export const api = {
   splitSql: (sql: string) => invoke<StatementRange[]>('split_sql', { sql }),
   executeQuery: (sql: string, queryToken: string, offset = 0, pageSize = 200, connectionId?: string, readOnlyReplay = false) =>
     invoke<QueryResult>('execute_query', { sql, queryToken, offset, pageSize, connectionId, readOnlyReplay }),
+  explainQuery: (request: ExplainRequest) => invoke<ExplainResult>('explain_query', { request }),
+  shareExplain: (request: ShareExplainRequest) => invoke<{ url: string }>('share_explain', { request }),
+  openExplainLink: (url: string) => invoke<void>('open_explain_link', { url }),
   applyRowUpdates: (connectionId: string, queryToken: string, updates: RowUpdate[]) =>
     invoke<ApplyUpdatesResult>('apply_row_updates', { connectionId, queryToken, updates }),
   cancelQuery: (queryToken: string) => invoke<CancelResult>('cancel_query', { queryToken }),

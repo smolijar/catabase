@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod auto_transaction_tests;
+mod dalibo;
+mod explain;
 mod updater;
 
 use std::{
@@ -1555,6 +1557,9 @@ pub fn run() {
             disconnect_connection,
             duplicate_connection,
             execute_query,
+            explain::explain_query,
+            explain::share_explain,
+            explain::open_explain_link,
             enable_exit_guard,
             export_write_file,
             finish_exit,

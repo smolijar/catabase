@@ -42,7 +42,7 @@ fn docker_fields() -> Result<ConnectionFields, Box<dyn Error>> {
     Ok(fields)
 }
 
-async fn fixture_pool() -> Result<(ConnectionRecord, PgPool), Box<dyn Error>> {
+pub(super) async fn fixture_pool() -> Result<(ConnectionRecord, PgPool), Box<dyn Error>> {
     let fields = docker_fields()?;
     let pool = create_pool(&fields, 1)?;
     let client = checkout_pool_client(&pool).await?;

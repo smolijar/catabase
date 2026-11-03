@@ -26,6 +26,13 @@ export function createConnectionTester(
   clock = () => Date.now()
 ) {
   const requests = new Map<string, { promise: Promise<void> }>();
+  const settledStates = new Map<string, Extract<ConnectionTestState, { checkedAt: number }>>();
+
+  function setStatus(id: string, state: ConnectionTestState | null) {
+    if (!state) settledStates.delete(id);
+    else if ('checkedAt' in state) settledStates.set(id, state);
+    onChange(id, state);
+  }
 
   function test(id: string, probe: () => Promise<void>): Promise<void> {
     const existing = requests.get(id);
@@ -33,10 +40,10 @@ export function createConnectionTester(
 
     const request = { promise: Promise.resolve() };
     requests.set(id, request);
-    onChange(id, { status: 'testing' });
+    setStatus(id, { status: 'testing' });
     request.promise = Promise.resolve().then(probe).then(
-      () => { if (requests.get(id) === request) onChange(id, { status: 'success', checkedAt: clock() }); },
-      (error) => { if (requests.get(id) === request) onChange(id, { status: 'error', message: describeError(error), checkedAt: clock() }); }
+      () => { if (requests.get(id) === request) setStatus(id, { status: 'success', checkedAt: clock() }); },
+      (error) => { if (requests.get(id) === request) setStatus(id, { status: 'error', message: describeError(error), checkedAt: clock() }); }
     ).finally(() => {
       if (requests.get(id) === request) requests.delete(id);
     });
@@ -45,7 +52,7 @@ export function createConnectionTester(
 
   function invalidate(id: string) {
     requests.delete(id);
-    onChange(id, null);
+    setStatus(id, null);
   }
 
   async function query<T>(id: string, execute: () => Promise<T>): Promise<T> {
@@ -53,15 +60,21 @@ export function createConnectionTester(
     // or configuration invalidation supersedes older responses.
     const request = { promise: Promise.resolve() };
     requests.set(id, request);
-    onChange(id, { status: 'running' });
+    setStatus(id, { status: 'running' });
     try {
       const result = await execute();
-      if (requests.get(id) === request) onChange(id, { status: 'success', checkedAt: clock() });
+      if (requests.get(id) === request) setStatus(id, { status: 'success', checkedAt: clock() });
       return result;
     } catch (error) {
-      if (requests.get(id) === request) onChange(id, queryReachedServer(error)
-        ? { status: 'success', checkedAt: clock() }
-        : { status: 'error', message: describeError(error), checkedAt: clock() });
+      if (requests.get(id) === request) {
+        const { code, severity } = (error ?? {}) as { code?: string; severity?: string | null };
+        // Local validation and cancellation before reaching PostgreSQL tell us
+        // nothing new about connectivity; preserve the last settled check age.
+        const neutral = code === 'CATABASE_EXPLAIN_INPUT' || (code === '57014' && severity == null);
+        setStatus(id, neutral ? settledStates.get(id) ?? null : queryReachedServer(error)
+          ? { status: 'success', checkedAt: clock() }
+          : { status: 'error', message: describeError(error), checkedAt: clock() });
+      }
       throw error;
     } finally {
       if (requests.get(id) === request) requests.delete(id);

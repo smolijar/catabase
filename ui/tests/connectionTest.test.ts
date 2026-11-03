@@ -10,13 +10,13 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function harness() {
+function harness(clock = () => 12345) {
   const states = new Map<string, ConnectionTestState | null>();
   const changes: Array<[string, ConnectionTestState | null]> = [];
   const tester = createConnectionTester((id, state) => {
     states.set(id, state);
     changes.push([id, state]);
-  }, (error) => (error as Error).message, () => 12345);
+  }, (error) => (error as Error).message, clock);
   return { ...tester, states, changes };
 }
 
@@ -148,4 +148,39 @@ test('a newer query supersedes a pending check; deletion invalidates pending que
   pending.resolve();
   await query;
   assert.equal(tester.states.get('zenbase'), null);
+});
+
+test('local Explain validation and pre-server cancellation preserve settled health and its age', async () => {
+  let now = 1000;
+  const tester = harness(() => now);
+  for (const error of [{ code: 'CATABASE_EXPLAIN_INPUT', message: 'Invalid preamble' }, { code: '57014', severity: null, message: 'Cancelled' }, { code: '57014', message: 'Cancelled' }]) {
+    await assert.rejects(tester.query('unknown', async () => { throw error; }));
+    assert.equal(tester.states.get('unknown'), null);
+    now = 1000;
+    await tester.query('healthy', async () => 1);
+    await tester.test('offline', async () => { throw new Error('Connection refused'); });
+    now = 90000;
+    await assert.rejects(tester.query('healthy', async () => { throw error; }));
+    assert.deepEqual(tester.states.get('healthy'), { status: 'success', checkedAt: 1000 });
+    assert.equal(connectionHealth(tester.states.get('healthy')!, now), 'stale');
+    await assert.rejects(tester.query('offline', async () => { throw error; }));
+    assert.deepEqual(tester.states.get('offline'), { status: 'error', message: 'Connection refused', checkedAt: 1000 });
+  }
+});
+
+test('neutral query errors never restore a superseded running or testing state', async () => {
+  const tester = harness();
+  const probe = deferred();
+  const checking = tester.test('connection', () => probe.promise);
+  await assert.rejects(tester.query('connection', async () => { throw { code: 'CATABASE_EXPLAIN_INPUT', message: 'Invalid preamble' }; }));
+  assert.equal(tester.states.get('connection'), null);
+  probe.resolve();
+  await checking;
+  assert.equal(tester.states.get('connection'), null);
+  const pending = deferred();
+  const query = tester.query('connection', () => pending.promise);
+  await assert.rejects(tester.query('connection', async () => { throw { code: '57014', message: 'Cancelled' }; }));
+  pending.resolve();
+  await query;
+  assert.equal(tester.states.get('connection'), null);
 });

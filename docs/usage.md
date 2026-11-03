@@ -77,7 +77,15 @@ Click a successful query's status-bar duration to inspect the timing breakdown: 
 
 These are client-side wall-clock spans. The status-bar duration covers preparation through row decoding; it is not PostgreSQL's `EXPLAIN` execution time. Server execution and network transfer share one span, response/IPC is an estimated residual, and the UI span stops after DOM updates rather than browser paint.
 
-The **Explain** button is currently a disabled placeholder; the query-plan dialog is not implemented.
+### Explain plans
+
+**Explain** opens a configuration dialog for the selected SQL or statement at the cursor, using the same selection rules as Run. Review the query and edit the preamble, initially `EXPLAIN (ANALYZE, COSTS, VERBOSE, BUFFERS, FORMAT JSON)`.
+
+**Use second result** defaults on: the app runs EXPLAIN twice and keeps the second plan after the first run has warmed the cache. With ANALYZE, the underlying query actually executes on each run, including writes. Explain bypasses automatic transaction creation; an existing transaction is reused, otherwise writes can commit immediately. Progress identifies the first run, second run and sharing stage, with a Cancel action throughout.
+
+**Share on Dalibo** defaults on. Launching sends the selected plan, SQL and any optional title/comments to [explain.dalibo.com](https://explain.dalibo.com/); anyone with the resulting link can view them. Leave title/comments empty unless needed. Turn sharing off to keep and copy the plan locally. Sharing failures preserve the plan and offer **Retry sharing**, which uploads that plan without running SQL again. Cancelling an upload stops waiting, but Dalibo may already have received it.
+
+Explain keeps the current result set and staged cell edits. Each completed EXPLAIN execution appears in history.
 
 ## Tabs and search
 

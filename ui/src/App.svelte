@@ -18,6 +18,9 @@
   import HistoryTransactionGroup from './components/HistoryTransactionGroup.svelte';
   import AppUpdates from './components/AppUpdates.svelte';
   import AutoTransactionToggle from './components/AutoTransactionToggle.svelte';
+  import ExplainDialog from './components/ExplainDialog.svelte';
+  import { createExplainWorkflow, initialExplainState } from './lib/explain';
+  import type { ExplainOptions, ExplainProgress } from './lib/explain';
   import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
   import SidebarResizer from './components/SidebarResizer.svelte';
@@ -86,7 +89,7 @@
     getSnapshot: () => { tabId: string; sql: string; viewState: WorkspaceTab['viewState'] };
   };
   type SchemaGroup = { name: string; items: SchemaItem[] };
-  type Operation = { token: string; tabId: string; connectionId: string; kind: 'query' | 'load' | 'export' | 'apply'; startedAt: number; cancelling: boolean };
+  type Operation = { token: string; tabId: string; connectionId: string; kind: 'query' | 'load' | 'export' | 'apply' | 'explain'; startedAt: number; cancelling: boolean };
 
   let sidebar: SidebarTab = 'connections';
   let nativeTitlebar = false;
@@ -123,6 +126,27 @@
   let running = false;
   let nowMs = Date.now();
   let operation: Operation | null = null;
+  let explainSession: { query: string; tabId: string; connectionId: string; connectionName: string } | null = null;
+  let explainOpening = false;
+  let explainState = initialExplainState();
+  let explainEventsReady: Promise<void> | null = null;
+  let explainEventsError = '';
+  const explainWorkflow = createExplainWorkflow({
+    begin: connectionId => {
+      const op = beginOperation('explain', connectionId);
+      if (explainSession) op.tabId = explainSession.tabId;
+      return op.token;
+    },
+    finish: token => { if (operation?.token === token) finishOperation(operation); },
+    run: request => connectionTester.query(request.connectionId, () => api.explainQuery(request)),
+    share: api.shareExplain,
+    cancel: api.cancelQuery
+  }, state => {
+    explainState = state;
+    if (operation?.kind === 'explain' && operation.token === state.token) {
+      operation = { ...operation, cancelling: state.cancelling };
+    }
+  }, errorMessage);
   let resultSession: ResultSession | null = null;
   let result: QueryResult | null = null;
   let originalRows: Record<string, unknown>[] = [];
@@ -236,7 +260,7 @@
   $: running = operation !== null;
   $: updateBlocked = updateInstallBlock({
     ready: workspaceLoaded,
-    busy: Boolean(operation || connectionMutation || showConnectionModal || schemaLoading || showUpdatePreview || discardRunConfirmation || tabCloseTask || closingWorkspace),
+    busy: Boolean(operation || connectionMutation || showConnectionModal || schemaLoading || showUpdatePreview || explainSession || explainOpening || discardRunConfirmation || tabCloseTask || closingWorkspace),
     transactionKnown: txStatusKnown,
     transactionActive: txStatus.active,
     stagedEdits: tabs.reduce((count, tab) => count + (tab.id === activeTab ? pendingChanges.length : tab.pendingChanges.length), 0),
@@ -298,6 +322,7 @@
     bootstrapTask = bootstrap();
     void registerNativeLifecycle();
     void registerHistoryEvents();
+    explainEventsReady = registerExplainEvents();
     window.addEventListener('keydown', handleKeydown);
     window.addEventListener('beforeunload', flushDraftOnUnload);
     const statsInterval = window.setInterval(() => {
@@ -317,7 +342,7 @@
       connectionId: activeConnection?.id ?? null,
       state: activeConnection ? connectionTests[activeConnection.id] ?? null : null,
       ready: mounted && workspaceLoaded && !closingWorkspace,
-      busy: Boolean(operation || connectionMutation || showConnectionModal || schemaLoading || editMode || discardRunConfirmation || tabCloseTask),
+      busy: Boolean(operation || connectionMutation || showConnectionModal || explainSession || explainOpening || schemaLoading || editMode || discardRunConfirmation || tabCloseTask),
       transactionIdle: txStatusKnown && !txStatus.active
     }), (id) => {
       const connection = connections.find(candidate => candidate.id === id);
@@ -364,6 +389,7 @@
       mounted = false;
       healthcheck.dispose();
       updateChecker.dispose();
+      explainWorkflow.dispose();
       nativeFocus.dispose();
       window.removeEventListener('focus', onWindowFocus);
       window.removeEventListener('blur', onWindowBlur);
@@ -397,6 +423,13 @@
     ]);
     await loadDraft();
     workspaceLoaded = true;
+  }
+
+  async function registerExplainEvents() {
+    try {
+      const unlisten = await listen<ExplainProgress>('explain-progress', event => explainWorkflow.progress(event.payload));
+      if (mounted) nativeCleanup.push(unlisten); else unlisten();
+    } catch (error) { explainEventsError = errorMessage(error); }
   }
 
   async function registerHistoryEvents() {
@@ -790,7 +823,7 @@
   function handleKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented || closingWorkspace) return;
     if (tabCloseTask) { event.preventDefault(); return; }
-    if (picker) return;
+    if (picker || explainSession || explainOpening) return;
     const fontAction = fontSizeShortcut(event);
     if (fontAction) {
       event.preventDefault();
@@ -977,8 +1010,56 @@
     confirmation?.resolve(confirmed);
   }
 
+  async function openExplain() {
+    if (!workspaceLoaded || closingWorkspace || operation || connectionMutation || explainSession || explainOpening || tabKind !== 'query') return;
+    if (!activeConnection) { sidebar = 'connections'; sidebarOpen = true; flash('Choose a connection for this query.'); return; }
+    const tabId = activeTab;
+    const connectionId = activeConnection.id;
+    const connectionName = activeConnection.name;
+    const editor = editorRef;
+    const fallback = sql.trim();
+    explainOpening = true;
+    try {
+      await explainEventsReady;
+      if (explainEventsError) throw new Error(`Explain progress is unavailable: ${explainEventsError}`);
+      const target = editor ? await editor.getExecutionTarget(api.splitSql) : { sql: fallback };
+      if (!target.sql.trim()) throw new Error('No query to explain.');
+      if (closingWorkspace || operation || connectionMutation || tabId !== activeTab || connectionId !== tabConnectionId) return;
+      explainWorkflow.reset();
+      explainSession = { query: target.sql, tabId, connectionId, connectionName };
+    } catch (error) { flash(errorMessage(error), true); }
+    finally { explainOpening = false; }
+  }
+
+  async function runExplain(options: ExplainOptions) {
+    const session = explainSession;
+    if (!session || operation || connectionMutation || closingWorkspace) return;
+    statusTiming = null;
+    statusFlash = 'Running explain…';
+    await explainWorkflow.run({ ...options, query: session.query, connectionId: session.connectionId });
+    updateExplainStatus();
+  }
+
+  async function shareExplain(title: string, comments: string) {
+    if (!explainSession || operation || connectionMutation || closingWorkspace) return;
+    statusFlash = 'Sharing explain plan…';
+    await explainWorkflow.retryShare(explainSession.connectionId, title, comments);
+    updateExplainStatus();
+  }
+
+  function updateExplainStatus() {
+    const { result, error } = explainState;
+    statusFlash = error || (result?.shareError ? 'Explain ready. Sharing did not complete.' : result?.url ? 'Explain ready. Shared on Dalibo.' : 'Explain ready.');
+  }
+
+  function closeExplain() {
+    if (explainState.busy) return;
+    explainSession = null;
+    explainWorkflow.reset();
+  }
+
   async function runQuery() {
-    if (closingWorkspace || !workspaceLoaded) return;
+    if (closingWorkspace || !workspaceLoaded || explainOpening || explainSession) return;
     if (discardRunConfirmation) return;
     if (connectionMutation) { flash(connectionMutation); return; }
     if (operation) {
@@ -1041,6 +1122,7 @@
   async function cancelQuery() {
     const op = operation;
     if (!op || op.cancelling) return;
+    if (op.kind === 'explain') { await explainWorkflow.cancel(); return; }
     op.cancelling = true;
     operation = op;
     statusFlash = 'Cancelling…';
@@ -1849,7 +1931,7 @@
       <span class="wordmark" aria-hidden="true"><b>CAT</b>ABASE<i></i></span>
     </div>
     <button class="workspace-search" aria-label="Search tables, queries, history, commands" title="Search workspace (Cmd/Ctrl+K)" on:click={() => picker = 'commands'}><Icon name="search" size={14} /><span>Search tables, queries, history, commands</span><kbd>⌘K</kbd></button>
-    {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : 'Exporting'} · {runningDuration}</button>{/if}
+    {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : operation.kind === 'explain' ? 'Explaining' : 'Exporting'} · {runningDuration}</button>{/if}
     <ConnectionPill
       switcher
       activity={operation?.connectionId === tabConnectionId ? operation.cancelling ? 'cancelling' : 'running' : null}
@@ -2087,7 +2169,7 @@
       <div class="editor-actions" aria-label="SQL actions">
         <button aria-label="Find in SQL editor" title="Find in SQL editor (Cmd/Ctrl+F)" disabled={!workspaceLoaded} on:click={() => editorRef?.find()}><Icon name="search" size={16} /></button>
         <button aria-label="Format SQL" title="Format selected SQL, or the entire draft" disabled={!workspaceLoaded || tabKind !== 'query'} on:click={formatSql}><Icon name="format" size={16} /><span class="action-label">Format SQL</span></button>
-        <span class="deferred-action" title="Explain — coming later. A query-plan dialog is planned."><button disabled aria-label="Explain (coming later)"><Icon name="explain" size={16} /><span class="action-label">Explain</span></button></span>
+        <button title="Explain selected SQL or the statement at the cursor" aria-label="Explain query" disabled={!workspaceLoaded || running || Boolean(connectionMutation) || explainOpening || tabKind !== 'query' || !activeConnection} on:click={openExplain}><Icon name="explain" size={16} /><span class="action-label">Explain</span></button>
         <button class="primary run-button" class:cancel-button={running} on:click={runQuery} disabled={!workspaceLoaded || Boolean(connectionMutation) || operation?.cancelling || (!running && (!activeConnection || tabKind !== 'query'))} title={activeConnection ? 'Run current statement (Cmd/Ctrl+Enter)' : 'Add or activate a connection first'}>
           <Icon name={running ? 'stop' : 'play'} size={14} /><span>{operation?.cancelling ? 'Cancelling…' : running ? 'Cancel' : 'Run'}</span><kbd>⌘↵</kbd>
         </button>
@@ -2253,6 +2335,12 @@
 {/if}
 {#if picker}
   <WorkspacePicker label={picker === 'connections' ? 'Switch connection' : 'Search workspace'} placeholder={picker === 'connections' ? 'Find a connection…' : 'Search tables, queries, history, commands…'} items={pickerItems} onSearch={searchPickerHistory} searchStatus={picker === 'commands' ? pickerHistory.loading ? 'Searching history…' : pickerHistory.error ? `History unavailable: ${pickerHistory.error}` : pickerHistory.total > 20 ? `Showing the 20 newest of ${pickerHistory.total} history matches. Refine your search for older entries.` : '' : ''} onSelect={selectPickerItem} onClose={() => picker = null} />
+{/if}
+
+{#if explainSession}
+  <ExplainDialog query={explainSession.query} connectionName={explainSession.connectionName} transactionActive={txStatus.active}
+    state={explainState} now={nowMs} onStart={runExplain} onShare={shareExplain} onCancel={() => void explainWorkflow.cancel()}
+    onClose={closeExplain} onOpenLink={api.openExplainLink} />
 {/if}
 
 {#if timingDetails}

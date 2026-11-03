@@ -9,6 +9,20 @@
       // Unknown IPC calls fail closed; this page is not a database connection.
       const timestamp = '2026-10-29T10:00:00Z';
       const updateDemo = new URLSearchParams(location.search).get('updates');
+      const explainDemo = new URLSearchParams(location.search).get('explain');
+      const callbacks = new Map();
+      const listeners = new Map();
+      const cancelledExplains = new Set();
+      let nextCallback = 1;
+      const emit = (event, payload) => { for (const [id, item] of listeners) if (item.event === event) callbacks.get(item.handler)?.({ event, id, payload }); };
+      async function explainPause(token, stage) {
+        const end = Date.now() + (explainDemo === `slow-${stage}` ? 30000 : 400);
+        while (Date.now() < end) {
+          if (cancelledExplains.has(token)) throw { message: 'Query cancelled.', code: '57014' };
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+      }
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_event, id) => listeners.delete(id) };
       const transactionDemo = new URLSearchParams(location.search).get('transaction');
       let autoTransaction = localStorage.getItem('catabase.demo.autoTransaction') !== 'false';
       let transaction = { active: transactionDemo === 'auto', automatic: transactionDemo === 'auto', startedAt: transactionDemo === 'auto' ? new Date(Date.now() - 15000).toISOString() : null };
@@ -72,8 +86,32 @@ order by id;`;
       localStorage.setItem('catabase.resultsHeight', '460');
       localStorage.setItem('catabase.sidebarWidth', '250');
       localStorage.setItem('catabase.connectionAppearance', JSON.stringify({ showcase: { color: 'none', environment: 'DEMO' } }));
-      window.__TAURI_INTERNALS__ = { invoke: async (command, args = {}) => {
+      window.__TAURI_INTERNALS__ = { transformCallback: callback => { const id = nextCallback++; callbacks.set(id, callback); return id; }, invoke: async (command, args = {}) => {
         switch (command) {
+          case 'plugin:event|listen': listeners.set(args.handler, { event: args.event, handler: args.handler }); return args.handler;
+          case 'plugin:event|unlisten': listeners.delete(args.eventId); return;
+          case 'explain_query': {
+            const request = args.request;
+            const totalRuns = request.useSecondResult ? 2 : 1;
+            for (let run = 1; run <= totalRuns; run++) {
+              emit('explain-progress', { queryToken: request.queryToken, stage: run === 1 ? 'firstRun' : 'secondRun', run, totalRuns });
+              await explainPause(request.queryToken, run === 1 ? 'first' : 'second');
+              if (explainDemo === 'query-error') throw { message: 'Syntax error in EXPLAIN options.', code: '42601' };
+            }
+            const plan = JSON.stringify([{ Plan: { 'Node Type': 'Seq Scan', 'Relation Name': 'books', 'Actual Rows': 12, 'Actual Total Time': 0.08 }, 'Execution Time': 0.12 }], null, 2);
+            let shareError = null;
+            if (request.share) {
+              emit('explain-progress', { queryToken: request.queryToken, stage: 'sharing', run: totalRuns, totalRuns });
+              try { await explainPause(request.queryToken, 'sharing'); } catch { shareError = 'Sharing cancelled. Dalibo may already have received the upload.'; }
+              if (explainDemo === 'share-error') shareError = 'Demo upload failed. Retry sharing without running the query again.';
+            }
+            return { plan, query: request.query, explainSql: `${request.preamble}\n${request.query}`, runs: Array.from({ length: totalRuns }, (_, index) => ({ durationMs: index ? 13 : 27 })), usedRun: totalRuns, url: request.share && !shareError ? 'https://explain.dalibo.com/plan/demo-plan' : null, shareError };
+          }
+          case 'share_explain':
+            await explainPause(args.request.queryToken, 'sharing');
+            return { url: 'https://explain.dalibo.com/plan/demo-plan' };
+          case 'open_explain_link': return;
+          case 'cancel_query': cancelledExplains.add(args.queryToken); return { cancelled: true, message: 'Cancellation requested.' };
           case 'updater_status': return { currentVersion: '0.1.0', enabled: Boolean(updateDemo), unavailableReason: 'Updates are not configured in the documentation demo.' };
           case 'check_for_update':
             if (updateDemo === 'error') throw new Error('Could not reach the update service.');
