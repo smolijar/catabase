@@ -34,7 +34,7 @@ export function createConnectionTester(
     onChange(id, state);
   }
 
-  function test(id: string, probe: () => Promise<void>): Promise<void> {
+  function test(id: string, probe: () => Promise<void>, onSuccess?: () => void): Promise<void> {
     const existing = requests.get(id);
     if (existing) return existing.promise;
 
@@ -42,7 +42,11 @@ export function createConnectionTester(
     requests.set(id, request);
     setStatus(id, { status: 'testing' });
     request.promise = Promise.resolve().then(probe).then(
-      () => { if (requests.get(id) === request) setStatus(id, { status: 'success', checkedAt: clock() }); },
+      () => {
+        if (requests.get(id) !== request) return;
+        setStatus(id, { status: 'success', checkedAt: clock() });
+        onSuccess?.();
+      },
       (error) => { if (requests.get(id) === request) setStatus(id, { status: 'error', message: describeError(error), checkedAt: clock() }); }
     ).finally(() => {
       if (requests.get(id) === request) requests.delete(id);

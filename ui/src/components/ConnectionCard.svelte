@@ -1,11 +1,14 @@
 <script lang="ts">
   import ActionMenu from './ActionMenu.svelte';
+  import Icon from './Icon.svelte';
+  import type { ConnectionAppearance } from '../lib/appearance';
   import type { ConnectionRecord } from '../lib/types';
   import { connectionClipboardAction, serializeConnectionReference } from '../lib/connectionClipboard';
   import { createConnectionInteraction } from '../lib/connectionInteraction';
 
   export let connection: ConnectionRecord;
   export let active = false;
+  export let appearance: ConnectionAppearance | undefined = undefined;
   export let disabled = false;
   export let onActivate: () => void | Promise<void>;
   export let onDisconnect: () => void = () => {};
@@ -16,8 +19,11 @@
   export let onDelete: () => void;
 
   let actions: ActionMenu;
+  let selectButton: HTMLButtonElement;
   const interaction = createConnectionInteraction(() => onActivate(), () => onEdit(), () => disabled);
   $: address = `${connection.username}@${connection.host}:${connection.port}/${connection.database}`;
+  $: color = appearance?.color === 'none' ? undefined : appearance?.color;
+  $: environment = appearance?.environment;
   $: items = [
     { id: 'use', label: active ? 'In use in this tab' : 'Use in this tab', disabled: active || disabled },
     ...(active ? [{ id: 'disconnect', label: 'Disconnect', disabled }] : []),
@@ -103,14 +109,21 @@
     else if (id === 'duplicate') onDuplicate();
     else if (id === 'delete') onDelete();
   }
+
+  function disconnect() {
+    // The disconnect button disappears when the row is no longer active.
+    selectButton.focus();
+    onDisconnect();
+  }
 </script>
 
 <article class="connection-item" class:active aria-label={`${connection.name} connection`}>
   <button
+    bind:this={selectButton}
     class="connection-select"
     data-connection-id={connection.id}
     type="button"
-    aria-label={`Use ${connection.name} in this tab`}
+    aria-label={`Use ${connection.name} in this tab${environment ? ` (${environment})` : ''}`}
     aria-pressed={active}
     aria-disabled={disabled}
     aria-haspopup="menu"
@@ -122,8 +135,16 @@
     on:paste={handlePaste}
     on:contextmenu={handleContextMenu}
   >
+    {#if color}<span class="connection-color" data-conn={color} aria-hidden="true"></span>{/if}
     <span class="connection-label"><strong>{connection.name}</strong><span class="connection-username">{` (${connection.username})`}</span></span>
+    {#if environment}<span class="environment" data-conn={color} title={environment}>{environment}</span>{/if}
   </button>
+  {#if active}
+    <button type="button" class="icon-button disconnect-button" {disabled}
+      aria-label={`Disconnect ${connection.name}`} title={`Disconnect ${connection.name}`} on:click={disconnect}>
+      <Icon name="disconnect" size={16} />
+    </button>
+  {/if}
   <ActionMenu bind:this={actions} contextOnly ariaLabel={`Actions for ${connection.name}`} items={items} onSelect={handleAction} />
 </article>
 
@@ -142,7 +163,8 @@
   }
 
   .connection-select {
-    display: block;
+    display: flex;
+    justify-content: flex-start;
     flex: 1;
     width: 100%;
     min-width: 0;
@@ -169,6 +191,34 @@
   }
 
   .connection-select:focus-visible { outline-offset: -2px; }
+
+  .connection-color { flex: 0 0 6px; height: 6px; background: var(--accent); }
+
+  .environment {
+    flex-shrink: 0;
+    max-width: 40%;
+    padding: 0 4px;
+    border-radius: 2px;
+    background: var(--surface-3);
+    color: var(--ink-muted);
+    font: 10px/16px var(--font-mono);
+    text-transform: uppercase;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .environment[data-conn] { color: var(--accent); background: var(--accent-soft); }
+
+  .disconnect-button {
+    flex: 0 0 28px;
+    border: 0;
+    background: transparent;
+    color: var(--ink-muted);
+  }
+
+  .disconnect-button:hover:not(:disabled) { background: var(--surface-3); color: var(--ink); }
+  .disconnect-button:focus-visible { outline-offset: -2px; }
 
   .connection-label {
     display: block;

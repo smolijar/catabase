@@ -204,6 +204,7 @@
   let showUpdatePreview = false;
   let discardRunConfirmation: { changeCount: number; resolve: (confirmed: boolean) => void } | null = null;
   let schemaRequest = 0;
+  let schemaRetryRequest = 0;
 
   let showConnectionModal = false;
   let connectionForm: ConnectionInput = emptyConnection();
@@ -346,7 +347,7 @@
       transactionIdle: txStatusKnown && !txStatus.active
     }), (id) => {
       const connection = connections.find(candidate => candidate.id === id);
-      if (connection) void testSavedConnection(connection);
+      if (connection) void testSavedConnection(connection, true);
     });
     const nativeFocus = createWindowFocusTracker(() => getCurrentWindow().isFocused(), focused => {
       updateFocused = focused;
@@ -1307,12 +1308,12 @@
         editMode: false,
         session: current.session ? { ...current.session, data: { ...current.session.data, rows: cloneRows(current.originalRows) } } : null
       });
-      void testSavedConnection(active);
       await loadConnections();
       poolStats = null;
       flash(`Using ${active.name}.`);
       void refreshTxStatus();
       void loadConnectionStats();
+      void testSavedConnection(active);
     } catch (error) {
       flash(errorMessage(error), true);
     } finally {
@@ -1320,10 +1321,13 @@
     }
   }
 
-  function testSavedConnection(connection: ConnectionRecord) {
-    return connectionTester.test(connection.id, () => withTimeout(
+  function testSavedConnection(connection: ConnectionRecord, automatic = false) {
+    const id = connection.id;
+    // A routine check on a healthy connection shouldn't re-reflect an empty database.
+    const retrySchema = !automatic || connectionTests[id]?.status !== 'success';
+    return connectionTester.test(id, () => withTimeout(
       api.testConnection(connection), connectionTestTimeout(connection.options), 'Connection test timed out.'
-    ));
+    ), retrySchema ? () => retryMissingSchema(id) : undefined);
   }
 
   function testCurrentConnection() {
@@ -1347,7 +1351,7 @@
       await loadConnections();
       void refreshTxStatus();
       void loadConnectionStats();
-      flash('Disconnected. Saved connection and query drafts kept; existing results are read-only.');
+      flash('Disconnected');
     } catch (error) {
       flash(errorMessage(error), true);
     } finally {
@@ -1505,6 +1509,13 @@
     await refreshSchema();
   }
 
+  function retryMissingSchema(connectionId: string) {
+    if (!workspaceLoaded || closingWorkspace || connectionMutation || operation || txStatus.active || connectionId !== tabConnectionId) return;
+    // If reflection started before the connection check passed, let it finish first.
+    if (schemaLoading) schemaRetryRequest = schemaRequest;
+    else if (schemaError || !schemaItems.length) void refreshSchema();
+  }
+
   async function refreshSchema() {
     const connectionId = tabConnectionId;
     if (!connectionId) return;
@@ -1515,9 +1526,12 @@
       const tree = await api.introspectSchema(connectionId);
       if (request === schemaRequest && connectionId === tabConnectionId) schemaItems = tree.schemas;
     } catch (error) {
-      if (request === schemaRequest) schemaError = errorMessage(error);
+      if (request === schemaRequest && connectionId === tabConnectionId) schemaError = errorMessage(error);
     } finally {
-      if (request === schemaRequest) schemaLoading = false;
+      if (request === schemaRequest) {
+        schemaLoading = false;
+        if (request === schemaRetryRequest) retryMissingSchema(connectionId);
+      }
     }
   }
 
@@ -2009,6 +2023,7 @@
                   <ConnectionCard
                     {connection}
                     active={connection.id === tabConnectionId}
+                    appearance={connection.id === tabConnectionId ? connectionAppearance : appearances[connection.id]}
                     disabled={running || Boolean(connectionMutation)}
                     onActivate={() => activateConnection(connection.id)}
                     onDisconnect={() => disconnectConnection(connection.id)}

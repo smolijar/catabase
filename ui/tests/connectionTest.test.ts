@@ -41,14 +41,17 @@ test('repeated clicks share the in-flight test instead of opening duplicate conn
   const tester = harness();
   const probe = deferred();
   let calls = 0;
-  const first = tester.test('zenbase', () => { calls++; return probe.promise; });
-  const second = tester.test('zenbase', () => { calls++; return Promise.resolve(); });
+  let reconnects = 0;
+  const onSuccess = () => { reconnects++; };
+  const first = tester.test('zenbase', () => { calls++; return probe.promise; }, onSuccess);
+  const second = tester.test('zenbase', () => { calls++; return Promise.resolve(); }, onSuccess);
   assert.equal(first, second);
   await Promise.resolve();
   assert.equal(calls, 1);
   probe.resolve();
   await first;
   assert.deepEqual(tester.changes.map(([, state]) => state?.status), ['testing', 'success']);
+  assert.equal(reconnects, 1);
 });
 
 test('late results stay scoped to their connection rather than another visible tab', async () => {
@@ -80,7 +83,7 @@ test('editing a connection invalidates an old probe even if it finishes after th
 test('deleting a connection prevents its late success from restoring a health indicator', async () => {
   const tester = harness();
   const probe = deferred();
-  const result = tester.test('zenbase', () => probe.promise);
+  const result = tester.test('zenbase', () => probe.promise, () => assert.fail('An invalidated probe cannot trigger schema recovery'));
   tester.invalidate('zenbase');
   probe.resolve();
   await result;

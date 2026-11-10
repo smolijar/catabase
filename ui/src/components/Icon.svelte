@@ -6,6 +6,7 @@
     | 'close'
     | 'copy'
     | 'database'
+    | 'disconnect'
     | 'download'
     | 'edit'
     | 'ellipsis'
@@ -50,6 +51,8 @@
     <ellipse cx="12" cy="5" rx="7" ry="3" />
     <path d="M5 5v7c0 1.7 3.1 3 7 3s7-1.3 7-3V5" />
     <path d="M5 12v7c0 1.7 3.1 3 7 3s7-1.3 7-3v-7" />
+  {:else if name === 'disconnect'}
+    <path d="M2 12h3m0-4h3a4 4 0 0 1 0 8H5V8Zm6.5 2H14m-2.5 4H14m3-6h2v8h-2m2-4h3" />
   {:else if name === 'schema'}
     <rect x="3" y="3" width="7" height="6" rx="1.5" />
     <rect x="14" y="15" width="7" height="6" rx="1.5" />
