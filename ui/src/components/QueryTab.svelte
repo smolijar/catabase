@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { literalTextAttributes } from '../lib/textInput';
   import { onDestroy } from 'svelte';
   import ActionMenu from './ActionMenu.svelte';
   import Icon from './Icon.svelte';
@@ -169,7 +170,7 @@
 
 <div data-tab-chip-id={id} class="tab-chip" class:active class:dragging class:drop-before={dropSide === 'before'} class:drop-after={dropSide === 'after'}>
   {#if renaming}
-    <div class="tab-rename"><input aria-label="Tab name" value={renameValue} on:input={(event) => onRenameValue(event.currentTarget.value)} on:keydown={onRenameKeydown} on:blur={onRenameBlur} /></div>
+    <div class="tab-rename"><input {...literalTextAttributes} aria-label="Tab name" value={renameValue} on:input={(event) => onRenameValue(event.currentTarget.value)} on:keydown={onRenameKeydown} on:blur={onRenameBlur} /></div>
   {:else}
     <button
       bind:this={label}

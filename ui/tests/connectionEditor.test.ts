@@ -104,7 +104,7 @@ test('Options exposes bounded server timeouts and a clearly scoped read-only def
   assert.match(html, /Connection timeout \(seconds\)/);
   assert.match(html, /min="1" max="300"/);
   assert.match(html, /min="0" max="86400"[^>]*value="30"/);
-  assert.match(html, /type="checkbox" checked/);
+  assert.match(html, /type="checkbox" role="switch" checked/);
   assert.match(html, /Read-only by default/);
   assert.match(html, /Explicit SQL can override/);
   assert.equal(connectionTestTimeout(), 12000);

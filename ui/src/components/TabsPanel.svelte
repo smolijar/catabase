@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { literalTextAttributes } from '../lib/textInput';
   import Icon from './Icon.svelte';
   import type { ArchivedTab, WorkspaceTab } from '../lib/workspace';
   import type { ConnectionRecord } from '../lib/types';
@@ -23,7 +24,7 @@
 </div>
 <label class="search-field">
   <Icon name="search" size={15} />
-  <input aria-label="Search tabs" placeholder="Search names, SQL, connections…" bind:value={search} />
+  <input {...literalTextAttributes} aria-label="Search tabs" placeholder="Search names, SQL, connections…" bind:value={search} />
   {#if search}<button aria-label="Clear tab search" on:click={() => search = ''}><Icon name="close" size={13} /></button>{/if}
 </label>
 <section aria-label="Open tabs">

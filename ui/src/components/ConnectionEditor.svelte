@@ -1,5 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import Switch from './Switch.svelte';
+  import { literalTextAttributes } from '../lib/textInput';
   import { CONNECTION_COLORS } from '../lib/appearance';
   import type { ConnectionAppearance } from '../lib/appearance';
   import type { ConnectionInput } from '../lib/types';
@@ -100,17 +102,17 @@
   </div>
   <div class="connection-editor-body" bind:this={body}>
   <div class="connection-panel" id="connection-editor-connection-panel" role="tabpanel" aria-labelledby="connection-editor-connection-tab" hidden={section !== 'connection'}>
-    <label>Name <input disabled={saving} bind:value={connection.name} on:input={onConnectionInput} required /></label>
-    <label>Host <input disabled={saving} bind:value={connection.host} on:input={onConnectionInput} required /></label>
+    <label>Name <input {...literalTextAttributes} disabled={saving} bind:value={connection.name} on:input={onConnectionInput} required /></label>
+    <label>Host <input {...literalTextAttributes} disabled={saving} bind:value={connection.host} on:input={onConnectionInput} required /></label>
     <div class="form-grid">
-      <label>Port <input disabled={saving} type="number" min="1" max="65535" bind:value={connection.port} on:input={onConnectionInput} required /></label>
-      <label>Database <input disabled={saving} bind:value={connection.database} on:input={onConnectionInput} required /></label>
+      <label>Port <input {...literalTextAttributes} disabled={saving} type="number" min="1" max="65535" bind:value={connection.port} on:input={onConnectionInput} required /></label>
+      <label>Database <input {...literalTextAttributes} disabled={saving} bind:value={connection.database} on:input={onConnectionInput} required /></label>
     </div>
-    <label>Username <input disabled={saving} bind:value={connection.username} on:input={onConnectionInput} required /></label>
-    <label>Password <input disabled={saving} type="password" bind:value={connection.password} on:input={onConnectionInput} /></label>
-    <label class="checkbox"><input disabled={saving} type="checkbox" bind:checked={connection.ssl} on:change={onConnectionInput} /> Use SSL</label>
+    <label>Username <input {...literalTextAttributes} disabled={saving} bind:value={connection.username} on:input={onConnectionInput} required /></label>
+    <label>Password <input {...literalTextAttributes} disabled={saving} type="password" bind:value={connection.password} on:input={onConnectionInput} /></label>
+    <Switch label="Use SSL" bind:checked={connection.ssl} disabled={saving} onChange={onConnectionInput} />
     <label>Connection URL
-      <input disabled={saving} value={url} bind:this={urlInput} spellcheck="false" autocomplete="off"
+      <input {...literalTextAttributes} disabled={saving} value={url} bind:this={urlInput} autocomplete="off"
         aria-describedby="connection-url-help connection-url-error" aria-invalid={Boolean(urlError)}
         on:beforeinput={beforeUrlInput} on:paste={pasteUrl}
         on:input={() => updateUrl(urlInput.value, urlInput.selectionStart ?? urlInput.value.length)} />
@@ -128,23 +130,23 @@
           aria-pressed={appearance.color === color} disabled={saving} on:click={() => appearance = { ...appearance, color }}></button>
       {/each}
     </div>
-    <label>Environment label <input disabled={saving} maxlength="16" placeholder="e.g. PROD, LOCAL" bind:value={appearance.environment} /></label>
+    <label>Environment label <input {...literalTextAttributes} disabled={saving} maxlength="16" placeholder="e.g. PROD, LOCAL" bind:value={appearance.environment} /></label>
     <p>Color and label identify the connection; they do not change its database permissions.</p>
     <p>Changes preview in the workspace when this connection is selected. Close without saving to revert.</p>
   </div>
   <div class="connection-panel" id="connection-editor-options-panel" role="tabpanel" aria-labelledby="connection-editor-options-tab" hidden={section !== 'options'}>
     <label>Connection timeout (seconds)
-      <input type="number" min="1" max="300" step="1" required disabled={saving} bind:value={options.connectTimeoutSeconds} />
+      <input {...literalTextAttributes} type="number" min="1" max="300" step="1" required disabled={saving} bind:value={options.connectTimeoutSeconds} />
     </label>
     <p>Time allowed to connect or wait for an available pooled connection (1–300 seconds).</p>
     <label>Query timeout (seconds)
-      <input type="number" min="0" max="86400" step="1" required disabled={saving} bind:value={options.queryTimeoutSeconds} />
+      <input {...literalTextAttributes} type="number" min="0" max="86400" step="1" required disabled={saving} bind:value={options.queryTimeoutSeconds} />
     </label>
     <label>Lock timeout (seconds)
-      <input type="number" min="0" max="86400" step="1" required disabled={saving} bind:value={options.lockTimeoutSeconds} />
+      <input {...literalTextAttributes} type="number" min="0" max="86400" step="1" required disabled={saving} bind:value={options.lockTimeoutSeconds} />
     </label>
     <p>PostgreSQL cancels statements or lock waits that exceed these limits. Use 0 to keep the server default.</p>
-    <label class="checkbox"><input type="checkbox" disabled={saving} bind:checked={options.readOnly} /> Read-only by default</label>
+    <Switch label="Read-only by default" bind:checked={options.readOnly} disabled={saving} />
     <p>Starts PostgreSQL transactions read-only and disables cell editing. Explicit SQL can override the session default; use a read-only database role for enforced access restrictions.</p>
     <p>Connection and option changes apply on Save and reset affected results and pooled sessions. Finish any open transaction first.</p>
   </div>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Switch from './Switch.svelte';
   import type { UpdateState } from '../lib/appUpdates';
   export let state: UpdateState;
   export let automatic = true;
@@ -13,7 +14,7 @@
 <section class="settings-card" aria-label="App updates">
   <div class="settings-card-head"><strong>App updates</strong><span>{state.status ? `v${state.status.currentVersion}` : 'Loading…'}</span></div>
   {#if state.status?.enabled}
-    <label class="auto-check"><input type="checkbox" checked={automatic} on:change={(event) => onAutomatic(event.currentTarget.checked)} />Check automatically</label>
+    <Switch label="Check automatically" checked={automatic} onChange={onAutomatic} />
     <p>Checks when the app is in the foreground, at most every four hours. Installing an update restarts Catabase.</p>
     {#if state.update}
       <p class="available">Version {state.update.version} is available.</p>
@@ -36,8 +37,6 @@
 </section>
 
 <style>
-  .auto-check { display: flex; align-items: center; gap: 8px; }
-  .auto-check input { width: auto; }
   .available { color: var(--accent); }
   .update-error { color: var(--danger); }
   .checked-at { font-size: 11px; }

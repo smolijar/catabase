@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { literalTextAttributes } from '../lib/textInput';
   import { onMount } from 'svelte';
   import Dropdown from './Dropdown.svelte';
   import ForeignKeyOption from './ForeignKeyOption.svelte';
@@ -59,7 +60,7 @@
     {#if target.unavailableReason}
       <p class="fk-status">{target.unavailableReason}</p>
     {:else}
-      <input type="search" aria-label="Search referenced values" placeholder="Search keys or row preview…" maxlength="512" bind:value={search} {disabled} on:keydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); } }} />
+      <input {...literalTextAttributes} type="search" aria-label="Search referenced values" placeholder="Search keys or row preview…" maxlength="512" bind:value={search} {disabled} on:keydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); } }} />
       {#if state.loading}<p class="fk-status" role="status">Loading referenced values…</p>
       {:else if state.error || metadataChanged}
         <p class="fk-error" role="alert">{state.error || 'This relationship changed. Refresh the schema and re-run the query.'}</p>

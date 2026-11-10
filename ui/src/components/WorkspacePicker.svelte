@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { literalTextAttributes } from '../lib/textInput';
   import { tick } from 'svelte';
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
@@ -36,7 +37,7 @@
 
 <Modal {label} {onClose}>
   <div class="picker">
-    <div class="picker-head"><Icon name="search" size={16} /><input bind:this={input} bind:value={search} {placeholder} aria-label={label} role="combobox" aria-expanded="true" aria-controls="workspace-picker-list" aria-autocomplete="list" aria-activedescendant={matches.length ? `picker-option-${selected}` : undefined} on:keydown={keydown} /><button aria-label={`Close ${label.toLowerCase()}`} on:click={onClose}><Icon name="close" size={16} /></button></div>
+    <div class="picker-head"><Icon name="search" size={16} /><input {...literalTextAttributes} bind:this={input} bind:value={search} {placeholder} aria-label={label} role="combobox" aria-expanded="true" aria-controls="workspace-picker-list" aria-autocomplete="list" aria-activedescendant={matches.length ? `picker-option-${selected}` : undefined} on:keydown={keydown} /><button aria-label={`Close ${label.toLowerCase()}`} on:click={onClose}><Icon name="close" size={16} /></button></div>
     <div class="picker-list" bind:this={list} id="workspace-picker-list" role="listbox" aria-label={label}>
       {#each matches as item, index (item.id)}
         {#if index === 0 || matches[index - 1].group !== item.group}<div class="group-label" role="presentation">{item.group}</div>{/if}

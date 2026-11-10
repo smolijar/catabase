@@ -1,10 +1,12 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
+  import Switch from './Switch.svelte';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import { defaultExplainOptions, explainStageLabel } from '../lib/explain';
   import type { ExplainOptions, ExplainState } from '../lib/explain';
   import { formatRunningDuration } from '../lib/status';
+  import { literalTextAttributes } from '../lib/textInput';
   export let query: string;
   export let connectionName: string;
   export let transactionActive: boolean;
@@ -36,17 +38,17 @@
     {#if !state.result}
       <section aria-label="Query preview"><label for="explain-query">Query</label><pre id="explain-query" class="query-preview">{query}</pre></section>
       <label for="explain-preamble">Explain preamble</label>
-      <textarea id="explain-preamble" class="preamble" rows="2" spellcheck="false" bind:value={options.preamble} disabled={state.busy}></textarea>
-      <label class="check-option"><input type="checkbox" bind:checked={options.useSecondResult} disabled={state.busy} />Use second result</label>
+      <textarea {...literalTextAttributes} id="explain-preamble" class="preamble" rows="2" bind:value={options.preamble} disabled={state.busy}></textarea>
+      <Switch label="Use second result" bind:checked={options.useSecondResult} disabled={state.busy} />
       <p class="help">{options.useSecondResult ? 'Run EXPLAIN twice and keep the second plan, after the first run has warmed the cache.' : 'Run EXPLAIN once and keep that plan.'}</p>
       <div class="effect-note">With ANALYZE, the query executes{options.useSecondResult ? ' twice' : ''}, including writes. Auto transaction is bypassed. {transactionActive ? 'This will use your open transaction.' : 'No transaction will be opened; writes can commit immediately.'}</div>
-      <label class="check-option"><input type="checkbox" bind:checked={options.share} disabled={state.busy} />Share on Dalibo</label>
+      <Switch label="Share on Dalibo" bind:checked={options.share} disabled={state.busy} />
       <p class="help">{options.share ? 'Send the plan, SQL, title and comments to explain.dalibo.com. Anyone with the returned link can view them.' : 'Keep the plan in this dialog. Nothing is sent to Dalibo.'}</p>
     {/if}
     {#if !state.result || state.result.shareError}
       <div class="metadata-fields">
-        <label for="explain-title">Title <span>(optional)</span></label><input id="explain-title" bind:value={options.title} disabled={state.busy} placeholder="" />
-        <label for="explain-comments">Comments <span>(optional)</span></label><textarea id="explain-comments" rows="2" bind:value={options.comments} disabled={state.busy}></textarea>
+        <label for="explain-title">Title <span>(optional)</span></label><input {...literalTextAttributes} id="explain-title" bind:value={options.title} disabled={state.busy} placeholder="" />
+        <label for="explain-comments">Comments <span>(optional)</span></label><textarea {...literalTextAttributes} id="explain-comments" rows="2" bind:value={options.comments} disabled={state.busy}></textarea>
       </div>
     {/if}
     {#if state.error}<p class="error-message" role="alert">{state.error}</p>{/if}
@@ -94,8 +96,6 @@
   .plan-preview { max-height: 280px; }
   textarea { resize: vertical; min-height: 48px; width: 100%; }
   .preamble { font: 12px/18px var(--font-mono); }
-  .check-option { display: flex; align-items: center; gap: 8px; color: var(--ink); font-size: 13px; }
-  .check-option input { width: auto; margin: 0; }
   .help { margin: -5px 0 0; font-size: 11px; line-height: 16px; color: var(--ink-muted); }
   .effect-note { padding: 8px 10px; border-left: 2px solid var(--warn); background: var(--accent-soft); color: var(--ink-muted); font-size: 11px; line-height: 17px; }
   .metadata-fields { display: grid; gap: 6px; }

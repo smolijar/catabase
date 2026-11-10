@@ -38,6 +38,7 @@
   import { AUTO_UPDATE_CHECK_KEY, createUpdateChecker, initialUpdateState, updateInstallBlock } from './lib/appUpdates';
   import type { UpdateProgress } from './lib/appUpdates';
   import { formatRunningDuration } from './lib/status';
+  import { literalTextAttributes } from './lib/textInput';
   import { canRequestSupermaven } from './lib/supermavenInline';
   import { createHistorySearch, groupHistory } from './lib/history';
   import type { HistorySearchState } from './lib/history';
@@ -2049,7 +2050,7 @@
           </div>
           <label class="search-field" aria-label="Search schema">
             <Icon name="search" size={15} />
-            <input placeholder="Tables, columns, types…" bind:value={schemaSearch} />
+            <input {...literalTextAttributes} placeholder="Tables, columns, types…" bind:value={schemaSearch} />
             {#if schemaSearch}<button aria-label="Clear schema search" on:click={() => (schemaSearch = '')}><Icon name="close" size={13} /></button>{/if}
           </label>
           {#if schemaLoading}<p class="empty">Loading schema...</p>{/if}
@@ -2093,7 +2094,7 @@
           </div>
           <label class="search-field" aria-label="Search query history">
             <Icon name="search" size={15} />
-            <input placeholder="Search query history…" bind:value={historySearch} on:input={queueHistorySearch} />
+            <input {...literalTextAttributes} placeholder="Search query history…" bind:value={historySearch} on:input={queueHistorySearch} />
             {#if historySearch}<button aria-label="Clear history search" on:click={() => { historySearch = ''; void refreshHistory(); }}><Icon name="close" size={13} /></button>{/if}
           </label>
           {#if historySaveError}<p class="error-text" role="alert">{historySaveError}</p>{/if}
@@ -2134,7 +2135,7 @@
             <label>
               Maximum connections
               <div class="inline-control">
-                <input type="number" min="1" max="32" bind:value={poolSizeInput} />
+                <input {...literalTextAttributes} type="number" min="1" max="32" bind:value={poolSizeInput} />
                 <button disabled={running || Boolean(connectionMutation)} on:click={savePoolSize}>Save</button>
               </div>
             </label>

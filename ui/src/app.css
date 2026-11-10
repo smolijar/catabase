@@ -224,8 +224,6 @@ html:not([data-conn='none']) .status-bar { background: var(--accent-soft); }
 .section-tabs button { min-height: 32px; border: 0; border-radius: 0; background: transparent; color: var(--ink-muted); padding: 4px 12px; }
 .section-tabs button:focus-visible { outline-offset: -4px; }
 .form-grid { display: grid; grid-template-columns: 140px 1fr; gap: 12px; }
-.checkbox { display: flex; align-items: center; gap: 8px; }
-.checkbox input { width: auto; }
 .update-review p { color: var(--ink-muted); font-size: 13px; line-height: 20px; }
 .update-review pre { padding: 12px; border: 1px solid var(--line); background: var(--surface-1); border-radius: 4px; max-height: 50vh; overflow: auto; white-space: pre-wrap; line-height: 20px; font-size: 12px; margin: 0; }
 .dropdown { position: relative; width: 100%; min-width: 0; }
