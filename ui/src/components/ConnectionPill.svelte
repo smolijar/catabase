@@ -39,6 +39,7 @@
   class:stale={stale && !running}
   class:testing={busy}
   class:failed={health === 'error' && !running}
+  tabindex={compact ? -1 : undefined}
   disabled={disabled || busy}
   aria-busy={busy}
   aria-label={connection ? `${running ? activity === 'cancelling' ? 'Cancelling on' : 'Running on' : testing ? 'Testing' : 'Test'} ${connection.name}${!running && stale ? ': check is stale' : !running && error ? `: ${error}` : ''}` : 'Choose connection'}

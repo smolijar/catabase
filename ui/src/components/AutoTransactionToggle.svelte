@@ -17,6 +17,7 @@
   aria-label="Auto transaction"
   aria-pressed={enabled}
   aria-busy={busy}
+  tabindex={compact ? -1 : undefined}
   title={`${description} Changing this setting never commits or ends an open transaction.`}
   disabled={disabled || busy}
   on:click={() => onChange(!enabled)}

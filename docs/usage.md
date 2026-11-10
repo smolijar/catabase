@@ -73,7 +73,7 @@ Applying changes is atomic. With auto transaction enabled, or inside an existing
 
 ### Query timing
 
-Click a successful query's status-bar duration to inspect the timing breakdown: SQL selection, connection/setup, preparation, metadata, execution/fetch, row decoding, history saving, response/IPC and UI update. Automatic paging reports the latest batch.
+Click a successful query's status-bar duration or choose **Show query timing** in workspace search (`Cmd/Ctrl+K`). The breakdown includes SQL selection, connection setup, preparation, metadata, execution and fetch, row decoding, history saving, response and IPC, and UI update. Automatic paging reports the latest batch.
 
 These are client-side wall-clock spans. The status-bar duration covers preparation through row decoding; it is not PostgreSQL's `EXPLAIN` execution time. Server execution and network transfer share one span, response/IPC is an estimated residual, and the UI span stops after DOM updates rather than browser paint.
 

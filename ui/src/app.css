@@ -1,11 +1,16 @@
 :root { color: var(--ink); background: var(--surface-0); font: 13px/20px var(--font-sans); font-synthesis: none; text-rendering: optimizeLegibility; font-variant-numeric: tabular-nums; }
 * { box-sizing: border-box; }
-body { margin: 0; overflow: hidden; }
+body { margin: 0; overflow: hidden; -webkit-user-select: none; user-select: none; }
+:where(input, textarea, [contenteditable]:not([contenteditable='false']), pre, [data-selectable-text]) {
+  -webkit-user-select: text;
+  user-select: text;
+}
 button, input, select, textarea { font: inherit; }
 button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 28px; padding: 3px 10px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--surface-1); color: var(--ink); cursor: pointer; transition: background 120ms ease-out, color 120ms ease-out, border-color 120ms ease-out; }
 button:hover:not(:disabled) { background: var(--surface-2); }
 button.active { background: var(--accent-soft); color: var(--accent); }
-button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible, [role='separator']:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+button:focus-visible, summary:focus-visible, [role='separator']:focus-visible { outline: 1px solid var(--focus); outline-offset: -2px; }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 button:disabled, button[aria-disabled='true'] { opacity: .45; cursor: not-allowed; }
 button.primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; }
 button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
@@ -29,7 +34,7 @@ kbd { border: 1px solid var(--line); border-radius: 2px; background: var(--surfa
 /* Native macOS controls are overlaid at x=14, y=20 (tauri.conf.json).
    Leave them unobstructed and align the app header in the same titlebar row. */
 .app-shell.native-titlebar { grid-template-rows: 48px minmax(0, 1fr) 24px; }
-.native-titlebar > .toolbar { padding-left: 90px; user-select: none; -webkit-user-select: none; }
+.native-titlebar > .toolbar { padding-left: 90px; }
 html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); }
 .brand { gap: 8px; min-width: 0; flex-shrink: 0; }
 .wordmark { font: 16px/16px 'Silkscreen', var(--font-mono); letter-spacing: -.5px; white-space: nowrap; }
@@ -150,7 +155,7 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .tab-label:hover:not(:disabled) { background: transparent; }
 /* Focus belongs to the tab, not its rounded label button. Keep the ring inside
    the scrolling strip and separate from the selected tab's top edge. */
-.tab-chip:has(> .tab-label:focus-visible) { outline: 2px solid var(--focus); outline-offset: -4px; }
+.tab-chip:has(> .tab-label:focus-visible) { outline: 1px solid var(--focus); outline-offset: -3px; }
 .tab-label:focus-visible { outline: none; }
 .tab-close:focus-visible { outline-offset: -2px; }
 .tab-label small { color: var(--ink-faint); font-size: 11px; }
@@ -204,7 +209,6 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .status-bar { gap: 12px; min-width: 0; border-top: 1px solid var(--line); background: var(--surface-0); color: var(--ink-muted); font: 11px/16px var(--font-mono); padding: 0 8px; white-space: nowrap; }
 html:not([data-conn='none']) .status-bar { background: var(--accent-soft); }
 .status-link { min-height: 22px; padding: 2px 4px; border: 0; border-radius: 0; background: transparent; color: inherit; font-size: inherit; white-space: nowrap; }
-.status-link:focus-visible { outline-offset: -2px; }
 .status-flash { min-width: 0; overflow: hidden; margin-left: auto; color: var(--ink-muted); text-overflow: ellipsis; white-space: nowrap; }
 .status-timing { display: block; min-height: 22px; border: 0; border-radius: 0; background: transparent; padding: 2px 4px; font-size: inherit; text-align: right; }
 .cursor-position { margin-left: auto; color: var(--ink-faint); }

@@ -90,3 +90,11 @@ test('navbar and compact status-bar pills share stale, error and checking semant
     assert.match(renderPill({ status: 'testing' }, compact), /aria-busy="true"/);
   }
 });
+
+test('the footer shortcut stays clickable and the toolbar pill remains in the Tab order', () => {
+  const health = { status: 'success', checkedAt: 12345 } as const;
+  const footer = renderPill(health, true);
+  assert.match(footer, /<button[^>]*tabindex="-1"[^>]*aria-label="Test zenbase docker"/);
+  assert.doesNotMatch(footer, / disabled/);
+  assert.doesNotMatch(renderPill(health), /tabindex="-1"/);
+});

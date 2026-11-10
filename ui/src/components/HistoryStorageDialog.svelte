@@ -18,7 +18,7 @@
         <div><dt>Result snapshot <small>{entry.hasResult ? `Shared by ${entry.resultReferences} ${entry.resultReferences === 1 ? 'execution' : 'executions'}` : 'No snapshot stored. Errors and results over the 256 KiB limit retain only execution details.'}</small></dt><dd>{entry.hasResult ? formatBytes(entry.resultSize ?? 0) : 'Not stored'}</dd></div>
         <div><dt>This execution <small>Timing, connection, timestamp, errors and hash references</small></dt><dd>{formatBytes(entry.executionSize)}</dd></div>
       </dl>
-      <details><summary>SHA-256 content hashes</summary><div class="hash">Query<code>{entry.queryHash}</code></div>{#if entry.resultHash}<div class="hash">Response<code>{entry.resultHash}</code></div>{/if}</details>
+      <details><summary>SHA-256 content hashes</summary><div class="hash">Query<code data-selectable-text>{entry.queryHash}</code></div>{#if entry.resultHash}<div class="hash">Response<code data-selectable-text>{entry.resultHash}</code></div>{/if}</details>
       <p class="note">These are logical content sizes, not exclusive disk usage per item. Deleting an entry frees shared content only when no other history entry references it.</p>
     {:else if error}
       <p class="error-text" role="alert">{error}</p>
@@ -51,5 +51,5 @@
   details { font-size: 12px; }
   summary { cursor: pointer; }
   .hash { display: grid; gap: 4px; margin-top: 12px; }
-  code { overflow-wrap: anywhere; user-select: text; font-size: 11px; color: var(--ink-muted); }
+  code { overflow-wrap: anywhere; font-size: 11px; color: var(--ink-muted); }
 </style>

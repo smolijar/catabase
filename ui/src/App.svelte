@@ -260,7 +260,8 @@
       ...archivedTabs.map(t => ({ id: `closed-tab:${t.id}`, label: t.title, title: t.sql, searchText: t.sql, detail: `Reopen · ${connections.find(c => c.id === t.connectionId)?.name ?? 'No connection'} · ${formatHistoryTime(t.closedAt)}`, group: 'Closed tabs' })),
       ...schemaItems.map(item => ({ id: `table:${item.schema}.${item.name}`, label: `${item.schema}.${item.name}`, detail: `${item.columns.length} columns`, group: 'Tables & views' })),
       ...pickerHistory.entries.map(entry => ({ id: `history:${entry.id}`, label: entry.query.replace(/\s+/g, ' ').slice(0, 200), title: entry.query, detail: `#${entry.id} · ${entry.durationMs} ms · ${connections.find(c => c.id === entry.connectionId)?.name ?? 'Unavailable connection'} · ${formatHistoryTime(entry.executedAt)} · ${entry.isError ? 'Error' : entry.hasResult ? 'Snapshot' : 'SQL only'}`, group: 'History', matched: true })),
-      ...(['new', 'connections', 'schema', 'history', 'tabs', 'settings', 'find', 'format'] as const).map(id => ({ id: `command:${id}`, label: ({ new: 'New query', connections: 'Switch connection', schema: 'Browse schema', history: 'Query history', tabs: 'Browse open & closed tabs', settings: 'Settings', find: 'Find in SQL', format: 'Format SQL' })[id], detail: id === 'new' ? '⌘T' : id === 'find' ? '⌘F' : '', group: 'Commands' }))
+      ...(['new', 'connections', 'schema', 'history', 'tabs', 'settings', 'find', 'format'] as const).map(id => ({ id: `command:${id}`, label: ({ new: 'New query', connections: 'Switch connection', schema: 'Browse schema', history: 'Query history', tabs: 'Browse open & closed tabs', settings: 'Settings', find: 'Find in SQL', format: 'Format SQL' })[id], detail: id === 'new' ? '⌘T' : id === 'find' ? '⌘F' : '', group: 'Commands' })),
+      ...(statusTiming ? [{ id: 'command:query-timing', label: 'Show query timing', detail: '', group: 'Commands' }] : [])
     ];
   $: if (picker !== 'commands') pickerHistorySearch.cancel();
   $: running = operation !== null;
@@ -876,6 +877,15 @@
     }
   }
 
+  function preventWorkspaceSelection(event: Event) {
+    // WebKit also sends selectstart from the document body for Edit → Select All.
+    const target = event.target;
+    const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+    if (!element?.closest('input, textarea, [contenteditable]:not([contenteditable="false"]), pre, [data-selectable-text]')) {
+      event.preventDefault();
+    }
+  }
+
   function setTheme(next: ThemePreference) {
     theme = next;
     try { localStorage.setItem('catabase.theme', next); } catch { /* Session preference still applies. */ }
@@ -916,6 +926,7 @@
     else if (command === 'connections') picker = 'connections';
     else if (command === 'find') editorRef?.find();
     else if (command === 'format') formatSql();
+    else if (command === 'query-timing') timingDetails = statusTiming;
     else if (command === 'schema' || command === 'history' || command === 'tabs' || command === 'settings') { sidebar = command; sidebarOpen = true; }
   }
 
@@ -1908,6 +1919,8 @@
 
 </script>
 
+<svelte:document on:contextmenu={(event) => event.preventDefault()} on:selectstart={preventWorkspaceSelection} />
+
 <main class="app-shell" class:native-titlebar={nativeTitlebar} inert={closingWorkspace || Boolean(tabCloseTask)} aria-busy={Boolean(tabCloseTask)}>
   <header class="toolbar" data-tauri-drag-region={nativeTitlebar ? 'deep' : undefined}>
     <div class="brand" aria-label="catabase">
@@ -2250,7 +2263,7 @@
           </div>
         {/if}
         {#if queryError}
-          <div class="query-error">
+          <div class="query-error" data-selectable-text>
             <strong>{queryError.message}</strong>
             {#if queryError.detail}<span>Detail: {queryError.detail}</span>{/if}
             {#if queryError.hint}<span>Hint: {queryError.hint}</span>{/if}
@@ -2286,14 +2299,14 @@
   <footer class="status-bar">
     <ConnectionPill connection={activeConnection} state={activeConnection ? connectionTests[activeConnection.id] ?? null : null} activity={operation?.connectionId === tabConnectionId ? operation.cancelling ? 'cancelling' : 'running' : null} now={nowMs} compact disabled={Boolean(connectionMutation)} onTest={testCurrentConnection} onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }} />
     <AutoTransactionToggle compact enabled={settings.autoTransaction} busy={autoTransactionSaving} disabled={!workspaceLoaded || running || Boolean(connectionMutation) || closingWorkspace} onChange={setAutoTransaction} />
-    {#if activeConnection}<button class="status-link" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
-    <button class="status-link" title="Open schema browser" on:click={() => { sidebar = 'schema'; sidebarOpen = true; }}>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : 'Schema'}</button>
+    {#if activeConnection}<button class="status-link" tabindex="-1" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
+    <button class="status-link" tabindex="-1" title="Open schema browser" on:click={() => { sidebar = 'schema'; sidebarOpen = true; }}>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : 'Schema'}</button>
     <span class="draft-status">{!workspaceLoaded ? 'restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'saving drafts…' : draftStatus === 'pending' ? 'saving drafts…' : draftStatus === 'error' ? 'draft save failed' : 'drafts saved'}</span>
-    {#if updateState.update}<button class="status-link" title={`Catabase ${updateState.update.version} is available`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>Update available</button>{/if}
+    {#if updateState.update}<button class="status-link" tabindex="-1" title={`Catabase ${updateState.update.version} is available`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>Update available</button>{/if}
     {#if running}<span>Running {runningDuration}</span>{/if}
     <span class="cursor-position">Ln {cursorLine}, Col {cursorColumn}</span>
     {#if statusTiming}
-      <button class="status-flash status-timing" title="Show query timing breakdown" aria-haspopup="dialog" on:click={() => (timingDetails = statusTiming)}>{statusFlash}</button>
+      <button class="status-flash status-timing" tabindex="-1" title="Show query timing breakdown" aria-haspopup="dialog" on:click={() => (timingDetails = statusTiming)}>{statusFlash}</button>
     {:else}
       <span class="status-flash">{statusFlash}</span>
     {/if}
