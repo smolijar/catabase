@@ -69,14 +69,16 @@ export function originalEditColumns(target: EditTarget, changes: PendingChange[]
   return [...new Map([...target.keyColumns, ...changedColumns].map((column) => [column.sourceName, column])).values()];
 }
 
-export function buildRowUpdates(target: EditTarget, originalRows: Record<string, unknown>[], changes: PendingChange[]): RowUpdate[] {
+export function buildRowUpdates(target: EditTarget, originalRows: Record<string, unknown>[], changes: PendingChange[], checkOriginalValues = true): RowUpdate[] {
   return [...new Set(changes.map((change) => change.rowIndex))].map((rowIndex) => {
     const rowChanges = changes.filter((change) => change.rowIndex === rowIndex);
-    const originalColumns = originalEditColumns(target, rowChanges);
+    const guardedColumns = originalEditColumns(target, rowChanges);
+    const originalColumns = checkOriginalValues ? guardedColumns : target.keyColumns;
     return {
       schema: target.schema,
       table: target.table,
       keyColumns: target.key.columns,
+      ...(checkOriginalValues ? {} : { overwriteChangedCells: true }),
       values: Object.fromEntries(rowChanges.map((change) => [target.editableColumns.find((column) => column.name === change.column)!.sourceName!, change.newValue])),
       original: Object.fromEntries(originalColumns.map((column) => [column.sourceName!, originalRows[rowIndex][column.name]]))
     };

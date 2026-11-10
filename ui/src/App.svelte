@@ -23,6 +23,8 @@
   import type { ExplainOptions, ExplainProgress } from './lib/explain';
   import Icon from './components/Icon.svelte';
   import SqlEditor from './components/SqlEditor.svelte';
+  import SqlPreview from './components/SqlPreview.svelte';
+  import Switch from './components/Switch.svelte';
   import SidebarResizer from './components/SidebarResizer.svelte';
   import QueryTab from './components/QueryTab.svelte';
   import TabsPanel from './components/TabsPanel.svelte';
@@ -53,7 +55,7 @@
   import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, restoreSidebarWidth } from './lib/sidebarLayout';
   import { reorderTabs, tabDropTarget, tabScrollDelta } from './lib/tabDrag';
   import type { TabDrop } from './lib/tabDrag';
-  import { assessRowEditing, buildRowUpdates, originalEditColumns } from './lib/rowEditing';
+  import { assessRowEditing, buildRowUpdates } from './lib/rowEditing';
   import { sameCellValue } from './lib/resultsGrid';
   import type { EditTarget } from './lib/rowEditing';
   import { archiveTab, canUseResult, createDraftWriter, createHistoryTab, createQueryTab, duplicateQueryTab, reopenArchivedTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
@@ -61,7 +63,6 @@
   import type {
     SupermavenStatus,
     AppError,
-    ColumnMeta,
     ConnectionInput,
     ConnectionRecord,
     ConnectionStats,
@@ -71,6 +72,7 @@
     HistoryStorageStats,
     ForeignKeyLookup,
     QueryResult,
+    RowUpdate,
     SchemaItem,
     Settings,
     TxStatus
@@ -203,6 +205,8 @@
   let resultsHeight = 360;
   let resizingResults = false;
   let showUpdatePreview = false;
+  let checkOriginalValues = true;
+  let updateReviewError = '';
   let discardRunConfirmation: { changeCount: number; resolve: (confirmed: boolean) => void } | null = null;
   let schemaRequest = 0;
   let schemaRetryRequest = 0;
@@ -277,6 +281,10 @@
   $: resultUsable = Boolean(activeConnection) && canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
   $: editEligibility = assessRowEditing(result, editMode ? originalRows : result?.rows);
   $: editableColumns = editEligibility.target?.editableColumns.map((column) => column.name) ?? [];
+  $: reviewedUpdates = showUpdatePreview && resultUsable && editEligibility.target
+    && pendingChanges.every((change) => editableColumns.includes(change.column))
+    ? buildRowUpdates(editEligibility.target, originalRows, pendingChanges, checkOriginalValues)
+    : [];
   $: editDisabledReason = running || connectionMutation ? 'Wait for the current operation to finish before editing.'
     : activeConnection?.options?.readOnly ? 'Cell editing is disabled for this read-only connection.'
     : historyContext ? 'History snapshots are read-only. Open a new query to run this SQL again.'
@@ -1704,12 +1712,6 @@
     flash(`Edit mode enabled for ${target.schema}.${target.table} using ${target.key.primaryKey ? 'primary' : 'unique'} key (${target.key.columns.join(', ')}).`);
   }
 
-  function disableEditMode() {
-    if (pendingChanges.length && !confirm('Discard pending changes?')) return;
-    discardUpdates();
-    editMode = false;
-  }
-
   function updateCell(rowIndex: number, column: string, newValue: unknown) {
     updateCells(rowIndex, { [column]: newValue });
   }
@@ -1738,6 +1740,8 @@
       flash('No pending changes.');
       return;
     }
+    checkOriginalValues = true;
+    updateReviewError = '';
     showUpdatePreview = true;
   }
 
@@ -1746,23 +1750,24 @@
       flash('No pending changes.');
       return;
     }
-    const target = detectEditTarget();
-    if (!target) {
+    if (!reviewedUpdates.length) {
       flash(`Apply disabled: ${editEligibility.reason || 'Re-run the query to refresh its row key.'}`);
       return;
     }
 
+    updateReviewError = '';
     const op = beginOperation('apply', tabConnectionId);
     const editedRows = cloneRows(result!.rows);
     try {
-      const updates = buildRowUpdates(target, originalRows, pendingChanges);
-      const applied = await api.applyRowUpdates(op.connectionId, op.token, updates);
+      const applied = await api.applyRowUpdates(op.connectionId, op.token, reviewedUpdates);
       if (!isCurrentOperation(op)) return;
       patchTab(op.tabId, { originalRows: editedRows, pendingChanges: [], editMode: false });
       showUpdatePreview = false;
       flash(`${applied.updatedRows} ${applied.updatedRows === 1 ? 'row' : 'rows'} updated${applied.inTransaction ? ' in the open transaction. Commit to save.' : '.'}`);
     } catch (error) {
-      flash(normalizeAppError(error).code === '57014' ? 'Update cancelled; staged edits retained.' : `Apply failed: ${errorMessage(error)}`, normalizeAppError(error).code !== '57014');
+      const cancelled = normalizeAppError(error).code === '57014';
+      updateReviewError = cancelled ? 'Update cancelled. Staged edits retained.' : `Apply failed: ${errorMessage(error)}`;
+      flash(updateReviewError, !cancelled);
     } finally {
       finishOperation(op);
     }
@@ -1770,53 +1775,29 @@
 
   function discardUpdates() {
     if (result) result = { ...result, rows: cloneRows(originalRows) };
+    if (pendingChanges.length) flash('Pending edits discarded.');
     pendingChanges = [];
-    flash('Pending edits discarded.');
+    editMode = false;
   }
 
-  function generateUpdateSql(): string {
-    const target = detectEditTarget();
-    if (!target) {
-      return '-- Editing unavailable: the result does not contain a usable complete row key.';
-    }
-
-    const changesByRow = new Map<number, PendingChange[]>();
-    for (const change of pendingChanges) {
-      const column = columnByName(change.column);
-      if (!column || column.generated) continue;
-      const changes = changesByRow.get(change.rowIndex) ?? [];
-      changes.push(change);
-      changesByRow.set(change.rowIndex, changes);
-    }
-
-    return [
-      ...Array.from(changesByRow.entries()).map(([rowIndex, changes]) => {
-        const setSql = changes
-          .map((change) => `${quoteIdent(sourceColumnName(columnByName(change.column)))} = ${sqlLiteral(change.newValue)}`)
-          .join(', ');
-        const whereSql = originalEditColumns(target, changes)
-          .map((column) => originalValuePredicate(column, originalRows[rowIndex]?.[column.name], target))
-          .join(' AND ');
-        return `UPDATE ${quoteIdent(target.schema)}.${quoteIdent(target.table)} SET ${setSql} WHERE ${whereSql};`;
-      })
-    ]
-      .filter(Boolean)
-      .join('\n');
+  function generateUpdateSql(target: EditTarget, updates: RowUpdate[]): string {
+    const columnTypes = new Map([...target.keyColumns, ...target.editableColumns].map((column) => [column.sourceName, column.typeName]));
+    return updates.map((update) => {
+      const assignments = Object.entries(update.values).map(([column, value]) => `${quoteIdent(column)} = ${sqlLiteral(value)}`);
+      const predicates = Object.entries(update.original).map(([column, value]) => {
+        const name = quoteIdent(column);
+        const literal = sqlLiteral(value);
+        if (update.keyColumns.includes(column)) return value === null ? `${name} IS NULL` : `${name} = ${literal}`;
+        const type = columnTypes.get(column);
+        if (type === 'json' || type === 'jsonb') return `to_jsonb(${name}) IS NOT DISTINCT FROM to_jsonb(${literal}::${type})`;
+        return `${name} IS NOT DISTINCT FROM ${literal}`;
+      });
+      return `UPDATE ${quoteIdent(update.schema)}.${quoteIdent(update.table)}\nSET ${assignments.join(',\n    ')}\nWHERE ${predicates.join('\n  AND ')};`;
+    }).join('\n\n');
   }
 
   function detectEditTarget(): EditTarget | null {
     return resultUsable ? editEligibility.target : null;
-  }
-
-  function originalValuePredicate(column: ColumnMeta, value: unknown, target: EditTarget): string {
-    const name = quoteIdent(sourceColumnName(column));
-    if (target.key.columns.includes(sourceColumnName(column))) {
-      return value === null ? `${name} IS NULL` : `${name} = ${sqlLiteral(value)}`;
-    }
-    if (column.typeName === 'json' || column.typeName === 'jsonb') {
-      return `to_jsonb(${name}) IS NOT DISTINCT FROM to_jsonb(${sqlLiteral(value)}::${column.typeName})`;
-    }
-    return `${name} IS NOT DISTINCT FROM ${sqlLiteral(value)}`;
   }
 
   function setResult(next: QueryResult | null) {
@@ -1825,10 +1806,6 @@
     originalRows = next ? cloneRows(next.rows) : [];
     pendingChanges = [];
     editMode = false;
-  }
-
-  function canApplyUpdates(): boolean {
-    return !operation && !connectionMutation && resultUsable && pendingChanges.length > 0 && detectEditTarget() !== null && pendingChanges.every((change) => editableColumns.includes(change.column));
   }
 
   function normalizeAppError(error: unknown): AppError {
@@ -1852,19 +1829,11 @@
     return rows.map((row) => ({ ...row }));
   }
 
-  function columnByName(name: string): ColumnMeta | undefined {
-    return result?.columns.find((column) => column.name === name);
-  }
-
-  function sourceColumnName(column: ColumnMeta | undefined): string {
-    return column?.sourceName || column?.name || '';
-  }
-
   function sqlLiteral(value: unknown): string {
     if (value === null || value === undefined) return 'NULL';
     if (typeof value === 'number' || typeof value === 'boolean') return String(value);
     if (typeof value === 'object') value = JSON.stringify(value);
-    return `E'${String(value).replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+    return `E'${String(value).replaceAll('\\', '\\\\').replaceAll("'", "''")}'`;
   }
 
   function quoteIdent(value: string): string {
@@ -2255,8 +2224,7 @@
             <ActionMenu label="Export" ariaLabel="Export results" disabled={!result?.rows.length} items={exportItems} onSelect={handleExport} />
             {#if editMode}
               <button disabled={!pendingChanges.length || running || Boolean(connectionMutation)} on:click={previewUpdates}>Review {pendingChanges.length} {pendingChanges.length === 1 ? 'edit' : 'edits'}</button>
-              <button disabled={running || Boolean(connectionMutation)} on:click={discardUpdates}>Discard</button>
-              <button disabled={running || Boolean(connectionMutation)} on:click={disableEditMode}>Done</button>
+              <button disabled={running || Boolean(connectionMutation)} on:click={discardUpdates}>{pendingChanges.length ? 'Discard' : 'Cancel editing'}</button>
             {:else}
               <button aria-disabled={Boolean(editDisabledReason)} title={editDisabledReason || 'Edit cells using the selected primary or unique key'} on:click={enableEditMode}><Icon name="edit" size={14} /> Edit cells</button>
             {/if}
@@ -2375,13 +2343,21 @@
   <Modal label="Review cell edits" locked={running} onClose={() => (showUpdatePreview = false)}>
     <div class="modal update-review">
       <div class="panel-head"><h2>Review cell edits</h2><button disabled={running} on:click={() => (showUpdatePreview = false)}>Close</button></div>
-      <p>{pendingChanges.length} staged {pendingChanges.length === 1 ? 'change' : 'changes'} on {resultSession?.connectionName}. Rows are identified by {editEligibility.target?.key.primaryKey ? 'primary' : 'unique'} key ({editEligibility.target?.key.columns.join(', ')}); changed cells must still match their original values.</p>
+      <p>{pendingChanges.length} staged {pendingChanges.length === 1 ? 'change' : 'changes'} on {resultSession?.connectionName}. {#if editEligibility.target}Rows are identified by {editEligibility.target.key.primaryKey ? 'primary' : 'unique'} key ({editEligibility.target.key.columns.join(', ')}).{/if}</p>
       {#if txStatus.active || settings.autoTransaction}
         <p class="context-warning">{txStatus.active ? 'Changes will use the open transaction.' : 'Auto transaction will open a transaction for these changes.'} Commit to save them, or Rollback to undo them.</p>
       {/if}
-      <pre>{generateUpdateSql()}</pre>
-      {#if !detectEditTarget()}<p class="context-warning">Apply is unavailable without an unambiguous source table and a complete primary or unique key.</p>{/if}
-      <div class="row-actions"><button disabled={running} on:click={() => (showUpdatePreview = false)}>Back to results</button><button class="primary" disabled={!canApplyUpdates()} on:click={applyUpdates}>{running ? 'Applying…' : 'Apply changes'}</button></div>
+      <div>
+        <Switch label="Change only different" bind:checked={checkOriginalValues} disabled={running} />
+        <p>{checkOriginalValues ? 'Apply only if the edited cells still match their original values.' : 'Match by row key and overwrite the edited cells even if they have changed.'}</p>
+      </div>
+      {#if editEligibility.target && reviewedUpdates.length}
+        <SqlPreview sql={generateUpdateSql(editEligibility.target, reviewedUpdates)} {themeKey} />
+      {:else}
+        <p class="context-warning">Apply is unavailable without an unambiguous source table and a complete primary or unique key.</p>
+      {/if}
+      {#if updateReviewError}<p class="error-text" role="alert">{updateReviewError}</p>{/if}
+      <div class="row-actions"><button disabled={running} on:click={() => (showUpdatePreview = false)}>Back to results</button><button class="primary" disabled={running || Boolean(connectionMutation) || !reviewedUpdates.length} on:click={applyUpdates}>{running ? 'Applying…' : 'Apply changes'}</button></div>
     </div>
   </Modal>
 {/if}

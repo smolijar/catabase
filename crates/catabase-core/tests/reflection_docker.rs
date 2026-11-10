@@ -52,6 +52,7 @@ async fn statement_history_records_manual_transactions_reviewed_edits_and_atomic
     .await?;
     let update = RowUpdate {
         schema: fixture.columns[0].table_schema.clone().unwrap(), table: "catabase_history_probe".into(), key_columns: vec!["id".into()],
+        overwrite_changed_cells: false,
         values: json!({"note":"quoted ' \\ $1 value", "tags": ["x,y", "NULL", null], "payload": {"test":"$2'\\"}}).as_object().unwrap().clone(),
         original: fixture.rows[0].as_object().unwrap().clone(),
     };
@@ -442,6 +443,59 @@ fn docker_fields() -> Result<ConnectionFields, Box<dyn Error>> {
 
 #[tokio::test]
 #[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE pointing at the saved zenbase docker connection"]
+async fn reviewed_overwrite_accepts_a_stale_cell_but_still_requires_its_original_key()
+-> Result<(), Box<dyn Error>> {
+    let client = connect_client(&docker_fields()?).await?;
+    client.batch_execute(
+        "BEGIN;
+         CREATE TEMP TABLE catabase_review_overwrite_probe (id int PRIMARY KEY, note text);
+         INSERT INTO catabase_review_overwrite_probe VALUES (1, 'changed since reading'), (2, 'untouched');"
+    ).await?;
+    let schema: String = client
+        .query_one(
+            "SELECT nspname FROM pg_namespace WHERE oid = pg_my_temp_schema()",
+            &[],
+        )
+        .await?
+        .get(0);
+    let mut update: RowUpdate = serde_json::from_value(json!({
+        "schema": schema, "table": "catabase_review_overwrite_probe", "keyColumns": ["id"],
+        "values": { "note": "reviewed" }, "original": { "id": 1, "note": "original" }
+    }))?;
+    let cancelled = AtomicBool::new(false);
+    let guarded = apply_row_updates(&client, std::slice::from_ref(&update), true, &cancelled).await;
+    assert!(guarded.unwrap_err().to_string().contains("matched 0 rows"));
+
+    update.overwrite_changed_cells = true;
+    update.original.clear();
+    let missing_key =
+        apply_row_updates(&client, std::slice::from_ref(&update), true, &cancelled).await;
+    assert!(
+        missing_key
+            .unwrap_err()
+            .to_string()
+            .contains("row key is missing")
+    );
+
+    update.original.insert("id".into(), json!(1));
+    let applied = apply_row_updates(&client, &[update], true, &cancelled).await?;
+    assert_eq!(applied.updated_rows, 1);
+    let notes: Vec<String> = client
+        .query(
+            "SELECT note FROM catabase_review_overwrite_probe ORDER BY id",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(notes, ["reviewed", "untouched"]);
+    client.batch_execute("ROLLBACK").await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE pointing at the saved zenbase docker connection"]
 async fn arrays_decode_and_edit_losslessly_on_docker() -> Result<(), Box<dyn Error>> {
     let client = connect_client(&docker_fields()?).await?;
     let cache = ReflectionCache::default();
@@ -536,6 +590,7 @@ async fn arrays_decode_and_edit_losslessly_on_docker() -> Result<(), Box<dyn Err
     let schema = fixture.columns[0].table_schema.clone().unwrap();
     let mut update = RowUpdate {
         schema, table: "catabase_array_probe".into(), key_columns: vec!["id".into()],
+        overwrite_changed_cells: false,
         values: json!({"tags": r#"[-1:1]={"NULL",NULL,"a,b"}"#, "amounts": r#"{"9007199254740993","0.123456789012345678901"}"#}).as_object().unwrap().clone(),
         original: fixture.rows[0].as_object().unwrap().clone(),
     };
@@ -1038,6 +1093,7 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
         schema: fixture.columns[0].table_schema.clone().unwrap(),
         table: "catabase_reflection_probe".into(),
         key_columns: vec!["tenant".into(), "id".into()],
+        overwrite_changed_cells: false,
         values: json!({"label":"must not write"})
             .as_object()
             .unwrap()

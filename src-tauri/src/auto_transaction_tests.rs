@@ -222,6 +222,7 @@ async fn reviewed_edits_use_savepoints_inside_automatic_transaction_until_commit
         schema: original.columns[0].table_schema.clone().unwrap(),
         table: FIXTURE.into(),
         key_columns: vec!["id".into()],
+        overwrite_changed_cells: false,
         original: original.rows[0].as_object().unwrap().clone(),
         values: json!({"note": "reviewed"}).as_object().unwrap().clone(),
     };

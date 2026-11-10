@@ -18,6 +18,8 @@ pub struct RowUpdate {
     pub key_columns: Vec<String>,
     pub values: Map<String, Value>,
     pub original: Map<String, Value>,
+    #[serde(default)]
+    pub overwrite_changed_cells: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -289,7 +291,7 @@ fn build_update_sql(
                 "Generated column {name} cannot be edited."
             )));
         }
-        if !update.original.contains_key(name) {
+        if !update.overwrite_changed_cells && !update.original.contains_key(name) {
             return Err(CoreError::message(format!(
                 "Missing original value for {name}; refresh the result before editing."
             )));
@@ -318,11 +320,10 @@ fn build_update_sql(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let predicate_names = key
-        .columns
-        .iter()
-        .chain(update.values.keys())
-        .collect::<BTreeSet<_>>();
+    let mut predicate_names = key.columns.iter().collect::<BTreeSet<_>>();
+    if !update.overwrite_changed_cells {
+        predicate_names.extend(update.values.keys());
+    }
     let predicates = predicate_names.iter().map(|name| {
         let quoted = quote_ident(name);
         let is_key = key.columns.contains(name);
@@ -451,6 +452,7 @@ mod tests {
             schema: "odd\"schema".into(),
             table: "orders".into(),
             key_columns: vec!["id".into(), "tenant_id".into()],
+            overwrite_changed_cells: false,
             values: json!({"note": "'; DROP TABLE orders; --"})
                 .as_object()
                 .unwrap()

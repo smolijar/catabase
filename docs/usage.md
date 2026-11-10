@@ -65,7 +65,7 @@ Export offers CSV, TSV and JSON. You can export loaded rows or explicitly re-run
 
 **Edit cells** requires a complete primary key or usable unique key for an unambiguous source table in the selected columns. A disabled button explains the missing requirement. Expressions, generated columns, unsupported types and read-only history results cannot be edited.
 
-Stage values in the cell inspector, then review the generated SQL before applying. Updates identify rows by their original primary/unique key and check the original values of changed cells to detect stale data. The backend revalidates column/key metadata for writes. **Set NULL** changes the draft only; you still need to stage it, and non-nullable columns disable the shortcut.
+Stage values in the cell inspector, then review the generated SQL before applying. Updates identify rows by their original primary or unique key. **Change only different** is on by default and requires the edited cells to still match their original values. Turn it off to overwrite the edited cells by row key. The backend revalidates column and key metadata for writes. **Set NULL** changes the draft only. You still need to stage it, and non-nullable columns disable the shortcut.
 
 Foreign-key cells use a searchable picker of existing rows rather than free-form input. Choices include a compact row preview and key; the first 50 matches are shown. Composite picks stage all projected components together. An incomplete composite selection explains which columns are missing. These previews show committed rows, not uncommitted changes in a manual transaction.
 

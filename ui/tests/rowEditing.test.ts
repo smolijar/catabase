@@ -98,3 +98,23 @@ test('a composite FK pick produces one row update with both components and the o
     { rowIndex: 0, column: 'tenant', oldValue: 'old-tenant', newValue: 'new-tenant' }
   ]), [{ schema: 'public', table: 'items', keyColumns: ['id'], values: { parent_id: 'new-parent', tenant_id: 'new-tenant' }, original: { id: 'child', parent_id: 'old-parent', tenant_id: 'old-tenant' } }]);
 });
+
+test('turning off original-value checks keeps every original key component, including an edited key', () => {
+  const result = data(
+    [column('item_id', { sourceName: 'id' }), column('tenant_id'), column('name')],
+    [key(['id', 'tenant_id'])],
+    [{ item_id: 'old-key', tenant_id: 'tenant', name: 'old' }]
+  );
+  const target = assessRowEditing(result).target!;
+  const changes = [
+    { rowIndex: 0, column: 'item_id', oldValue: 'old-key', newValue: 'new-key' },
+    { rowIndex: 0, column: 'name', oldValue: 'old', newValue: 'new' }
+  ];
+  assert.deepEqual(buildRowUpdates(target, result.rows, changes, false), [{
+    schema: 'public', table: 'items', keyColumns: ['id', 'tenant_id'],
+    values: { id: 'new-key', name: 'new' },
+    original: { id: 'old-key', tenant_id: 'tenant' },
+    overwriteChangedCells: true
+  }]);
+  assert.throws(() => buildRowUpdates(target, result.rows, [{ ...changes[1], column: 'unknown' }], false), /not editable/);
+});

@@ -97,6 +97,7 @@ export interface RowUpdate {
   keyColumns: string[];
   values: Record<string, unknown>;
   original: Record<string, unknown>;
+  overwriteChangedCells?: boolean;
 }
 
 export interface ApplyUpdatesResult {
