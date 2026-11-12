@@ -213,8 +213,9 @@ export function parseCellDraft(column: ColumnMeta, draft: string, isNull: boolea
   const kind = cellKind(column);
   if (kind === 'array') return parsePgArray(draft).literal;
   if (kind === 'boolean') {
-    if (draft !== 'true' && draft !== 'false') throw new Error('Choose true or false.');
-    return draft === 'true';
+    const value = draft.trim().toLowerCase();
+    if (value !== 'true' && value !== 'false') throw new Error('Choose true or false.');
+    return value === 'true';
   }
   if (kind === 'integer') {
     if (!/^[+-]?\d+$/.test(draft.trim())) throw new Error('Enter a whole number, or explicitly select NULL.');

@@ -102,6 +102,7 @@ test('typed drafts distinguish empty text, SQL NULL, JSON null and preserve prec
   assert.equal(parseCellDraft(column('jsonb'), 'null', false), 'null');
   assert.equal(parseCellDraft(column('jsonb'), '{"n":9007199254740993}', false), '{"n":9007199254740993}');
   assert.equal(parseCellDraft(column('bool'), 'false', false), false);
+  assert.equal(parseCellDraft(column('bool'), '  TRUE\n', false), true);
 });
 
 test('array display, editing and copy preserve NULLs, bounds and exact element text', () => {

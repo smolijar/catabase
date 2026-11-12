@@ -1815,22 +1815,20 @@
     else void downloadResult(format, kind === 'more');
   }
 
-  function enableEditMode() {
-    if (editDisabledReason || !editEligibility.target || !result) return;
+  function enableEditMode(announce = true) {
+    if (closingWorkspace || operation || connectionMutation || editDisabledReason || !editEligibility.target || !result) return false;
+    if (editMode) return true;
     const target = editEligibility.target;
     editMode = true;
     originalRows = cloneRows(result.rows);
     pendingChanges = [];
-    flash(`Edit mode enabled for ${target.schema}.${target.table} using ${target.key.primaryKey ? 'primary' : 'unique'} key (${target.key.columns.join(', ')}).`);
-  }
-
-  function updateCell(rowIndex: number, column: string, newValue: unknown) {
-    updateCells(rowIndex, { [column]: newValue });
+    if (announce) flash(`Edit mode enabled for ${target.schema}.${target.table} using ${target.key.primaryKey ? 'primary' : 'unique'} key (${target.key.columns.join(', ')}).`);
+    return true;
   }
 
   function updateCells(rowIndex: number, values: Record<string, unknown>) {
     const columns = Object.keys(values);
-    if (!editMode || !result || !resultUsable || operation || connectionMutation || !columns.length || columns.some((column) => !editableColumns.includes(column))) return;
+    if (!result?.rows[rowIndex] || !resultUsable || !columns.length || columns.some((column) => !editableColumns.includes(column)) || !enableEditMode(false)) return false;
     result = {
       ...result,
       rows: result.rows.map((row, index) => (index === rowIndex ? { ...row, ...values } : row))
@@ -1840,6 +1838,7 @@
       const oldValue = originalRows[rowIndex]?.[column];
       if (!sameCellValue(oldValue, newValue, result.columns.find((item) => item.name === column)!, result.jsonValuesAsText, true)) pendingChanges = [...pendingChanges, { rowIndex, column, oldValue, newValue }];
     }
+    return true;
   }
 
   function lookupForeignKey(request: ForeignKeyLookup, token: string) {
@@ -2351,7 +2350,7 @@
               <button disabled={!pendingChanges.length || running || Boolean(connectionMutation)} on:click={previewUpdates}>Review {pendingChanges.length} {pendingChanges.length === 1 ? 'edit' : 'edits'}</button>
               <button disabled={running || Boolean(connectionMutation)} on:click={discardUpdates}>{pendingChanges.length ? 'Discard' : 'Cancel editing'}</button>
             {:else}
-              <button aria-disabled={Boolean(editDisabledReason)} title={editDisabledReason || 'Edit cells using the selected primary or unique key'} on:click={enableEditMode}><Icon name="edit" size={14} /> Edit cells</button>
+              <button aria-disabled={Boolean(editDisabledReason)} title={editDisabledReason || 'Edit cells using the selected primary or unique key'} on:click={() => enableEditMode()}><Icon name="edit" size={14} /> Edit cells</button>
             {/if}
           </div>
         </div>
@@ -2397,7 +2396,7 @@
           </div>
         {:else}
           {#key `${activeTab}:${resultSession?.executedAt}`}
-            <ResultsGrid {result} {editMode} {editableColumns} {editDisabledReason} schemaItems={resultSession?.connectionId === tabConnectionId ? schemaItems : []} {canLoadMore} resultContext={`${activeTab}:${resultSession?.executedAt ?? ''}`} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onEditMany={updateCells} onForeignKeyLookup={lookupForeignKey} onCancelLookup={(token) => { void api.cancelQuery(token).catch(() => {}); }} onMessage={flash} />
+            <ResultsGrid {result} {editableColumns} {editDisabledReason} schemaItems={resultSession?.connectionId === tabConnectionId ? schemaItems : []} {canLoadMore} resultContext={`${activeTab}:${resultSession?.executedAt ?? ''}`} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEditMany={updateCells} onForeignKeyLookup={lookupForeignKey} onCancelLookup={(token) => { void api.cancelQuery(token).catch(() => {}); }} onMessage={flash} />
           {/key}
           <footer class="results-foot">
             <span>{result.rows.length} loaded {result.hasMore ? '· more available' : ''}</span>

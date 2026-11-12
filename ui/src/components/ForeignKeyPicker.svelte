@@ -9,6 +9,7 @@
 
   export let targets: ForeignKeyTarget[];
   export let disabled = false;
+  export let search = '';
   export let selectedRow: Record<string, string | null> | null = null;
   export let onLookup: (request: ForeignKeyLookup, token: string) => Promise<ForeignKeyValues>;
   export let onCancel: (token: string) => void;
@@ -16,7 +17,6 @@
   export let onTargetChange: () => void = () => {};
 
   let choice = '';
-  let search = '';
   let mounted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let state: ForeignKeyLookupState = { loading: false, data: null, error: '' };
