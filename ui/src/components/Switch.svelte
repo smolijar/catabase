@@ -37,7 +37,8 @@
 
   .track {
     position: relative;
-    flex: 0 0 30px;
+    flex: none;
+    width: 30px;
     height: 16px;
     border: 1px solid var(--line-strong);
     border-radius: 8px;

@@ -2381,7 +2381,7 @@
         <p class="context-warning">{txStatus.active ? 'Changes will use the open transaction.' : 'Auto transaction will open a transaction for these changes.'} Commit to save them, or Rollback to undo them.</p>
       {/if}
       <div>
-        <Switch label="Change only different" bind:checked={checkOriginalValues} disabled={running} />
+        <Switch label="Only if unchanged" bind:checked={checkOriginalValues} disabled={running} />
         <p>{checkOriginalValues ? 'Apply only if the edited cells still match their original values.' : 'Match by row key and overwrite the edited cells even if they have changed.'}</p>
       </div>
       {#if editEligibility.target && reviewedUpdates.length}
