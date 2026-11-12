@@ -8,6 +8,7 @@
   import 'monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations';
   import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController';
   import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
+  import { initVimMode } from 'monaco-vim';
   import { onDestroy, onMount } from 'svelte';
   import { format } from 'sql-formatter';
   import { schemaGroundedSql, schemaInlineIdentifierEnd, sqlCompletionContext, sqlJoinSuggestions, supermavenSchemaContext } from '../lib/sqlCompletion';
@@ -18,6 +19,7 @@
   export let value = '';
   export let readOnly = false;
   export let fontSize = 13;
+  export let vimModeEnabled = false;
   export let themeKey = 'tuxedo:none';
   export let onPosition: (line: number, column: number) => void = () => {};
   export let supermavenEnabled = false;
@@ -82,9 +84,14 @@
     { label: 'delete rows', insertText: 'delete from ${1:table}\nwhere ${2:condition};' },
     { label: 'cte query', insertText: 'with ${1:name} as (\n  ${2:select * from table}\n)\nselect *\nfrom ${1:name};' }
   ];
+  const QUICK_SUGGESTIONS = { other: true, comments: false, strings: false };
 
   let host: HTMLDivElement;
   let editor: monaco.editor.IStandaloneCodeEditor | undefined;
+  let vimStatus: HTMLDivElement | undefined;
+  let vimAdapter: ReturnType<typeof initVimMode> | undefined;
+  let vimCommandContext: monaco.editor.IContextKey<boolean> | undefined;
+  let vimTyping = false;
   let subscription: monaco.IDisposable | undefined;
   let completionProvider: monaco.IDisposable | undefined;
   let inlineProvider: monaco.IDisposable | undefined;
@@ -122,13 +129,9 @@
       // Keep Find/Replace over the text instead of inserting a top view zone.
       find: { addExtraSpaceOnTop: false },
       minimap: { enabled: false },
-      inlineSuggest: { enabled: supermavenEnabled },
-      quickSuggestions: { other: true, comments: false, strings: false },
       readOnly,
-      suggestOnTriggerCharacters: true,
       wordBasedSuggestions: 'off',
       scrollBeyondLastLine: false,
-      tabCompletion: 'on',
       wordWrap: 'on'
     });
     if (viewState) editor.restoreViewState(viewState);
@@ -139,8 +142,9 @@
     subscription = editor.onDidChangeModelContent((event) => {
       const next = editor?.getValue() ?? '';
       if (next !== value) value = next;
-      const suggest = !event.isFlush && event.changes.some((change) => shouldTriggerSuggest(change.text));
-      const checkJoin = !event.isFlush && event.changes.some((change) => /\s$/.test(change.text));
+      if (vimCommandMode || event.isFlush) return;
+      const suggest = event.changes.some((change) => shouldTriggerSuggest(change.text));
+      const checkJoin = event.changes.some((change) => /\s$/.test(change.text));
       if (suggest || checkJoin) {
         window.setTimeout(() => {
           const model = editor?.getModel();
@@ -152,15 +156,20 @@
       }
     });
 
+    vimCommandContext = editor.createContextKey('catabaseVimCommandMode', false);
+    // The Vim adapter leaves Tab unhandled. Keep Monaco's focus navigation available.
+    const vimIndentContext = 'catabaseVimCommandMode && editorTextFocus && !editorTabMovesFocus';
+    editor.addCommand(monaco.KeyCode.Tab, () => {}, vimIndentContext);
+    editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.Tab, () => {}, vimIndentContext);
     editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.Escape, triggerSuggest);
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Space, triggerSuggest);
     editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.Backslash, () => {
-      if (!supermavenEnabled || readOnly) return;
+      if (vimCommandMode || !supermavenEnabled || readOnly) return;
       editor?.trigger('catabase', 'hideSuggestWidget', {});
       editor?.trigger('catabase', 'editor.action.inlineSuggest.trigger', {});
     });
     keydownHandler = (event) => {
-      if (!editor?.hasTextFocus()) return;
+      if (vimCommandMode || !editor?.hasTextFocus()) return;
       const isSuggestShortcut = (event.altKey && event.key === 'Escape') || ((event.metaKey || event.ctrlKey) && event.code === 'Space');
       if (!isSuggestShortcut) return;
       event.preventDefault();
@@ -198,7 +207,7 @@
 
     inlineProvider = monaco.languages.registerInlineCompletionsProvider('sql', {
       provideInlineCompletions: async (model, position, _context, token) => {
-        if (!supermavenEnabled || readOnly || !supermavenComplete || model !== editor?.getModel() || !editor.hasTextFocus()) return { items: [] };
+        if (vimCommandMode || !supermavenEnabled || readOnly || !supermavenComplete || model !== editor?.getModel() || !editor.hasTextFocus()) return { items: [] };
         const offset = model.getOffsetAt(position);
         const text = model.getValue();
         if (!text.slice(0, offset).trim() || token.isCancellationRequested) return { items: [] };
@@ -209,7 +218,7 @@
         try {
           const completion = await inlineRequester.request({ documentId: ownerTabId, text, position: offset }, abort.signal);
           const current = editor?.getPosition();
-          if (!completion || abort.signal.aborted || !supermavenEnabled || readOnly || schemaItems !== reflected || model.isDisposed() || model !== editor?.getModel() || !editor?.hasTextFocus()
+          if (!completion || abort.signal.aborted || vimCommandMode || !supermavenEnabled || readOnly || schemaItems !== reflected || model.isDisposed() || model !== editor?.getModel() || !editor?.hasTextFocus()
             || version !== model.getVersionId() || current?.lineNumber !== position.lineNumber || current.column !== position.column) return { items: [] };
           const edit = inlineEdit(completion, model.getLineContent(position.lineNumber), position.column);
           if (!edit) return { items: [] };
@@ -233,6 +242,7 @@
   });
 
   onDestroy(() => {
+    disposeVimMode();
     inlineRequester.cancel();
     subscription?.dispose();
     cursorSubscription?.dispose();
@@ -253,21 +263,55 @@
 
   $: if (editor) editor.updateOptions({ readOnly, fontSize, lineHeight: Math.round(fontSize * 20 / 13) });
   $: if (editor) applyTheme(themeKey);
+  $: if (editor && vimModeEnabled && vimStatus && !vimAdapter) {
+    vimAdapter = initVimMode(editor, vimStatus, undefined, (prompt) => {
+      if (prompt instanceof DocumentFragment) {
+        const input = prompt.querySelector('input');
+        input?.setAttribute('aria-label', 'Vim command line');
+        input?.setAttribute('writingsuggestions', 'false');
+      }
+      return prompt;
+    });
+    vimAdapter.on('vim-mode-change', ({ mode }: { mode: string }) => {
+      vimTyping = mode === 'insert' || mode === 'replace';
+    });
+  } else if (!vimModeEnabled) disposeVimMode();
+  $: vimCommandMode = vimModeEnabled && !vimTyping;
+  $: vimCommandContext?.set(vimCommandMode);
   $: if (schemaItems !== previousSchemaItems) {
     previousSchemaItems = schemaItems;
     inlineRequester.cancel();
     editor?.trigger('catabase', 'editor.action.inlineSuggest.hide', {});
   }
   $: if (editor) {
-    editor.updateOptions({ inlineSuggest: { enabled: supermavenEnabled && !readOnly } });
-    if (!supermavenEnabled || readOnly) {
+    const inlineEnabled = !vimCommandMode && supermavenEnabled && !readOnly;
+    editor.updateOptions({
+      inlineSuggest: { enabled: inlineEnabled },
+      quickSuggestions: vimCommandMode ? false : QUICK_SUGGESTIONS,
+      suggestOnTriggerCharacters: !vimCommandMode,
+      tabCompletion: vimCommandMode ? 'off' : 'on'
+    });
+    if (vimCommandMode) editor.trigger('catabase', 'hideSuggestWidget', {});
+    if (!inlineEnabled) {
       inlineRequester.cancel();
       editor.trigger('catabase', 'editor.action.inlineSuggest.hide', {});
     }
   }
 
+  function disposeVimMode() {
+    if (!vimAdapter) return;
+    const focused = document.activeElement;
+    vimAdapter.dispose();
+    vimAdapter = undefined;
+    vimTyping = false;
+    // Closing the Vim prompt refocuses Monaco. Restore focus to the control that turned Vim off.
+    if (focused instanceof HTMLElement && focused.isConnected && !host.contains(focused) && focused !== document.activeElement) {
+      focused.focus({ preventScroll: true });
+    }
+  }
+
   function triggerSuggest() {
-    if (!editor || readOnly) return;
+    if (!editor || vimCommandMode || readOnly) return;
     editor.trigger('catabase', 'editor.action.triggerSuggest', {});
   }
 
@@ -550,3 +594,6 @@
 </script>
 
 <div bind:this={host} class="editor-host"></div>
+{#if vimModeEnabled}
+  <div bind:this={vimStatus} class="vim-status" role="group" aria-label="Vim status and command line"></div>
+{/if}

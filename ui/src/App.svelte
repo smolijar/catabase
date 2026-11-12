@@ -80,6 +80,7 @@
 
   const DEFAULT_SQL = `-- Welcome to Catabase\n-- Add a PostgreSQL connection, then run SQL with Cmd/Ctrl+Enter.\nselect now() as connected_at;`;
   const PAGE_SIZE = 200;
+  const VIM_MODE_STORAGE_KEY = 'catabase.vimMode';
 
   type SidebarTab = 'connections' | 'schema' | 'history' | 'tabs' | 'settings';
   type EditorHandle = {
@@ -119,6 +120,7 @@
   let workspaceLoaded = false;
   let editorRef: EditorHandle | undefined;
   let editorFontSize = DEFAULT_EDITOR_FONT_SIZE;
+  let vimModeEnabled = false;
   let theme: ThemePreference = 'tuxedo';
   let systemLight = false;
   let appearances: Record<string, ConnectionAppearance> = {};
@@ -321,6 +323,7 @@
       appearances = restoreAppearance(localStorage.getItem(APPEARANCE_KEY));
     } catch { /* Appearance controls remain usable without storage. */ }
     try { editorFontSize = restoreEditorFontSize(localStorage.getItem(EDITOR_FONT_STORAGE_KEY)); } catch { /* Font controls still work without storage. */ }
+    try { vimModeEnabled = localStorage.getItem(VIM_MODE_STORAGE_KEY) === 'true'; } catch { /* Keep the default for this session. */ }
     try { automaticUpdates = localStorage.getItem(AUTO_UPDATE_CHECK_KEY) !== 'false'; } catch { /* Keep the default for this session. */ }
     const savedResultsHeight = Number(localStorage.getItem('catabase.resultsHeight'));
     if (Number.isFinite(savedResultsHeight) && savedResultsHeight >= 180) resultsHeight = savedResultsHeight;
@@ -889,6 +892,11 @@
   function setTheme(next: ThemePreference) {
     theme = next;
     try { localStorage.setItem('catabase.theme', next); } catch { /* Session preference still applies. */ }
+  }
+
+  function setVimMode(enabled: boolean) {
+    vimModeEnabled = enabled;
+    try { localStorage.setItem(VIM_MODE_STORAGE_KEY, String(enabled)); } catch { /* Session preference still applies. */ }
   }
 
   function saveConnectionAppearance(id: string, { color, environment }: ConnectionAppearance) {
@@ -2099,6 +2107,11 @@
             onCheck={() => void updateChecker.check()} onAutomatic={setAutomaticUpdates} onInstall={() => void installAppUpdate()}
             onReleases={() => void api.openReleases().catch(error => flash(errorMessage(error), true))} />
           <section class="settings-card">
+            <div class="settings-card-head"><strong>SQL editor</strong></div>
+            <Switch label="Vim mode" checked={vimModeEnabled} onChange={setVimMode} />
+            <p>Use Vim keybindings across SQL tabs.</p>
+          </section>
+          <section class="settings-card">
             <div class="settings-card-head"><strong>Transactions</strong></div>
             <AutoTransactionToggle enabled={settings.autoTransaction} busy={autoTransactionSaving} disabled={!workspaceLoaded || running || Boolean(connectionMutation) || closingWorkspace} onChange={setAutoTransaction} />
             <p>Read-only queries run normally. Writes, including those inside CTEs, and unrecognized SQL open a transaction until you Commit or Rollback.</p>
@@ -2191,6 +2204,7 @@
             tabId={activeTab}
             readOnly={tabKind !== 'query'}
             fontSize={editorFontSize}
+            {vimModeEnabled}
             {themeKey}
             onPosition={(line, column) => { cursorLine = line; cursorColumn = column; }}
             viewState={editorViewState}

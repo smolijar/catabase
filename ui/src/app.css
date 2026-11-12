@@ -173,6 +173,9 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .editor-pane, .editor-host { min-width: 0; min-height: 0; height: 100%; overflow: hidden; }
 .editor-pane { position: relative; display: flex; flex-direction: column; }
 .editor-host { flex: 1; }
+.vim-status { display: none; flex-shrink: 0; overflow: hidden; border-top: 1px solid var(--line); background: var(--surface-0); color: var(--ink-muted); padding: 3px 8px; font: 11px/18px var(--font-mono); white-space: nowrap; }
+.vim-status > span:first-child { margin-right: 10px; color: var(--accent); }
+.vim-status input { width: min(36ch, 55%); height: 18px; min-height: 0; padding: 0 4px; margin: 0 4px; font: inherit; }
 .results-resizer { position: relative; z-index: 3; display: grid; place-items: center; border-top: 1px solid var(--line); background: var(--surface-0); cursor: row-resize; }
 .results-resizer span { width: 32px; height: 1px; background: var(--line-strong); }
 .results-resizer:hover span, .results-resizer:focus-visible span, .resizing .results-resizer span { background: var(--accent); }

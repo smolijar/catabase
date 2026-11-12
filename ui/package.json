@@ -16,6 +16,7 @@
     "@tauri-apps/plugin-clipboard-manager": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "monaco-editor": "^0.52.0",
+    "monaco-vim": "0.4.4",
     "sql-formatter": "^15.9.0",
     "svelte": "^5.0.0"
   },

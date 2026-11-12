@@ -129,6 +129,8 @@ On macOS, the workspace header shares a row with the native traffic-light contro
 
 Editor zoom changes only the SQL font, from 8 to 48 px, and is saved locally. Option/Alt+Left/Right retains word navigation in the editor. Ordinary text copy/paste continues to work inside SQL and rename inputs.
 
+Enable **Settings → SQL editor → Vim mode** to use Vim keybindings across SQL tabs. Each tab opens in Normal mode. Press `i` to enter Insert, `Esc` to return to Normal, or `/` to search. The current mode and Vim command line appear below the editor.
+
 ## App updates
 
 **Settings → App updates** shows the installed version, checks for a newer release and displays its release notes. Builds with an embedded updater signing key check automatically while the workspace is idle and in the foreground, at most once every four hours. Turn off **Check automatically** to use manual checks only. A failed check leaves the app usable and follows the same retry interval.
