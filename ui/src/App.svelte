@@ -51,10 +51,11 @@
   import { createConnectionHealthcheck, createWindowFocusTracker } from './lib/connectionHealthcheck';
   import type { ConnectionTestState } from './lib/connectionTest';
   import { parseConnectionReference, serializeConnectionReference } from './lib/connectionClipboard';
+  import { CONNECTION_ORDER_KEY, orderConnections, restoreConnectionOrder } from './lib/connectionOrder';
   import { parseTabReference, serializeTabReference } from './lib/tabClipboard';
   import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, restoreSidebarWidth } from './lib/sidebarLayout';
-  import { reorderTabs, tabDropTarget, tabScrollDelta } from './lib/tabDrag';
-  import type { TabDrop } from './lib/tabDrag';
+  import { listDropTarget, listScrollDelta, reorderList } from './lib/listDrag';
+  import type { ListDrop } from './lib/listDrag';
   import { assessRowEditing, buildRowUpdates } from './lib/rowEditing';
   import { sameCellValue } from './lib/resultsGrid';
   import type { EditTarget } from './lib/rowEditing';
@@ -117,7 +118,7 @@
   let renameValue = '';
   let tabBar: HTMLElement;
   let draggingTab = '';
-  let tabDrop: TabDrop | null = null;
+  let tabDrop: ListDrop | null = null;
   let tabDragPointer: { x: number; y: number } | null = null;
   let tabDragFrame = 0;
   let workspaceLoaded = false;
@@ -172,6 +173,11 @@
   let pendingChanges: PendingChange[] = [];
 
   let connections: ConnectionRecord[] = [];
+  let connectionOrder: string[] = [];
+  let connectionList: HTMLUListElement | undefined;
+  let connectionDrag: { id: string; x: number; y: number } | null = null;
+  let connectionDrop: ListDrop | null = null;
+  let connectionDragFrame = 0;
   let connectionTests: Record<string, ConnectionTestState | null> = {};
   const connectionTester = createConnectionTester(
     (id, state) => { connectionTests = { ...connectionTests, [id]: state }; },
@@ -325,6 +331,7 @@
     try {
       appearances = restoreAppearance(localStorage.getItem(APPEARANCE_KEY));
     } catch { /* Appearance controls remain usable without storage. */ }
+    try { connectionOrder = restoreConnectionOrder(localStorage.getItem(CONNECTION_ORDER_KEY)); } catch { /* Keep the order in memory. */ }
     try { editorFontSize = restoreEditorFontSize(localStorage.getItem(EDITOR_FONT_STORAGE_KEY)); } catch { /* Font controls still work without storage. */ }
     try { vimModeEnabled = localStorage.getItem(VIM_MODE_STORAGE_KEY) === 'true'; } catch { /* Keep the default for this session. */ }
     try { automaticUpdates = localStorage.getItem(AUTO_UPDATE_CHECK_KEY) !== 'false'; } catch { /* Keep the default for this session. */ }
@@ -765,8 +772,11 @@
     if (y < bar.top - 16 || y > bar.bottom + 16) { tabDrop = null; return; }
     const bounds = Array.from(tabBar.querySelectorAll<HTMLElement>('[data-tab-chip-id]'))
       .filter((element) => element.dataset.tabChipId !== draggingTab)
-      .map((element) => ({ id: element.dataset.tabChipId!, left: element.getBoundingClientRect().left, right: element.getBoundingClientRect().right }));
-    tabDrop = tabDropTarget(bounds, x);
+      .map((element) => {
+        const { left, right } = element.getBoundingClientRect();
+        return { id: element.dataset.tabChipId!, start: left, end: right };
+      });
+    tabDrop = listDropTarget(bounds, x);
   }
 
   function scrollTabDrag() {
@@ -774,7 +784,7 @@
     const { x, y } = tabDragPointer;
     const bar = tabBar.getBoundingClientRect();
     if (y >= bar.top - 16 && y <= bar.bottom + 16) {
-      const delta = tabScrollDelta(bar.left, bar.right, x);
+      const delta = listScrollDelta(bar.left, bar.right, x);
       if (delta) { tabBar.scrollLeft += delta; updateTabDrag(x, y); }
     }
     tabDragFrame = requestAnimationFrame(scrollTabDrag);
@@ -785,7 +795,7 @@
     tabDragFrame = 0;
     if (!cancelled) {
       captureActive();
-      tabs = reorderTabs(tabs, draggingTab, tabDrop);
+      tabs = reorderList(tabs, draggingTab, tabDrop);
     }
     draggingTab = '';
     tabDrop = null;
@@ -796,7 +806,7 @@
     const neighbor = tabs[tabs.findIndex((tab) => tab.id === id) + direction];
     if (!neighbor) return;
     captureActive();
-    tabs = reorderTabs(tabs, id, { id: neighbor.id, side: direction < 0 ? 'before' : 'after' });
+    tabs = reorderList(tabs, id, { id: neighbor.id, side: direction < 0 ? 'before' : 'after' });
     focusTabLabel(id);
     flash('Tab order updated.');
   }
@@ -964,10 +974,81 @@
 
   async function loadConnections() {
     try {
-      connections = await withTimeout(api.listConnections(), 5000, 'Loading connections timed out.');
+      const records = await withTimeout(api.listConnections(), 5000, 'Loading connections timed out.');
+      setConnections(orderConnections(records, connectionOrder));
     } catch (error) {
       flash(`Connections unavailable: ${errorMessage(error)}`);
     }
+  }
+
+  function setConnections(next: ConnectionRecord[]) {
+    connections = next;
+    const order = next.map((connection) => connection.id);
+    if (order.length === connectionOrder.length && order.every((id, index) => id === connectionOrder[index])) return;
+    connectionOrder = order;
+    try { localStorage.setItem(CONNECTION_ORDER_KEY, JSON.stringify(order)); } catch { /* Session order still applies. */ }
+  }
+
+  function focusConnectionRow(id: string) {
+    void tick().then(() => connectionList?.querySelector<HTMLButtonElement>(`[data-connection-id="${CSS.escape(id)}"]`)?.focus());
+  }
+
+  function startConnectionDrag(id: string, x: number, y: number) {
+    connectionDrag = { id, x, y };
+    updateConnectionDrag(x, y);
+    connectionDragFrame = requestAnimationFrame(scrollConnectionDrag);
+  }
+
+  function updateConnectionDrag(x: number, y: number) {
+    const drag = connectionDrag;
+    if (!connectionList || !drag) return;
+    drag.x = x;
+    drag.y = y;
+    const { left, right, top, bottom } = connectionList.getBoundingClientRect();
+    if (x < left || x > right || y < top || y > bottom) {
+      connectionDrop = null;
+      return;
+    }
+    const bounds = Array.from(connectionList.querySelectorAll<HTMLLIElement>('[data-connection-row-id]'))
+      .filter((row) => row.dataset.connectionRowId !== drag.id)
+      .map((row) => {
+        const { top, bottom } = row.getBoundingClientRect();
+        return { id: row.dataset.connectionRowId!, start: top, end: bottom };
+      });
+    connectionDrop = listDropTarget(bounds, y);
+  }
+
+  function scrollConnectionDrag() {
+    if (!connectionList || !connectionDrag) return;
+    if (connectionDrop) {
+      const { top, bottom } = connectionList.getBoundingClientRect();
+      const { x, y } = connectionDrag;
+      const previousScroll = connectionList.scrollTop;
+      connectionList.scrollTop += listScrollDelta(top, bottom, y);
+      if (connectionList.scrollTop !== previousScroll) updateConnectionDrag(x, y);
+    }
+    connectionDragFrame = requestAnimationFrame(scrollConnectionDrag);
+  }
+
+  function finishConnectionDrag(cancelled: boolean) {
+    cancelAnimationFrame(connectionDragFrame);
+    if (!cancelled && connectionDrag) reorderConnection(connectionDrag.id, connectionDrop);
+    connectionDrag = null;
+    connectionDrop = null;
+  }
+
+  function reorderConnection(id: string, drop: ListDrop | null) {
+    const next = reorderList(connections, id, drop);
+    if (next === connections) return;
+    setConnections(next);
+    focusConnectionRow(id);
+  }
+
+  function reorderConnectionWithKeyboard(id: string, direction: number) {
+    const neighbor = connections[connections.findIndex((connection) => connection.id === id) + direction];
+    if (!neighbor) return;
+    reorderConnection(id, { id: neighbor.id, side: direction < 0 ? 'before' : 'after' });
+    flash('Connection order updated.');
   }
 
   async function loadDraft() {
@@ -1264,10 +1345,8 @@
       const saved = await api.duplicateConnection(id);
       const appearance = appearances[id];
       if (appearance) saveConnectionAppearance(saved.id, appearance);
-      const index = connections.findIndex((connection) => connection.id === id);
-      connections = [...connections.slice(0, index + 1), saved, ...connections.slice(index + 1)];
-      await tick();
-      document.querySelector<HTMLButtonElement>(`.connection-select[data-connection-id="${CSS.escape(saved.id)}"]`)?.focus();
+      setConnections(reorderList([...connections, saved], saved.id, { id, side: 'after' }));
+      focusConnectionRow(saved.id);
       flash(`${saved.name} created.`);
     } catch (error) {
       flash(`Could not duplicate connection: ${errorMessage(error)}`, true);
@@ -2027,14 +2106,24 @@
               <button class="primary" disabled={running || Boolean(connectionMutation)} on:click={openNewConnection}><Icon name="plus" size={15} /> Add connection</button>
             </div>
           {:else}
-            <ul class="connection-list" aria-label="Saved connections">
+            <ul bind:this={connectionList} class="connection-list" class:dragging={Boolean(connectionDrag)} aria-label="Saved connections">
               {#each connections as connection (connection.id)}
-                <li>
+                <li
+                  data-connection-row-id={connection.id}
+                  class:dragging={connectionDrag?.id === connection.id}
+                  class:drop-before={connectionDrop?.id === connection.id && connectionDrop.side === 'before'}
+                  class:drop-after={connectionDrop?.id === connection.id && connectionDrop.side === 'after'}
+                >
                   <ConnectionCard
                     {connection}
                     active={connection.id === tabConnectionId}
                     appearance={connection.id === tabConnectionId ? connectionAppearance : appearances[connection.id]}
                     disabled={running || Boolean(connectionMutation)}
+                    reorderable={connections.length > 1}
+                    onDragStart={(x, y) => startConnectionDrag(connection.id, x, y)}
+                    onDragMove={updateConnectionDrag}
+                    onDragEnd={finishConnectionDrag}
+                    onReorder={(direction) => reorderConnectionWithKeyboard(connection.id, direction)}
                     onActivate={() => activateConnection(connection.id)}
                     onDisconnect={() => disconnectConnection(connection.id)}
                     onEdit={() => editConnection(connection)}

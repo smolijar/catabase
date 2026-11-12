@@ -1,9 +1,9 @@
 <script lang="ts">
   import { literalTextAttributes } from '../lib/textInput';
-  import { onDestroy } from 'svelte';
   import ActionMenu from './ActionMenu.svelte';
   import Icon from './Icon.svelte';
   import { connectionClipboardAction as clipboardAction } from '../lib/connectionClipboard';
+  import { pointerDrag } from '../lib/pointerDrag';
   import { serializeTabReference } from '../lib/tabClipboard';
 
   export let id: string;
@@ -34,9 +34,6 @@
 
   let actions: ActionMenu;
   let label: HTMLButtonElement;
-  let drag: { pointerId: number; x: number; y: number; started: boolean } | null = null;
-  let suppressClick = false;
-  onDestroy(() => finishDrag(true));
   $: items = [
     { id: 'close', label: 'Close tab', disabled: closeDisabled },
     { id: 'duplicate', label: 'Duplicate tab' },
@@ -96,75 +93,9 @@
     onPaste(event.clipboardData?.getData('text/plain'));
   }
 
-  function handleClick(event: MouseEvent) {
-    if (suppressClick) {
-      suppressClick = false;
-      event.preventDefault();
-      event.stopPropagation();
-    } else {
-      label.focus({ preventScroll: true });
-      onSelect();
-    }
-  }
-
-  function startDrag(event: PointerEvent) {
-    suppressClick = false;
-    if (event.button !== 0 || !event.isPrimary || event.metaKey || event.ctrlKey || event.altKey || drag) return;
-    drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, started: false };
-    window.addEventListener('pointermove', moveDrag);
-    window.addEventListener('pointerup', endPointerDrag);
-    window.addEventListener('pointercancel', cancelPointerDrag);
-    window.addEventListener('mouseup', endMouseDrag);
-    window.addEventListener('blur', cancelDrag);
-    window.addEventListener('keydown', cancelDragWithEscape);
-  }
-
-  function moveDrag(event: PointerEvent) {
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    if (!drag.started && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return;
-    event.preventDefault();
-    if (!drag.started) {
-      drag.started = true;
-      label.setPointerCapture(event.pointerId);
-      onDragStart(event.clientX, event.clientY);
-    }
-    onDragMove(event.clientX, event.clientY);
-  }
-
-  function endPointerDrag(event: PointerEvent) {
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    if (drag.started) onDragMove(event.clientX, event.clientY);
-    finishDrag(false);
-  }
-
-  function cancelPointerDrag(event: PointerEvent) {
-    if (drag?.pointerId === event.pointerId) finishDrag(true);
-  }
-
-  function endMouseDrag() { finishDrag(false); }
-  function cancelDrag() { finishDrag(true); }
-  function cancelDragWithEscape(event: KeyboardEvent) {
-    if (event.key !== 'Escape' || !drag?.started) return;
-    event.preventDefault();
-    event.stopPropagation();
-    finishDrag(true);
-  }
-
-  function finishDrag(cancelled: boolean) {
-    if (!drag) return;
-    const { pointerId, started } = drag;
-    drag = null;
-    window.removeEventListener('pointermove', moveDrag);
-    window.removeEventListener('pointerup', endPointerDrag);
-    window.removeEventListener('pointercancel', cancelPointerDrag);
-    window.removeEventListener('mouseup', endMouseDrag);
-    window.removeEventListener('blur', cancelDrag);
-    window.removeEventListener('keydown', cancelDragWithEscape);
-    if (label?.hasPointerCapture(pointerId)) label.releasePointerCapture(pointerId);
-    if (started) {
-      suppressClick = true;
-      onDragEnd(cancelled);
-    }
+  function handleClick() {
+    label.focus({ preventScroll: true });
+    onSelect();
   }
 </script>
 
@@ -179,15 +110,13 @@
       title={`${title} · ${connectionName}\nDouble-click or F2 to rename. Right-click or Shift+F10 for actions.\nDrag or Alt+Shift+Left/Right to reorder. Cmd/Ctrl+C to copy; Cmd/Ctrl+V to duplicate a copied tab.`}
       aria-pressed={active}
       aria-haspopup="menu"
+      use:pointerDrag={{ onStart: onDragStart, onMove: onDragMove, onEnd: onDragEnd }}
       on:click={handleClick}
-      on:dblclick={() => { if (!suppressClick) onRename(); }}
+      on:dblclick={onRename}
       on:contextmenu={handleContextMenu}
       on:keydown={handleKeydown}
       on:copy={handleCopy}
       on:paste={handlePaste}
-      on:pointerdown={startDrag}
-      on:lostpointercapture={cancelDrag}
-      on:dragstart={(event) => event.preventDefault()}
     >
       {#if running}<span class="spinner"></span>{/if}
       {title}{#if pending}<span class="pending-dot" title="Staged edits">•</span>{/if}

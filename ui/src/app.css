@@ -70,6 +70,20 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .icon-button { width: 28px; height: 28px; padding: 0; }
 .icon-label-button { padding: 3px 8px; }
 .connection-list { flex: 1; min-height: 0; margin: 0 -4px; padding: 2px; list-style: none; overflow-y: auto; overflow-x: hidden; overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+.connection-list > li { position: relative; }
+.connection-list > li.dragging { opacity: .5; }
+.connection-list > li.drop-before::before, .connection-list > li.drop-after::after {
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+  content: '';
+}
+.connection-list > li.drop-before::before { top: -1px; }
+.connection-list > li.drop-after::after { bottom: -1px; }
 .search-field { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--surface-1); color: var(--ink-faint); padding: 0 8px; }
 .search-field:focus-within { outline: 2px solid var(--focus); outline-offset: 1px; }
 .search-field input { min-width: 0; border: 0; background: transparent; outline: 0; padding: 3px 0; }

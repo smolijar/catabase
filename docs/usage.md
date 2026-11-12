@@ -6,6 +6,8 @@ Catabase is a desktop PostgreSQL workspace for writing SQL, inspecting results, 
 
 Add a connection in the Connections sidebar. Click its row or press Enter to use it and immediately test it. Double-click opens its settings; F2 edits without activating it. Right-click, Option/Alt-click or Shift+F10 opens connection actions. Connections can be duplicated from this menu or by copying and pasting a focused connection row. The copy inherits the saved connection settings, color, and environment label.
 
+Drag connection rows to reorder them, or press `Alt+Shift+Up/Down` on a focused row. The sidebar and connection switcher remember the order. New connections appear at the end, and duplicates appear directly below their source.
+
 The connection name in the toolbar and status bar shares the same health status. Click either to test again; the toolbar arrow opens the searchable connection switcher. Checks show success, an error, or a stale state after one minute. While a query is running or cancelling, they show that activity and do not start another test. A failed test leaves the selected connection in place.
 
 The active tab's connection is checked automatically when the app gains focus or remains in the foreground and its last check is stale. Background windows do not start checks. Queries, transactions, schema loading, connection dialogs and cell editing defer these checks until the workspace is idle. Running a query refreshes the health timestamp without an extra test.

@@ -5,11 +5,17 @@
   import type { ConnectionRecord } from '../lib/types';
   import { connectionClipboardAction, serializeConnectionReference } from '../lib/connectionClipboard';
   import { createConnectionInteraction } from '../lib/connectionInteraction';
+  import { pointerDrag } from '../lib/pointerDrag';
 
   export let connection: ConnectionRecord;
   export let active = false;
   export let appearance: ConnectionAppearance | undefined = undefined;
   export let disabled = false;
+  export let reorderable = false;
+  export let onDragStart: (x: number, y: number) => void;
+  export let onDragMove: (x: number, y: number) => void;
+  export let onDragEnd: (cancelled: boolean) => void;
+  export let onReorder: (direction: number) => void;
   export let onActivate: () => void | Promise<void>;
   export let onDisconnect: () => void = () => {};
   export let onEdit: () => void;
@@ -64,7 +70,12 @@
       }
       return;
     }
-    if (event.key === 'F2' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    if (reorderable && event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey
+      && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!disabled) onReorder(event.key === 'ArrowUp' ? -1 : 1);
+    } else if (event.key === 'F2' && !event.metaKey && !event.ctrlKey && !event.altKey) {
       event.preventDefault();
       void interaction.edit();
     } else if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
@@ -121,13 +132,16 @@
   <button
     bind:this={selectButton}
     class="connection-select"
+    class:reorderable
     data-connection-id={connection.id}
     type="button"
     aria-label={`Use ${connection.name} in this tab${environment ? ` (${environment})` : ''}`}
     aria-pressed={active}
     aria-disabled={disabled}
+    aria-keyshortcuts={reorderable ? 'Alt+Shift+ArrowUp Alt+Shift+ArrowDown' : undefined}
     aria-haspopup="menu"
-    title={`${address}${active ? ' · This tab' : ''}\nClick or press Enter to use and test. Double-click or F2 to edit. Option/Alt-click, right-click or Shift+F10 for actions.\nCmd/Ctrl+C to copy. Cmd/Ctrl+V to duplicate a copied connection.`}
+    title={`${address}${active ? ' · This tab' : ''}\nClick or press Enter to use and test. Double-click or F2 to edit. Option/Alt-click, right-click or Shift+F10 for actions.${reorderable ? '\nDrag or Alt+Shift+Up/Down to reorder.' : ''}\nCmd/Ctrl+C to copy. Cmd/Ctrl+V to duplicate a copied connection.`}
+    use:pointerDrag={{ enabled: reorderable && !disabled, onStart: onDragStart, onMove: onDragMove, onEnd: onDragEnd }}
     on:click={handleClick}
     on:dblclick={handleDoubleClick}
     on:keydown={handleKeydown}
@@ -188,6 +202,15 @@
 
   .connection-select[aria-disabled='true'] {
     cursor: default;
+  }
+
+  .connection-select.reorderable:not([aria-disabled='true']) {
+    cursor: grab;
+    touch-action: pan-y;
+  }
+
+  :global(.connection-list.dragging) .connection-select.reorderable:not([aria-disabled='true']) {
+    cursor: grabbing;
   }
 
   .connection-select:focus-visible { outline-offset: -2px; }
