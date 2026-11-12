@@ -281,6 +281,7 @@
   $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
   $: historyContext = tabs.find(tab => tab.id === activeTab)?.historyContext ?? null;
   $: resultContext = resultSession ?? historyContext;
+  $: hasResultRows = Boolean(result?.rows.length);
   $: resultUsable = Boolean(activeConnection) && canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
   $: editEligibility = assessRowEditing(result, editMode ? originalRows : result?.rows);
   $: editableColumns = editEligibility.target?.editableColumns.map((column) => column.name) ?? [];
@@ -2276,16 +2277,29 @@
             {/if}
           </div>
         {/if}
-        {#if queryError}
-          <div class="query-error" data-selectable-text>
-            <strong>{queryError.message}</strong>
-            {#if queryError.detail}<span>Detail: {queryError.detail}</span>{/if}
-            {#if queryError.hint}<span>Hint: {queryError.hint}</span>{/if}
-            {#if queryError.code}<span>Code: {queryError.code}</span>{/if}
-            {#if queryError.position}<span>Position: {queryError.position}</span>{/if}
+        {#if queryError || !hasResultRows}
+          <div class={hasResultRows ? 'query-error-banner' : 'empty-state results-empty'}>
+            <Cat mood={queryError ? 'error' : 'asleep'} size={hasResultRows ? 24 : 52} muted />
+            {#if queryError}
+              {#if !hasResultRows}<strong>Query failed</strong>{/if}
+              <div class="query-error" data-selectable-text>
+                <strong>{queryError.message}</strong>
+                {#if queryError.detail}<span>Detail: {queryError.detail}</span>{/if}
+                {#if queryError.hint}<span>Hint: {queryError.hint}</span>{/if}
+                {#if queryError.code}<span>Code: {queryError.code}</span>{/if}
+                {#if queryError.position}<span>Position: {queryError.position}</span>{/if}
+              </div>
+            {:else}
+              <strong>{result ? 'No rows returned' : tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
+            {/if}
+            {#if !hasResultRows && tabKind !== 'query' && (!result || queryError)}
+              <button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>
+            {:else if !result && !queryError && tabKind === 'query'}
+              <p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>
+            {/if}
           </div>
         {/if}
-        {#if result && result.rows.length}
+        {#if result && hasResultRows}
           {#key `${activeTab}:${resultSession?.executedAt}`}
             <ResultsGrid {result} {editMode} {editableColumns} {editDisabledReason} schemaItems={resultSession?.connectionId === tabConnectionId ? schemaItems : []} {canLoadMore} resultContext={`${activeTab}:${resultSession?.executedAt ?? ''}`} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onEditMany={updateCells} onForeignKeyLookup={lookupForeignKey} onCancelLookup={(token) => { void api.cancelQuery(token).catch(() => {}); }} onMessage={flash} />
           {/key}
@@ -2297,14 +2311,6 @@
               <span>{pendingChanges.length ? 'Apply or discard edits to load more' : 'Scroll down to load more'}</span>
             {/if}
           </footer>
-        {:else if result}
-          <p class="empty">Query completed in {result.durationMs} ms with no rows.</p>
-        {:else}
-          <div class="empty-state results-empty">
-            <Cat mood={queryError ? 'error' : 'asleep'} size={52} muted />
-            <strong>{queryError ? 'Query failed' : tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
-            {#if tabKind !== 'query'}<button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>{:else if !queryError}<p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>{/if}
-          </div>
         {/if}
       </section>
     </section>
