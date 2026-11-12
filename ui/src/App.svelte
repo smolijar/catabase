@@ -1262,6 +1262,8 @@
     connectionMutation = 'Duplicating connection…';
     try {
       const saved = await api.duplicateConnection(id);
+      const appearance = appearances[id];
+      if (appearance) saveConnectionAppearance(saved.id, appearance);
       const index = connections.findIndex((connection) => connection.id === id);
       connections = [...connections.slice(0, index + 1), saved, ...connections.slice(index + 1)];
       await tick();
