@@ -290,7 +290,6 @@
   $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
   $: historyContext = tabs.find(tab => tab.id === activeTab)?.historyContext ?? null;
   $: resultContext = resultSession ?? historyContext;
-  $: hasResultRows = Boolean(result?.rows.length);
   $: resultUsable = Boolean(activeConnection) && canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
   $: editEligibility = assessRowEditing(result, editMode ? originalRows : result?.rows);
   $: editableColumns = editEligibility.target?.editableColumns.map((column) => column.name) ?? [];
@@ -1118,8 +1117,8 @@
     return { data, execution, connectionId, connectionName: connections.find((connection) => connection.id === connectionId)?.name ?? 'Unavailable connection', executedAt: new Date().toISOString(), snapshot };
   }
 
-  function resultPatch(session: ResultSession): Partial<WorkspaceTab> {
-    return { session, originalRows: cloneRows(session.data.rows), pendingChanges: [], editMode: false, error: null };
+  function resultPatch(session: ResultSession | null, error: AppError | null = null): Partial<WorkspaceTab> {
+    return { session, originalRows: session ? cloneRows(session.data.rows) : [], pendingChanges: [], editMode: false, error };
   }
 
   function confirmDiscardForRun(): Promise<boolean> {
@@ -1234,7 +1233,7 @@
       if (normalized.code === '57014') {
         flash('Query cancelled.');
       } else {
-        patchTab(op.tabId, { error: normalized });
+        patchTab(op.tabId, resultPatch(null, normalized));
         if (normalized.position && activeTab === op.tabId) editorRef?.markError(target.start + normalized.position - 1, normalized.message);
         flash(normalized.message, true);
       }
@@ -1294,8 +1293,7 @@
   function clearResults() {
     if (operation?.tabId === activeTab || connectionMutation) return;
     if (pendingChanges.length && !confirm('Discard staged cell edits and clear results?')) return;
-    setResult(null);
-    queryError = null;
+    patchTab(activeTab, resultPatch(null));
     editorRef?.clearHighlights();
     flash('Results cleared.');
   }
@@ -1914,14 +1912,6 @@
     return resultUsable ? editEligibility.target : null;
   }
 
-  function setResult(next: QueryResult | null) {
-    result = next;
-    if (!next) resultSession = null;
-    originalRows = next ? cloneRows(next.rows) : [];
-    pendingChanges = [];
-    editMode = false;
-  }
-
   function normalizeAppError(error: unknown): AppError {
     const appError = error as AppError;
     return { ...appError, message: appError?.message ?? errorMessage(error) };
@@ -2342,13 +2332,13 @@
       <section class="results-pane">
         <div class="results-head">
           <div class="results-title">
-            <strong>{queryError && result ? 'Previous results' : 'Results'}</strong>
+            <strong>Results</strong>
             {#if operation?.tabId === activeTab}
               <span class="running-state"><span class="spinner"></span> {operation.cancelling ? 'Cancelling…' : operation.kind === 'load' ? 'Loading' : 'Running'} {runningDuration}</span>
-            {:else if result}
-              <span>{result.rowCount}{result.hasMore ? '+' : ''} {result.rowCount === 1 ? 'row' : 'rows'} · {result.durationMs} ms</span>
             {:else if queryError}
               <span>Failed{historyContext ? ` · ${historyContext.durationMs} ms` : ''}</span>
+            {:else if result}
+              <span>{result.rowCount}{result.hasMore ? '+' : ''} {result.rowCount === 1 ? 'row' : 'rows'} · {result.durationMs} ms</span>
             {:else if historyContext}
               <span>No snapshot stored · {historyContext.durationMs} ms</span>
             {:else}
@@ -2384,11 +2374,11 @@
             {/if}
           </div>
         {/if}
-        {#if queryError || !hasResultRows}
-          <div class={hasResultRows ? 'query-error-banner' : 'empty-state results-empty'}>
-            <Cat mood={queryError ? 'error' : 'asleep'} size={hasResultRows ? 24 : 52} muted />
+        {#if queryError || !result?.rows.length}
+          <div class="empty-state results-empty">
+            <Cat mood={queryError ? 'error' : 'asleep'} size={52} muted />
             {#if queryError}
-              {#if !hasResultRows}<strong>Query failed</strong>{/if}
+              <strong>Query failed</strong>
               <div class="query-error" data-selectable-text>
                 <strong>{queryError.message}</strong>
                 {#if queryError.detail}<span>Detail: {queryError.detail}</span>{/if}
@@ -2399,14 +2389,13 @@
             {:else}
               <strong>{result ? 'No rows returned' : tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
             {/if}
-            {#if !hasResultRows && tabKind !== 'query' && (!result || queryError)}
+            {#if tabKind !== 'query' && (!result || queryError)}
               <button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>
             {:else if !result && !queryError && tabKind === 'query'}
               <p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>
             {/if}
           </div>
-        {/if}
-        {#if result && hasResultRows}
+        {:else}
           {#key `${activeTab}:${resultSession?.executedAt}`}
             <ResultsGrid {result} {editMode} {editableColumns} {editDisabledReason} schemaItems={resultSession?.connectionId === tabConnectionId ? schemaItems : []} {canLoadMore} resultContext={`${activeTab}:${resultSession?.executedAt ?? ''}`} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEdit={updateCell} onEditMany={updateCells} onForeignKeyLookup={lookupForeignKey} onCancelLookup={(token) => { void api.cancelQuery(token).catch(() => {}); }} onMessage={flash} />
           {/key}
