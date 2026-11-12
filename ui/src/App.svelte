@@ -30,7 +30,7 @@
   import TabsPanel from './components/TabsPanel.svelte';
   import Cat from './components/Cat.svelte';
   import WorkspacePicker from './components/WorkspacePicker.svelte';
-  import { APPEARANCE_KEY, connectionAppearanceDraft, workspaceAppearance, restoreAppearance, shortType } from './lib/appearance';
+  import { APPEARANCE_KEY, THEME_STORAGE_KEY, connectionAppearanceDraft, readThemePreference, resolveThemePreference, workspaceAppearance, restoreAppearance, shortType } from './lib/appearance';
   import { connectionOptions, connectionTestTimeout } from './lib/connectionOptions';
   import { hasNativeMacTitlebar } from './lib/nativeTitlebar';
   import { sameConnectionSettings } from './lib/connectionEditor';
@@ -94,6 +94,8 @@
   };
   type SchemaGroup = { name: string; items: SchemaItem[] };
   type Operation = { token: string; tabId: string; connectionId: string; kind: 'query' | 'load' | 'export' | 'apply' | 'explain'; startedAt: number; cancelling: boolean };
+
+  export let onWorkspaceReady: () => void = () => {};
 
   let sidebar: SidebarTab = 'connections';
   let nativeTitlebar = false;
@@ -242,7 +244,7 @@
   $: activeConnection = connections.find((connection) => connection.id === tabConnectionId) ?? null;
   $: connectionAppearance = workspaceAppearance(appearances, tabConnectionId,
     showConnectionModal ? { id: connectionForm.id, appearance: connectionAppearanceForm } : undefined);
-  $: resolvedTheme = theme === 'system' ? systemLight ? 'snow' : 'tuxedo' : theme;
+  $: resolvedTheme = resolveThemePreference(theme, systemLight);
   $: themeKey = `${resolvedTheme}:${connectionAppearance.color}`;
   $: if (mounted) {
     document.documentElement.dataset.theme = resolvedTheme;
@@ -318,17 +320,18 @@
     systemLight = media.matches;
     const onSystemTheme = (event: MediaQueryListEvent) => { systemLight = event.matches; };
     media.addEventListener('change', onSystemTheme);
+    theme = readThemePreference();
     try {
-      const savedTheme = localStorage.getItem('catabase.theme');
-      if (savedTheme === 'snow' || savedTheme === 'system' || savedTheme === 'tuxedo') theme = savedTheme;
       appearances = restoreAppearance(localStorage.getItem(APPEARANCE_KEY));
     } catch { /* Appearance controls remain usable without storage. */ }
     try { editorFontSize = restoreEditorFontSize(localStorage.getItem(EDITOR_FONT_STORAGE_KEY)); } catch { /* Font controls still work without storage. */ }
     try { vimModeEnabled = localStorage.getItem(VIM_MODE_STORAGE_KEY) === 'true'; } catch { /* Keep the default for this session. */ }
     try { automaticUpdates = localStorage.getItem(AUTO_UPDATE_CHECK_KEY) !== 'false'; } catch { /* Keep the default for this session. */ }
-    const savedResultsHeight = Number(localStorage.getItem('catabase.resultsHeight'));
-    if (Number.isFinite(savedResultsHeight) && savedResultsHeight >= 180) resultsHeight = savedResultsHeight;
-    sidebarWidth = restoreSidebarWidth(localStorage.getItem('catabase.sidebarWidth'));
+    try {
+      const savedResultsHeight = Number(localStorage.getItem('catabase.resultsHeight'));
+      if (Number.isFinite(savedResultsHeight) && savedResultsHeight >= 180) resultsHeight = savedResultsHeight;
+      sidebarWidth = restoreSidebarWidth(localStorage.getItem('catabase.sidebarWidth'));
+    } catch { /* Use the default pane sizes. */ }
     const layoutObserver = new ResizeObserver(() => {
       workspaceWidth = workspaceElement.getBoundingClientRect().width;
     });
@@ -438,6 +441,8 @@
     ]);
     await loadDraft();
     workspaceLoaded = true;
+    await tick();
+    if (mounted) onWorkspaceReady();
   }
 
   async function registerExplainEvents() {
@@ -836,7 +841,7 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.defaultPrevented || closingWorkspace) return;
+    if (event.defaultPrevented || !workspaceLoaded || closingWorkspace) return;
     if (tabCloseTask) { event.preventDefault(); return; }
     if (picker || explainSession || explainOpening) return;
     const fontAction = fontSizeShortcut(event);
@@ -892,7 +897,7 @@
 
   function setTheme(next: ThemePreference) {
     theme = next;
-    try { localStorage.setItem('catabase.theme', next); } catch { /* Session preference still applies. */ }
+    try { localStorage.setItem(THEME_STORAGE_KEY, next); } catch { /* Session preference still applies. */ }
   }
 
   function setVimMode(enabled: boolean) {

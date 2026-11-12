@@ -3,6 +3,19 @@ export type ConnectionColor = 'none' | 'red' | 'amber' | 'green' | 'blue' | 'vio
 export type ConnectionAppearance = { color: ConnectionColor; environment: string };
 export const CONNECTION_COLORS: ConnectionColor[] = ['none', 'red', 'amber', 'green', 'blue', 'violet'];
 export const APPEARANCE_KEY = 'catabase.connectionAppearance';
+export const THEME_STORAGE_KEY = 'catabase.theme';
+
+export function readThemePreference(): ThemePreference {
+  try {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY);
+    if (saved === 'snow' || saved === 'system') return saved;
+  } catch { /* Use the default if storage is unavailable. */ }
+  return 'tuxedo';
+}
+
+export function resolveThemePreference(theme: ThemePreference, systemLight: boolean): 'tuxedo' | 'snow' {
+  return theme === 'system' ? systemLight ? 'snow' : 'tuxedo' : theme;
+}
 
 /** Return a draft, never the saved object: closing the editor must discard changes. */
 export function connectionAppearanceDraft(appearances: Record<string, ConnectionAppearance>, id?: string | null): ConnectionAppearance {

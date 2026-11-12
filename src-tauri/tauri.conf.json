@@ -13,6 +13,8 @@
     "windows": [
       {
         "title": "catabase",
+        "visible": false,
+        "backgroundColor": "#111215",
         "decorations": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,

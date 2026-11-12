@@ -27,7 +27,8 @@ use catabase_core::{
     test_connection as test_pg_connection, validate_transaction_sql,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, webview::PageLoadEvent};
+use tauri_plugin_window_state::StateFlags;
 use tokio::sync::{Mutex, RwLock};
 
 struct AppState {
@@ -1492,8 +1493,20 @@ fn application_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::W
 }
 
 pub fn run() {
+    let startup_window_shown = AtomicBool::new(false);
     tauri::Builder::default()
         .menu(application_menu)
+        .on_page_load(move |webview, page| {
+            if webview.label() == "main"
+                && page.event() == PageLoadEvent::Finished
+                && !startup_window_shown.swap(true, Ordering::Relaxed)
+            {
+                let window = webview.window();
+                if let Err(error) = window.show().and_then(|()| window.set_focus()) {
+                    eprintln!("Could not show the Catabase window: {error}");
+                }
+            }
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event
                 && let Some(state) = window.app_handle().try_state::<AppState>()
@@ -1509,7 +1522,12 @@ pub fn run() {
         })
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                // The startup page owns visibility so the first frame has content.
+                .with_state_flags(StateFlags::all() - StateFlags::VISIBLE)
+                .build(),
+        )
         .setup(|app| {
             updater::setup(app.handle())?;
             let data_dir = app.path().app_data_dir()?;

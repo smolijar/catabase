@@ -5,9 +5,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>catabase</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <style>
+      :root { background: #111215; color-scheme: dark; }
+      #startup-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 40;
+        display: grid;
+        place-content: center;
+        justify-items: center;
+        gap: 16px;
+        background: var(--surface-1, #111215);
+        color: var(--ink-muted, #a6a7ad);
+        font: 14px/20px var(--font-sans, system-ui, sans-serif);
+      }
+      [data-theme='snow'] #startup-splash img {
+        box-sizing: content-box;
+        padding: 12px;
+        border-radius: 20px;
+        background: #111215;
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="startup-splash">
+      <img src="/favicon.svg" width="80" height="80" alt="" />
+      <span id="startup-status" role="status">Loading Catabase…</span>
+    </div>
+    <div id="app" inert></div>
+    <script type="module" src="/src/startup.ts"></script>
   </body>
 </html>
