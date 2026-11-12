@@ -1,14 +1,16 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
   import { shortType } from '../lib/appearance';
   import ForeignKeyPicker from './ForeignKeyPicker.svelte';
   import CellValueEditor from './CellValueEditor.svelte';
+  import PaneResizer from './PaneResizer.svelte';
   import { copyText, readClipboardText } from '../lib/clipboard';
   import { cellDisplayType, cellKind, cellText, columnHeaderInfo, parseCellDraft, positionAfterReorder, prettyCell, sameCellValue, selectionBounds, selectionText, sortedRows, visibleRowWindow } from '../lib/resultsGrid';
   import type { CellPosition, GridSort, IndexedRow } from '../lib/resultsGrid';
   import { foreignKeyDraft, foreignKeyStageReason, foreignKeyTargets } from '../lib/foreignKeyEditing';
   import type { ForeignKeyTarget } from '../lib/foreignKeyEditing';
+  import { cellDetailsWidthBounds, clampPaneWidth, DEFAULT_CELL_DETAILS_WIDTH, restoreCellDetailsWidth } from '../lib/sidebarLayout';
   import type { ColumnMeta, ForeignKeyLookup, ForeignKeyValues, QueryResult, SchemaItem } from '../lib/types';
 
   export let result: QueryResult;
@@ -29,6 +31,10 @@
   let root: HTMLDivElement;
   let scrollElement: HTMLDivElement;
   let inspectorElement: HTMLElement | undefined;
+  let gridWidth = 1000;
+  let inspectorWidth = DEFAULT_CELL_DETAILS_WIDTH;
+  let resizingInspector = false;
+  const CELL_DETAILS_WIDTH_KEY = 'catabase.cellDetailsWidth';
   let scrollTop = 0;
   let viewportHeight = 300;
   const ROW_HEIGHT = 28;
@@ -69,6 +75,8 @@
   });
   $: inspectorDisabledReason = inspectorCell ? columnEditReasons[inspectorCell.column] : '';
   $: inspectorDisabled = Boolean(inspectorDisabledReason);
+  $: inspectorWidthBounds = cellDetailsWidthBounds(gridWidth);
+  $: visibleInspectorWidth = clampPaneWidth(inspectorWidth, inspectorWidthBounds, DEFAULT_CELL_DETAILS_WIDTH);
   // Reset writes draft state inside the function, so run it before draft-derived
   // checks when the inspected cell or result changes.
   $: resetDraft(result, inspectorCell);
@@ -76,6 +84,16 @@
   $: stageReason = foreignKeyStageReason(foreignTargets, Boolean(foreignDraft), draftNull);
   $: changed = new Set(changedCells.map((cell) => `${cell.rowIndex}\u001f${cell.column}`));
   $: totalWidth = 48 + result.columns.reduce((total, column) => total + columnWidth(column.name, widths), 0);
+
+  onMount(() => {
+    try { inspectorWidth = restoreCellDetailsWidth(localStorage.getItem(CELL_DETAILS_WIDTH_KEY)); }
+    catch { /* Use the default width when preferences are unavailable. */ }
+  });
+
+  function persistInspectorWidth(width: number) {
+    try { localStorage.setItem(CELL_DETAILS_WIDTH_KEY, String(width)); }
+    catch { /* Keep the width for the current result. */ }
+  }
 
   function nearBottom() {
     return scrollElement && scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight <= ROW_HEIGHT * 2;
@@ -397,14 +415,14 @@
 
 <svelte:window on:pointermove={moveResize} on:pointerup={() => (resize = null)} on:pointercancel={() => (resize = null)} on:keydown={inspectorKey} />
 
-<div class="results-grid" class:resizing={Boolean(resize)} bind:this={root}>
+<div class="results-grid" class:resizing={Boolean(resize) || resizingInspector} bind:this={root} bind:clientWidth={gridWidth}>
   <div class="grid-tools">
     <span class="selection-label" aria-live="polite">{selectedCount ? `${selectedCount} cell${selectedCount === 1 ? '' : 's'} selected` : 'Select a cell · Shift-click to select a range'}</span>
     {#if sort}<span class="sort-scope">Sorting {rows.length} loaded rows only</span><button class="subtle" on:click={() => { sort = null; anchor = null; focus = null; }}>Reset sort</button>{/if}
     <span class="tools-spacer"></span>
     <button disabled={!focus} on:click={copySelection} title="Copy selected cells as tab-separated text (⌘/Ctrl+C)"><Icon name="copy" size={13} /> Copy selection</button>
   </div>
-  <div class="grid-content">
+  <div class="grid-content" style={`--inspector-width: ${visibleInspectorWidth}px`}>
     <div
       class="grid-scroll"
       role="region"
@@ -477,7 +495,8 @@
       </table>
     </div>
     {#if inspectorCell && selectedColumn}
-      <aside class="cell-inspector" class:foreign-key={foreignTargets.length > 0} aria-label="Cell details" bind:this={inspectorElement}>
+      <PaneResizer bind:width={inspectorWidth} bounds={inspectorWidthBounds} defaultWidth={DEFAULT_CELL_DETAILS_WIDTH} label="Resize cell details" controls="cell-inspector" side="right" bind:resizing={resizingInspector} onResizeEnd={persistInspectorWidth} />
+      <aside id="cell-inspector" class="cell-inspector" class:foreign-key={foreignTargets.length > 0} aria-label="Cell details" bind:this={inspectorElement}>
         <div class="inspector-title"><strong title={selectedColumn.name}>{selectedColumn.name}</strong><button class="close-inspector" aria-label="Close cell details" on:click={closeInspector}><Icon name="close" size={14} /></button></div>
         <p class="cell-meta">Row {inspectorCell.originalIndex + 1} · {selectedColumn.typeName}{selectedColumn.generated ? ' · generated' : ''}{selectedColumn.nullable === false ? ' · not nullable' : ''}</p>
         <form class:foreign-key-form={foreignTargets.length > 0} on:submit|preventDefault={stageEdit}>
@@ -518,6 +537,7 @@
   button:disabled { opacity: .45; }
   .subtle { border: none; background: none; color: var(--ink-muted); }
   .grid-content { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; }
+  .grid-content > :global(.pane-resizer) { flex: 0 0 7px; }
   .grid-scroll { flex: 1; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
   table { table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 12px; }
   thead { position: sticky; top: 0; z-index: 2; }
@@ -556,7 +576,7 @@
   .cell.null-value, .cell.empty-value { --value-color: var(--ink-faint); font-style: italic; color: var(--value-color); }
   .cell.empty-value { font-size: 11px; }
   .resizing, .resizing .cell { cursor: col-resize; user-select: none; }
-  .cell-inspector { display: flex; flex: 0 0 330px; flex-direction: column; max-width: 46%; overflow: hidden; padding: 12px; border-left: 1px solid var(--line-strong); background: var(--surface-2); }
+  .cell-inspector { display: flex; flex: 0 0 var(--inspector-width); flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; padding: 12px; background: var(--surface-2); }
   .cell-inspector form { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   .inspector-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
   .inspector-title, .cell-meta { flex-shrink: 0; }
@@ -573,6 +593,12 @@
   .foreign-key-form .stage-button { flex-basis: auto; margin-left: auto; }
   .foreign-key-form .inspector-body { display: flex; flex-direction: column; }
   .cell-inspector.foreign-key .cell-meta { margin-bottom: 6px; }
-  @media (max-width: 1000px) { .selection-label { max-width: 170px; overflow: hidden; text-overflow: ellipsis; } .grid-tools { gap: 5px; } .cell-inspector { flex-basis: 280px; } }
-  @container (max-width: 640px) { .cell-inspector { position: absolute; z-index: 3; top: 0; bottom: 0; right: 0; width: min(330px, 100%); max-width: 100%; } .selection-label { max-width: 110px; } .sort-scope { display: none; } }
+  @media (max-width: 1000px) { .selection-label { max-width: 170px; overflow: hidden; text-overflow: ellipsis; } .grid-tools { gap: 5px; } }
+  @container (max-width: 640px) {
+    .cell-inspector, .grid-content > :global(.pane-resizer) { position: absolute; z-index: 3; top: 0; bottom: 0; }
+    .cell-inspector { right: 0; width: var(--inspector-width); }
+    .grid-content > :global(.pane-resizer) { right: var(--inspector-width); width: 7px; }
+    .selection-label { max-width: 110px; }
+    .sort-scope { display: none; }
+  }
 </style>

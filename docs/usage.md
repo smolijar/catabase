@@ -67,6 +67,8 @@ Export offers CSV, TSV and JSON. You can export loaded rows or explicitly re-run
 
 Cell editing requires a complete primary key or usable unique key for an unambiguous source table in the selected columns. Double-click a cell or press Enter to open its details. The editor and staging controls are disabled for expressions, generated columns, unsupported types and read-only results.
 
+Drag the divider to resize the Cell details sidebar. The width is saved.
+
 Paste text into a selected cell with `Cmd/Ctrl+V` to stage the change for review. Pasting into a foreign-key cell searches the referenced rows so you can choose one from the picker.
 
 Stage values in the cell inspector, then review the generated SQL before applying. Updates identify rows by their original primary or unique key. **Only if unchanged** is on by default and requires the edited cells to still match their original values. Turn it off to overwrite the edited cells by row key. The backend revalidates column and key metadata for writes. **Set NULL** changes the draft only. You still need to stage it, and non-nullable columns disable the shortcut.

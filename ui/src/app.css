@@ -265,6 +265,7 @@ html:not([data-conn='none']) .status-bar { background: var(--accent-soft); }
 @media (max-width: 820px) {
   .workspace, .workspace.sidebar-open { grid-template-columns: 44px minmax(0, 1fr); }
   .workspace > .sidebar { position: absolute; z-index: 5; left: 44px; top: 0; bottom: 0; width: var(--sidebar-width, 280px); }
+  .workspace > .pane-resizer { position: absolute; z-index: 6; top: 0; bottom: 0; left: calc(44px + var(--sidebar-width, 280px)); width: 5px; }
   .main-pane { grid-column: 2; }
   .wordmark, .workspace-search span, .status-bar > .draft-status, .cursor-position { display: none; }
   .workspace-search { width: auto; }

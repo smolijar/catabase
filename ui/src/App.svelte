@@ -25,7 +25,7 @@
   import SqlEditor from './components/SqlEditor.svelte';
   import SqlPreview from './components/SqlPreview.svelte';
   import Switch from './components/Switch.svelte';
-  import SidebarResizer from './components/SidebarResizer.svelte';
+  import PaneResizer from './components/PaneResizer.svelte';
   import QueryTab from './components/QueryTab.svelte';
   import TabsPanel from './components/TabsPanel.svelte';
   import Cat from './components/Cat.svelte';
@@ -53,7 +53,7 @@
   import { parseConnectionReference, serializeConnectionReference } from './lib/connectionClipboard';
   import { CONNECTION_ORDER_KEY, orderConnections, restoreConnectionOrder } from './lib/connectionOrder';
   import { parseTabReference, serializeTabReference } from './lib/tabClipboard';
-  import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, restoreSidebarWidth } from './lib/sidebarLayout';
+  import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, restoreSidebarWidth, sidebarWidthBounds } from './lib/sidebarLayout';
   import { listDropTarget, listScrollDelta, reorderList } from './lib/listDrag';
   import type { ListDrop } from './lib/listDrag';
   import { assessRowEditing, buildRowUpdates } from './lib/rowEditing';
@@ -2250,7 +2250,7 @@
           </section>
         {/if}
       </aside>
-      <SidebarResizer bind:width={sidebarWidth} {workspaceWidth} bind:resizing={resizingSidebar} onResizeEnd={persistSidebarWidth} />
+      <PaneResizer bind:width={sidebarWidth} bounds={sidebarWidthBounds(workspaceWidth)} defaultWidth={DEFAULT_SIDEBAR_WIDTH} label="Resize sidebar" controls="workspace-sidebar" bind:resizing={resizingSidebar} onResizeEnd={persistSidebarWidth} />
     {/if}
 
     <section class="main-pane" class:resizing={resizingResults} style={`--results-height: ${resultsHeight}px`}>

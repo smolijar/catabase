@@ -3,6 +3,7 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
 import type { ViteDevServer } from 'vite';
+import { DEFAULT_SIDEBAR_WIDTH, sidebarWidthBounds } from '../src/lib/sidebarLayout.ts';
 
 let server: ViteDevServer;
 let renderResizer: (width: number, workspaceWidth: number) => string;
@@ -13,9 +14,12 @@ before(async () => {
     server: { middlewareMode: true, watch: null, hmr: false, ws: false },
     appType: 'custom'
   });
-  const { default: Resizer } = await server.ssrLoadModule('/src/components/SidebarResizer.svelte');
+  const { default: Resizer } = await server.ssrLoadModule('/src/components/PaneResizer.svelte');
   const { render } = await server.ssrLoadModule('svelte/server');
-  renderResizer = (width, workspaceWidth) => render(Resizer, { props: { width, workspaceWidth } }).body;
+  renderResizer = (width, workspaceWidth) => render(Resizer, { props: {
+    width, bounds: sidebarWidthBounds(workspaceWidth), defaultWidth: DEFAULT_SIDEBAR_WIDTH,
+    label: 'Resize sidebar', controls: 'workspace-sidebar'
+  } }).body;
 });
 
 after(async () => { await server?.close(); });

@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, restoreSidebarWidth, sidebarWidthBounds } from '../src/lib/sidebarLayout.ts';
+import {
+  cellDetailsWidthBounds, clampPaneWidth, clampSidebarWidth, DEFAULT_CELL_DETAILS_WIDTH,
+  DEFAULT_SIDEBAR_WIDTH, restoreCellDetailsWidth, restoreSidebarWidth, sidebarWidthBounds
+} from '../src/lib/sidebarLayout.ts';
 
 test('sidebar widths are bounded while reserving space for the editor and navigation', () => {
   assert.deepEqual(sidebarWidthBounds(1780), { min: 220, max: 640 });
@@ -36,4 +39,13 @@ test('saved preferences restore valid widths and tolerate missing or malformed s
   for (const saved of [null, '', ' ', '0', '-100', 'invalid', 'NaN', 'Infinity']) {
     assert.equal(restoreSidebarWidth(saved), DEFAULT_SIDEBAR_WIDTH);
   }
+});
+
+test('cell details leave room for results and retain the preferred width as the grid expands', () => {
+  const preferred = restoreCellDetailsWidth('610');
+  assert.equal(clampPaneWidth(preferred, cellDetailsWidthBounds(840), DEFAULT_CELL_DETAILS_WIDTH), 600);
+  assert.equal(clampPaneWidth(preferred, cellDetailsWidthBounds(580), DEFAULT_CELL_DETAILS_WIDTH), 532);
+  assert.equal(clampPaneWidth(preferred, cellDetailsWidthBounds(1000), DEFAULT_CELL_DETAILS_WIDTH), 610);
+  assert.deepEqual(cellDetailsWidthBounds(240), { min: 192, max: 192 });
+  assert.equal(restoreCellDetailsWidth('invalid'), DEFAULT_CELL_DETAILS_WIDTH);
 });
