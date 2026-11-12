@@ -100,6 +100,7 @@
   let sidebar: SidebarTab = 'connections';
   let nativeTitlebar = false;
   let sidebarOpen = true;
+  let sidebarElement: HTMLElement | undefined;
   let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
   let workspaceWidth = 1280;
   let workspaceElement: HTMLElement;
@@ -821,6 +822,13 @@
       sidebar = tab;
       sidebarOpen = true;
     }
+  }
+
+  async function openAppUpdates() {
+    sidebar = 'settings';
+    sidebarOpen = true;
+    await tick();
+    if (sidebarElement) sidebarElement.scrollTop = 0;
   }
 
   function groupSchemaItems(items: SchemaItem[], search: string): SchemaGroup[] {
@@ -1941,6 +1949,9 @@
       <Cat mood={running ? 'prompt' : queryError ? 'error' : !activeConnection || result?.rowCount === 0 ? 'asleep' : 'awake'} />
       <span class="wordmark" aria-hidden="true"><b>CAT</b>ABASE<i></i></span>
     </div>
+    {#if updateState.update}
+      <button class="update-pill" title={`Catabase ${updateState.update.version} is available`} on:click={openAppUpdates}>Update available</button>
+    {/if}
     <button class="workspace-search" aria-label="Search tables, queries, history, commands" title="Search workspace (Cmd/Ctrl+K)" on:click={() => picker = 'commands'}><Icon name="search" size={14} /><span>Search tables, queries, history, commands</span><kbd>⌘K</kbd></button>
     {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : operation.kind === 'explain' ? 'Explaining' : 'Exporting'} · {runningDuration}</button>{/if}
     <ConnectionPill
@@ -1997,7 +2008,7 @@
     </aside>
 
     {#if sidebarOpen}
-      <aside id="workspace-sidebar" class="sidebar" class:connections-sidebar={sidebar === 'connections'}>
+      <aside id="workspace-sidebar" bind:this={sidebarElement} class="sidebar" class:connections-sidebar={sidebar === 'connections'}>
         {#if sidebar === 'connections'}
           <div class="panel-head">
             <div>
@@ -2327,7 +2338,6 @@
     {#if activeConnection}<button class="status-link" tabindex="-1" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
     <button class="status-link" tabindex="-1" title="Open schema browser" on:click={() => { sidebar = 'schema'; sidebarOpen = true; }}>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : 'Schema'}</button>
     <span class="draft-status">{!workspaceLoaded ? 'restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'saving drafts…' : draftStatus === 'pending' ? 'saving drafts…' : draftStatus === 'error' ? 'draft save failed' : 'drafts saved'}</span>
-    {#if updateState.update}<button class="status-link" tabindex="-1" title={`Catabase ${updateState.update.version} is available`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>Update available</button>{/if}
     {#if running}<span>Running {runningDuration}</span>{/if}
     <span class="cursor-position">Ln {cursorLine}, Col {cursorColumn}</span>
     {#if statusTiming}

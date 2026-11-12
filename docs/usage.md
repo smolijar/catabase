@@ -135,6 +135,8 @@ Enable **Settings → SQL editor → Vim mode** to use Vim keybindings across SQ
 
 **Settings → App updates** shows the installed version, checks for a newer release and displays its release notes. Builds with an embedded updater signing key check automatically while the workspace is idle and in the foreground, at most once every four hours. Turn off **Check automatically** to use manual checks only. A failed check leaves the app usable and follows the same retry interval.
 
+Click **Update available** beside the logo to open App updates.
+
 **Update & restart** downloads and verifies the signed package, installs it, then reopens Catabase. It first saves SQL tabs and editor positions. Finish running operations, commit or roll back transactions, close connection dialogs, and finish cell editing in every tab before updating. Apply or discard any staged edits first. Live result grids are cleared by the restart; saved history remains available. A save or download failure keeps the current workspace open.
 
 Source builds and releases without an updater signing key show why in-app updates are unavailable, with a button to open GitHub Releases. Update signatures and Apple Developer ID/notarization are separate; see [distribution](distribution.md) for setup and the signing status of current releases.

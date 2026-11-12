@@ -41,6 +41,7 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .wordmark b { color: var(--brand); font-weight: 400; }
 .wordmark i { display: inline-block; width: 7px; height: 13px; margin-left: 3px; background: var(--brand); vertical-align: -1px; animation: wordmark-cursor 1.06s steps(1) infinite; }
 @keyframes wordmark-cursor { 50% { opacity: 0; } }
+.update-pill { flex-shrink: 0; min-height: 24px; border-color: var(--brand); border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; }
 .workspace-search { justify-content: flex-start; margin: 0 auto; width: min(360px, 35vw); color: var(--ink-faint); border-color: var(--line); background: var(--surface-1); text-align: left; }
 .workspace-search span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-search kbd { margin-left: auto; }
