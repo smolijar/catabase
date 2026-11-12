@@ -33,7 +33,15 @@ Workflow artifacts are retained for 14 days for diagnostics; published release d
 curl -fsSL https://raw.githubusercontent.com/smolijar/catabase/main/install.sh | sh
 ```
 
-The installer resolves one release version, downloads its app ZIP and checksums from that exact tag, verifies the bundle/version/architecture/signature, and installs it in `~/Applications`. It refuses to replace a running app and keeps the previous app until the replacement succeeds. It does not change Catabase's data directory or remove macOS quarantine/security attributes. To choose a different writable folder, download `install.sh` and run `sh install.sh --dir /absolute/path`. The [README](../README.md) also links the manual DMG download.
+The installer resolves one release version, downloads its app ZIP and checksums from that exact tag, verifies the bundle/version/architecture/signature, and installs it in `/Applications`. It refuses to replace a running app and keeps the previous app until the replacement succeeds. It does not change Catabase's data directory or remove macOS quarantine/security attributes. The [README](../README.md) also links the manual DMG download.
+
+Run the installer as your normal user with write access to the destination. Use `--dir` to install in a different writable folder, such as your personal Applications folder.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/smolijar/catabase/main/install.sh | sh -s -- --dir "$HOME/Applications"
+```
+
+If Catabase is already in `~/Applications`, quit it and move `Catabase.app` to `/Applications` in Finder to use the shared location.
 
 Ad-hoc previews are **not Apple notarized**. macOS may block them; the installer does not bypass Gatekeeper. Add Apple credentials below for normal distribution.
 

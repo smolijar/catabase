@@ -23,7 +23,7 @@ class InstallerTests(unittest.TestCase):
         self.bin.mkdir()
         self.home = self.root / "home"
         self.home.mkdir()
-        self.dest = self.home / "Applications"
+        self.dest = self.root / "Applications"
         self.archive = self.root / "Catabase-macos-universal.app.zip"
         self.make_package()
         self.env = dict(os.environ, HOME=str(self.home), PATH=f"{self.bin}:{os.environ['PATH']}",
@@ -76,7 +76,9 @@ else:
         digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
         (self.root / "SHA256SUMS").write_text(f"{digest}  ./{self.archive.name}\n")
 
-    def run_installer(self, *arguments, success=True):
+    def run_installer(self, *arguments, success=True, use_default=False):
+        if not arguments and not use_default:
+            arguments = ("--dir", str(self.dest))
         result = subprocess.run(["sh", str(INSTALLER), *arguments], env=self.env,
                                 capture_output=True, text=True)
         if success:
@@ -103,6 +105,12 @@ else:
         self.assertEqual(len(urls), 3)
         self.assertTrue(all("/download/v0.1.2/" in url for url in urls[1:]))
         self.assert_no_staging()
+
+    def test_defaults_to_shared_applications(self):
+        self.mock("mkdir", "sys.exit(1)")
+        result = self.run_installer(success=False, use_default=True)
+        self.assertRegex(result.stderr, r"Cannot (?:write to|create) /Applications\.")
+        self.assertIn('--dir "$HOME/Applications"', result.stderr)
 
     def test_updates_existing_app_and_preserves_unrelated_user_data(self):
         self.old_install()

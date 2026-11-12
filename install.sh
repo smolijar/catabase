@@ -6,11 +6,11 @@ fail() { printf 'Catabase: %s\n' "$*" >&2; exit 1; }
 
 usage() {
   printf '%s\n' 'Usage: sh install.sh [--dir /absolute/install/directory]' \
-    'Installs Catabase.app into ~/Applications by default. No sudo or developer tools required.'
+    'Installs Catabase.app into /Applications by default. Run as your normal user.'
 }
 
 main() {
-  install_dir=${HOME:?HOME is not set}/Applications
+  install_dir=/Applications
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --dir) [ "$#" -ge 2 ] || fail '--dir requires an absolute directory.'; install_dir=$2; shift 2 ;;
@@ -36,6 +36,11 @@ main() {
   }
   ensure_closed
 
+  directory_help='Use --dir "$HOME/Applications" or another writable folder.'
+  if [ -d "$install_dir" ] && [ ! -w "$install_dir" ]; then
+    fail "Cannot write to $install_dir. $directory_help"
+  fi
+
   release_base=https://github.com/smolijar/catabase/releases
   printf 'Finding the latest Catabase release…\n'
   release_url=$(curl --fail --silent --show-error --location --head \
@@ -48,8 +53,8 @@ main() {
   printf '%s\n' "$release_tag" | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { valid=1 } END { exit !valid }' \
     || fail 'Unexpected release version.'
 
-  mkdir -p "$install_dir" || fail "Cannot create $install_dir. Choose a writable directory with --dir."
-  [ -w "$install_dir" ] || fail "Cannot write to $install_dir. Choose a writable directory with --dir."
+  mkdir -p "$install_dir" || fail "Cannot create $install_dir. $directory_help"
+  [ -w "$install_dir" ] || fail "Cannot write to $install_dir. $directory_help"
   target=$install_dir/Catabase.app
   [ ! -L "$target" ] || fail 'The destination is a symbolic link; choose another installation directory.'
   if [ -e "$target" ]; then

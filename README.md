@@ -20,7 +20,7 @@ Apple Silicon and Intel, one universal app:
 curl -fsSL https://raw.githubusercontent.com/smolijar/catabase/main/install.sh | sh
 ```
 
-Installs into `~/Applications` without sudo. Quit Catabase before reinstalling. Or download the DMG from [Releases](https://github.com/smolijar/catabase/releases/latest).
+Installs into the shared `/Applications` folder. Quit Catabase before reinstalling. [Personal install options](docs/distribution.md#installation) · [DMG download](https://github.com/smolijar/catabase/releases/latest)
 
 Main pushes publish a release with a commit changelog after checks pass. The app checks for updates and offers **Update & restart** when update signing is configured. Builds without Apple notarization may be blocked by macOS; see [distribution](docs/distribution.md).
 
