@@ -98,8 +98,8 @@ pub fn split_statements(sql: &str) -> Vec<StatementRange> {
     ranges
 }
 
-/// Editor-only boundaries for independent queries and transaction commands
-/// separated by blank lines.
+/// Editor-only boundaries for independent queries, writes, index creation and
+/// transaction commands separated by blank lines.
 /// SQL execution and transaction validation still use semicolons exclusively.
 /// A WITH clause stays attached to its first top-level query or write. Insert
 /// sources, upserts, row locks, MERGE actions, set-operation operands, nested
@@ -113,16 +113,18 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
         let first_word = leading_keywords(&statement.text, 1)
             .pop()
             .unwrap_or_default();
-        if !matches!(
+        let supports_blank_lines = matches!(
             kind,
             StatementKind::SelectLike
                 | StatementKind::TxBegin
                 | StatementKind::TxCommit
                 | StatementKind::TxRollback
-        ) && !matches!(
+        ) || matches!(
             first_word.as_str(),
             "insert" | "update" | "delete" | "merge" | "rollback"
-        ) {
+        ) || (first_word == "create"
+            && starts_create_index(&statement.text));
+        if !supports_blank_lines {
             ranges.push(statement);
             continue;
         }
@@ -173,6 +175,11 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
                         "begin" | "commit" | "end" | "rollback" | "abort"
                     ) || (word == "start"
                         && classify_statement(&sql[word_start..]) == StatementKind::TxBegin);
+                    let starts_command = starts_query
+                        || starts_write
+                        || starts_transaction
+                        || (word == "create"
+                            && starts_create_index(&sql[word_start..statement.end]));
                     // These keywords can also continue the current statement:
                     // INSERT's source, row locks, upserts, and MERGE actions.
                     let continues_insert = starts_query && insert_source_pending;
@@ -181,13 +188,14 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
                         command == "insert" && previous_word == "do" && word == "update";
                     let continues_merge =
                         command == "merge" && previous_word == "then" && starts_write;
-                    if (starts_query || starts_write || starts_transaction)
+                    let continues_command = continues_insert
+                        || continues_lock
+                        || continues_upsert
+                        || continues_merge
+                        || set_operand_pending;
+                    if starts_command
                         && !command.is_empty()
-                        && !(continues_insert
-                            || continues_lock
-                            || continues_upsert
-                            || continues_merge)
-                        && !set_operand_pending
+                        && !continues_command
                         && case_depth == 0
                         && line_breaks >= 2
                     {
@@ -198,9 +206,7 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
                         insert_source_pending = false;
                         row_lock_pending = false;
                     }
-                    if command.is_empty()
-                        && ((starts_query && word != "with") || starts_write || starts_transaction)
-                    {
+                    if command.is_empty() && starts_command && word != "with" {
                         command = word.clone();
                         insert_source_pending = word == "insert";
                     }
@@ -254,6 +260,12 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
         push_statement(&mut ranges, sql, start, statement.end);
     }
     ranges
+}
+
+fn starts_create_index(sql: &str) -> bool {
+    let words = leading_keywords(sql, 3);
+    matches!(words.as_slice(), [create, index, ..] if create == "create" && index == "index")
+        || matches!(words.as_slice(), [create, unique, index] if create == "create" && unique == "unique" && index == "index")
 }
 
 pub fn classify_statement(sql: &str) -> StatementKind {
@@ -624,6 +636,8 @@ SELECT name FROM LANDLORDS"#;
             "INSERT INTO cats (name) VALUES ('Milo')",
             "DELETE FROM cats WHERE name = 'Milo'",
             "MERGE INTO cats USING kittens ON cats.id = kittens.id WHEN MATCHED THEN UPDATE SET name = kittens.name",
+            "CREATE INDEX cats_name_idx ON cats (name)",
+            "create unique index CONCURRENTLY if not exists idx_items_access_token on items (access_token)",
             "ROLLBACK TO SAVEPOINT checkpoint",
         ];
         for first in commands {
@@ -664,6 +678,7 @@ SELECT name FROM LANDLORDS"#;
             "UPDATE cats SET name = E'Milo\\'s\n\nUPDATE cats'",
             "UPDATE cats SET name = $tag$Milo\n\nDELETE FROM cats$tag$",
             "UPDATE cats SET name = 'Milo' /* outer\n\nUPDATE /* nested */ cats */ RETURNING *",
+            "CREATE /* optional comment */ UNIQUE\n\nINDEX CONCURRENTLY cats_name_idx\n\nON cats (name)\n\nWHERE CASE WHEN id = 1 THEN true\n\nEND",
         ] {
             let sql = format!("{query}\n\nUPDATE cats SET name = 'next'\n\nSELECT 2");
             let ranges = split_editor_statements(&sql);

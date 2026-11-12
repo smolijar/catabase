@@ -1663,6 +1663,21 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn editor_splits_create_unique_index_concurrently_at_end() {
+        let select = "select * from batch_rents where id = 'fixture-č🐈'";
+        let index = "create unique index CONCURRENTLY if not exists idx_items_access_token on items (access_token)";
+        let sql = format!("{select}\n\n\n{index}");
+        let cursor = sql.encode_utf16().count();
+        let ranges = split_sql(sql).await.unwrap();
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].text, select);
+        assert_eq!(ranges[0].end, select.encode_utf16().count());
+        assert_eq!(ranges[1].start, ranges[0].end + 3);
+        assert_eq!(ranges[1].end, cursor);
+        assert_eq!(ranges[1].text, index);
+    }
+
     #[test]
     fn replay_rejects_transaction_escape_and_explicit_mutations() {
         assert!(validate_replay_sql("select 1").is_ok());
