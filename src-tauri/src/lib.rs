@@ -1542,7 +1542,10 @@ pub fn run() {
             updater::setup(app.handle())?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            app.manage(Arc::new(diagnostics::Diagnostics::new(&data_dir)));
+            app.manage(Arc::new(diagnostics::Diagnostics::new(
+                &data_dir,
+                &app.package_info().version.to_string(),
+            )));
             let storage = Storage::open(data_dir.join("catabase.sqlite3"))?;
             storage.interrupt_history_transactions()?;
             // Saved defaults are not live sessions after restarting the app.
@@ -1645,6 +1648,9 @@ pub fn run() {
                     api.prevent_exit();
                     let _ = app.emit("catabase:request-exit", ());
                 }
+            } else if matches!(event, tauri::RunEvent::Exit) {
+                // Record the accepted exit, after any draft-save/update guards.
+                diagnostics::mark_expected_exit(app, diagnostics::ExpectedExit::Quit);
             }
         });
 }

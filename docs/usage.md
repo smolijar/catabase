@@ -6,6 +6,8 @@ Catabase is a desktop PostgreSQL workspace for writing SQL, inspecting results, 
 
 After a native crash, Catabase checks recent macOS crash reports on the next launch and offers a report to review. **Settings → Diagnostics → Report a problem** reopens the latest report or prepares a manual report on any platform. Dismissing a crash report prevents repeated prompts for that crash.
 
+Automatic prompts require a crash report matching the preceding tracked app session. Normal quits and update restarts are recorded as expected exits. The first launch with session tracking establishes a baseline; existing crash logs remain available in Settings without triggering a startup warning.
+
 You can open a manual report while a query runs. Its SQL option uses the latest/running query in the current session and labels that context separately from SQL recovered after a crash.
 
 **Open GitHub draft** opens a prefilled issue in your browser. Review it and submit it on GitHub; the app never posts automatically and needs no GitHub token. **Copy report** is available without GitHub. Reports too long for a URL are copied for you to paste into the issue.

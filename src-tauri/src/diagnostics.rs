@@ -25,9 +25,29 @@ const ISSUE_URL: &str = "https://github.com/smolijar/catabase/issues/new";
 pub(super) struct Diagnostics {
     directory: PathBuf,
     context_file: PathBuf,
+    session_file: PathBuf,
+    session: Mutex<Session>,
+    previous_session: Option<Session>,
     query: Mutex<Option<QueryContext>>,
     // Serializes acknowledgements, without holding a lock during OS log scans.
     acknowledgements: Mutex<()>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(super) enum ExpectedExit {
+    Quit,
+    Update,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Session {
+    pid: u32,
+    version: String,
+    started_at: DateTime<Utc>,
+    expected_exit: Option<ExpectedExit>,
+    exited_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -72,9 +92,40 @@ struct Crash {
 }
 
 impl Diagnostics {
-    pub(super) fn new(data_dir: &Path) -> Self {
+    pub(super) fn new(data_dir: &Path, version: &str) -> Self {
+        Self::begin_session(data_dir, version, std::process::id(), Utc::now())
+    }
+
+    fn begin_session(data_dir: &Path, version: &str, pid: u32, started_at: DateTime<Utc>) -> Self {
         let directory = data_dir.join("diagnostics");
         let _ = fs::create_dir_all(&directory);
+        let mut sessions: Vec<_> = recent_files(&directory, "session-", "json")
+            .into_iter()
+            .take(100)
+            .filter_map(|path| read_json::<Session>(&path, 4_096).map(|session| (path, session)))
+            .collect();
+        // Shutdown updates a file's mtime. Launch order identifies the previous
+        // session even when another, older app instance exits afterwards.
+        sessions.sort_unstable_by_key(|(_, session)| std::cmp::Reverse(session.started_at));
+        let mut previous_session = sessions
+            .iter()
+            .find(|(_, session)| session.started_at < started_at)
+            .map(|(_, session)| session.clone());
+        for (path, _) in sessions.into_iter().skip(20) {
+            let _ = fs::remove_file(path);
+        }
+        let session = Session {
+            pid,
+            version: version.into(),
+            started_at,
+            expected_exit: None,
+            exited_at: None,
+        };
+        let session_file = directory.join(format!("session-{}.json", uuid::Uuid::new_v4()));
+        if write_private(&session_file, &session).is_err() {
+            // Tracking is best-effort. Missing evidence must not become a crash prompt.
+            previous_session = None;
+        }
         // Keep a bounded set of previous sessions, so crash SQL survives restart.
         for path in recent_files(&directory, "query-", "json")
             .into_iter()
@@ -84,10 +135,44 @@ impl Diagnostics {
         }
         Self {
             context_file: directory.join(format!("query-{}.json", uuid::Uuid::new_v4())),
+            session_file,
+            session: Mutex::new(session),
+            previous_session,
             directory,
             query: Mutex::new(None),
             acknowledgements: Mutex::new(()),
         }
+    }
+
+    fn expected_exit(&self, reason: ExpectedExit) -> Result<(), CoreError> {
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| CoreError::message("Diagnostics are busy."))?;
+        let mut finished = session.clone();
+        // The final event-loop exit must preserve the updater's explicit reason.
+        finished.expected_exit.get_or_insert(reason);
+        finished.exited_at = Some(Utc::now());
+        write_private(&self.session_file, &finished)?;
+        *session = finished;
+        Ok(())
+    }
+
+    fn is_previous_crash(&self, crash: &Crash) -> bool {
+        let Some(previous) = &self.previous_session else {
+            return false;
+        };
+        let Ok(current) = self.session.lock() else {
+            return false;
+        };
+        previous.expected_exit.is_none()
+            && current.expected_exit.is_none()
+            && crash.pid == Some(previous.pid)
+            && crash.version == previous.version
+            && crash.time >= previous.started_at
+            && crash.time < current.started_at
+            // Reject a reused PID belonging to a later process.
+            && crash.launched_at.is_none_or(|launch| launch <= previous.started_at)
     }
 
     fn acknowledge(&self, id: &str) -> Result<(), CoreError> {
@@ -131,6 +216,14 @@ impl Diagnostics {
                         < REPORT_AGE.as_secs() as i64
             })
             .max_by_key(|query| query.started_at)
+    }
+}
+
+pub(super) fn mark_expected_exit(app: &AppHandle, reason: ExpectedExit) {
+    if let Some(state) = app.try_state::<Arc<Diagnostics>>()
+        && state.expected_exit(reason).is_err()
+    {
+        eprintln!("Could not record expected shutdown for crash reporting.");
     }
 }
 
@@ -299,7 +392,13 @@ fn make_report(
     current_session: bool,
     now: SystemTime,
 ) -> DiagnosticReport {
-    let crash = logs.and_then(|directory| latest_crash(directory, now));
+    let crash = logs.and_then(|directory| {
+        if current_session {
+            latest_crash(directory, now)
+        } else {
+            latest_matching_crash(directory, now, |crash| state.is_previous_crash(crash))
+        }
+    });
     let current = state.query.lock().ok().and_then(|query| query.clone());
     let (query, from_crash) = if current_session && current.is_some() {
         (current, false)
@@ -334,7 +433,9 @@ fn make_report(
     .to_string();
     let mut new_crash = false;
     if let Some(crash) = &crash {
-        new_crash = !state.acknowledged().contains(&crash.id);
+        new_crash = !current_session
+            && state.is_previous_crash(crash)
+            && !state.acknowledged().contains(&crash.id);
         title = format!("Crash: {} (Catabase {})", crash.exception, crash.version);
         body.push_str(&format!(
             "- Crashed version: {}\n- Crash time (UTC): {}\n{}",
@@ -342,7 +443,16 @@ fn make_report(
             crash.time.format("%Y-%m-%d %H:%M:%S"),
             crash.details
         ));
-        note = "A recent macOS crash report is available. Review the report before sharing.".into();
+        note = if new_crash {
+            "macOS recorded a crash in the previous app session. Review the report before sharing."
+                .into()
+        } else {
+            format!(
+                "Saved macOS crash report: {} (Catabase {}).",
+                crash.time.format("%Y-%m-%d %H:%M:%S UTC"),
+                crash.version
+            )
+        };
     }
     DiagnosticReport {
         id: crash.map(|crash| crash.id),
@@ -411,11 +521,20 @@ fn write_private(path: &Path, value: &impl Serialize) -> Result<(), CoreError> {
 }
 
 fn latest_crash(directory: &Path, now: SystemTime) -> Option<Crash> {
+    latest_matching_crash(directory, now, |_| true)
+}
+
+fn latest_matching_crash(
+    directory: &Path,
+    now: SystemTime,
+    matches: impl Fn(&Crash) -> bool,
+) -> Option<Crash> {
     recent_files(directory, "catabase-", "ips")
         .into_iter()
         .take(30)
         .filter_map(|path| read_bounded(&path, MAX_LOG_BYTES))
         .filter_map(|bytes| parse_crash(&bytes))
+        .filter(matches)
         .filter(|crash| {
             now.duration_since(crash.time.into())
                 .is_ok_and(|age| age <= REPORT_AGE)
@@ -599,6 +718,29 @@ mod tests {
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
+
+        fn after_crash(&self) -> Diagnostics {
+            let crash = parse_crash(&log("com.catabase.app")).unwrap();
+            Diagnostics::begin_session(
+                &self.0,
+                "0.1.3",
+                123,
+                crash.time - chrono::Duration::minutes(1),
+            );
+            Diagnostics::begin_session(
+                &self.0,
+                "0.1.4",
+                456,
+                crash.time + chrono::Duration::minutes(1),
+            )
+        }
+
+        fn logs(&self) -> PathBuf {
+            let logs = self.0.join("logs");
+            fs::create_dir_all(&logs).unwrap();
+            fs::write(logs.join("catabase-fixture.ips"), log("com.catabase.app")).unwrap();
+            logs
+        }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -610,6 +752,7 @@ mod tests {
         let body = json!({
             "bundleInfo": {"CFBundleIdentifier": bundle, "CFBundleShortVersionString": "0.1.3"},
             "captureTime": "2026-11-19 11:35:56.6756 +0100", "pid": 123,
+            "procLaunch": "2026-11-19 11:30:00.0000 +0100",
             "procPath": "/Users/private-person/Applications/Catabase.app", "incident": "private-device-id",
             "asi": {"message": "password=do-not-share SELECT secret FROM private_table"},
             "exception": {"type": "EXC_BAD_ACCESS", "signal": "SIGSEGV", "subtype": "private data at 0xff00"},
@@ -645,17 +788,22 @@ mod tests {
     #[test]
     fn startup_report_is_acknowledged_once_and_can_be_reopened_without_sql_in_body() {
         let temp = Fixture::new();
-        let state = Diagnostics::new(&temp.0);
-        let logs = temp.0.join("logs");
-        fs::create_dir(&logs).unwrap();
-        fs::write(logs.join("catabase-fixture.ips"), log("com.catabase.app")).unwrap();
+        let state = temp.after_crash();
+        let logs = temp.logs();
         let now: SystemTime = DateTime::parse_from_rfc3339("2026-11-19T11:00:00Z")
             .unwrap()
             .into();
         let first = make_report(&state, "0.1.4", Some(&logs), false, now);
         assert!(first.new_crash);
         state.acknowledge(first.id.as_ref().unwrap()).unwrap();
-        let reopened = make_report(&Diagnostics::new(&temp.0), "0.1.4", Some(&logs), false, now);
+        assert!(!make_report(&state, "0.1.4", Some(&logs), false, now).new_crash);
+        let reopened = make_report(
+            &Diagnostics::new(&temp.0, "0.1.4"),
+            "0.1.4",
+            Some(&logs),
+            true,
+            now,
+        );
         assert!(!reopened.new_crash);
         assert_eq!(first.body, reopened.body);
         assert!(!reopened.body.contains("SELECT"));
@@ -664,9 +812,161 @@ mod tests {
     }
 
     #[test]
+    fn first_launch_ignores_historical_logs_but_keeps_them_available_manually() {
+        let temp = Fixture::new();
+        let crash = parse_crash(&log("com.catabase.app")).unwrap();
+        let state = Diagnostics::begin_session(
+            &temp.0,
+            "0.1.5",
+            456,
+            crash.time + chrono::Duration::minutes(5),
+        );
+        let logs = temp.logs();
+        let now = (crash.time + chrono::Duration::minutes(6)).into();
+        let automatic = make_report(&state, "0.1.5", Some(&logs), false, now);
+        assert!(!automatic.new_crash);
+        assert!(automatic.id.is_none());
+        let manual = make_report(&state, "0.1.5", Some(&logs), true, now);
+        assert!(!manual.new_crash);
+        assert!(manual.id.is_some());
+        assert!(manual.body.contains("Crashed version: 0.1.3"));
+        assert!(manual.note.starts_with("Saved macOS crash report:"));
+    }
+
+    #[test]
+    fn normal_quits_and_update_restarts_never_trigger_a_crash_prompt() {
+        for reason in [ExpectedExit::Quit, ExpectedExit::Update] {
+            let temp = Fixture::new();
+            let crash = parse_crash(&log("com.catabase.app")).unwrap();
+            let previous = Diagnostics::begin_session(
+                &temp.0,
+                "0.1.3",
+                123,
+                crash.time - chrono::Duration::minutes(1),
+            );
+            previous.expected_exit(reason).unwrap();
+            // The updater records its reason before restarting; the final
+            // event-loop exit also runs the normal quit hook.
+            previous.expected_exit(ExpectedExit::Quit).unwrap();
+            let saved: Session = read_json(&previous.session_file, 4_096).unwrap();
+            assert_eq!(saved.expected_exit, Some(reason));
+            assert!(saved.exited_at.is_some());
+            let current = Diagnostics::begin_session(
+                &temp.0,
+                "0.1.4",
+                456,
+                crash.time + chrono::Duration::minutes(1),
+            );
+            let logs = temp.logs();
+            let now = (crash.time + chrono::Duration::minutes(2)).into();
+            assert!(!make_report(&current, "0.1.4", Some(&logs), false, now).new_crash);
+            assert!(
+                make_report(&current, "0.1.4", Some(&logs), false, now)
+                    .id
+                    .is_none()
+            );
+            assert!(
+                make_report(&current, "0.1.4", Some(&logs), true, now)
+                    .id
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn delayed_os_log_is_detected_only_for_the_previous_unexpected_session() {
+        let temp = Fixture::new();
+        let state = temp.after_crash();
+        let crash = parse_crash(&log("com.catabase.app")).unwrap();
+        let logs = temp.0.join("logs");
+        fs::create_dir(&logs).unwrap();
+        let now = (crash.time + chrono::Duration::minutes(2)).into();
+        assert!(!make_report(&state, "0.1.4", Some(&logs), false, now).new_crash);
+        temp.logs();
+        assert!(make_report(&state, "0.1.4", Some(&logs), false, now).new_crash);
+
+        // A later successful session establishes a new baseline even if the
+        // earlier crash report was never acknowledged.
+        state.expected_exit(ExpectedExit::Quit).unwrap();
+        let next = Diagnostics::begin_session(
+            &temp.0,
+            "0.1.4",
+            789,
+            crash.time + chrono::Duration::minutes(3),
+        );
+        assert!(
+            !make_report(
+                &next,
+                "0.1.4",
+                Some(&logs),
+                false,
+                (crash.time + chrono::Duration::minutes(4)).into()
+            )
+            .new_crash
+        );
+    }
+
+    #[test]
+    fn another_instances_late_exit_does_not_replace_the_latest_session() {
+        let temp = Fixture::new();
+        let crash = parse_crash(&log("com.catabase.app")).unwrap();
+        let older = Diagnostics::begin_session(
+            &temp.0,
+            "0.1.3",
+            111,
+            crash.time - chrono::Duration::hours(1),
+        );
+        Diagnostics::begin_session(
+            &temp.0,
+            "0.1.3",
+            123,
+            crash.time - chrono::Duration::minutes(1),
+        );
+        older.expected_exit(ExpectedExit::Quit).unwrap();
+        let current = Diagnostics::begin_session(
+            &temp.0,
+            "0.1.4",
+            456,
+            crash.time + chrono::Duration::minutes(1),
+        );
+        assert_eq!(current.previous_session.as_ref().unwrap().pid, 123);
+        let logs = temp.logs();
+        assert!(
+            make_report(
+                &current,
+                "0.1.4",
+                Some(&logs),
+                false,
+                (crash.time + chrono::Duration::minutes(2)).into()
+            )
+            .new_crash
+        );
+    }
+
+    #[test]
+    fn unrelated_versions_processes_and_reused_pids_do_not_match_the_previous_session() {
+        let temp = Fixture::new();
+        let state = temp.after_crash();
+        let mut crash = parse_crash(&log("com.catabase.app")).unwrap();
+        assert!(state.is_previous_crash(&crash));
+        crash.pid = Some(999);
+        assert!(!state.is_previous_crash(&crash));
+        crash.pid = Some(123);
+        crash.version = "0.1.2".into();
+        assert!(!state.is_previous_crash(&crash));
+        crash.version = "0.1.3".into();
+        crash.launched_at = Some(crash.time - chrono::Duration::seconds(1));
+        assert!(!state.is_previous_crash(&crash));
+        crash.launched_at = None;
+        crash.time =
+            state.previous_session.as_ref().unwrap().started_at - chrono::Duration::seconds(1);
+        assert!(!state.is_previous_crash(&crash));
+    }
+
+    #[test]
     fn crash_sql_matches_process_and_time_and_survives_restart() {
         let temp = Fixture::new();
-        let state = Diagnostics::new(&temp.0);
+        let state = Diagnostics::new(&temp.0, "0.1.4");
         let crash = parse_crash(&log("com.catabase.app")).unwrap();
         let context = QueryContext {
             sql: "select 'private sql'".into(),
@@ -676,7 +976,7 @@ mod tests {
             started_at: crash.time - chrono::Duration::seconds(10),
         };
         write_private(&state.context_file, &context).unwrap();
-        let restarted = Diagnostics::new(&temp.0);
+        let restarted = Diagnostics::new(&temp.0, "0.1.4");
         assert_eq!(restarted.crash_query(&crash).unwrap().sql, context.sql);
         let mut wrong = context.clone();
         wrong.pid = 124;
@@ -703,7 +1003,7 @@ mod tests {
     #[test]
     fn missing_or_oversized_logs_do_not_block_manual_reporting() {
         let temp = Fixture::new();
-        let state = Diagnostics::new(&temp.0);
+        let state = Diagnostics::new(&temp.0, "0.1.4");
         let missing = temp.0.join("missing");
         let report = make_report(&state, "0.1.4", Some(&missing), false, SystemTime::now());
         assert!(report.id.is_none());
@@ -720,7 +1020,7 @@ mod tests {
     #[test]
     fn manual_reports_can_include_current_sql_without_mislabeling_it_as_crash_sql() {
         let temp = Fixture::new();
-        let state = Diagnostics::new(&temp.0);
+        let state = temp.after_crash();
         let logs = temp.0.join("logs");
         fs::create_dir(&logs).unwrap();
         fs::write(logs.join("catabase-fixture.ips"), log("com.catabase.app")).unwrap();

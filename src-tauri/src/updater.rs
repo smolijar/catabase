@@ -332,6 +332,8 @@ pub(super) async fn install_update(
             total_bytes: Some(downloaded),
         },
     );
+    // restart() can bypass the event loop when called on the main thread.
+    super::diagnostics::mark_expected_exit(&app, super::diagnostics::ExpectedExit::Update);
     app.restart();
 }
 
