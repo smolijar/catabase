@@ -24,7 +24,6 @@
   .lights i { width: 11px; height: 11px; border-radius: 50%; background: #ff6058; }
   .lights i:nth-child(2) { background: #ffbd2f; }
   .lights i:nth-child(3) { background: #28c840; }
-  .update-badge { min-height: 22px; height: 22px; padding: 0 7px; gap: 5px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface-1); color: var(--ink-muted); font-size: 11px; font-weight: 400; line-height: 16px; }
-  .update-badge :global(.icon) { color: var(--brand); }
+  .update-pill { flex-shrink: 0; min-height: 24px; border-color: var(--brand); border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; }
   p { margin: 0; font-size: 12px; color: var(--ink-faint); }
 </style>

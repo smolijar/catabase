@@ -2091,7 +2091,7 @@
       <span class="wordmark" aria-hidden="true"><b>CAT</b>ABASE<i></i></span>
     </div>
     {#if updateState.update}
-      <button class="update-pill" title={`Catabase ${updateState.update.version} is available`} on:click={openAppUpdates}>Update available</button>
+      <button class="update-badge" title={`Catabase ${updateState.update.version} is available`} on:click={openAppUpdates}><Icon name="download" size={12} /><span>Update available</span></button>
     {/if}
     <button class="workspace-search" aria-label="Search tables, queries, history, commands" title="Search workspace (Cmd/Ctrl+K)" on:click={() => picker = 'commands'}><Icon name="search" size={14} /><span>Search tables, queries, history, commands</span><kbd>⌘K</kbd></button>
     {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : operation.kind === 'explain' ? 'Explaining' : 'Exporting'} · {runningDuration}</button>{/if}
