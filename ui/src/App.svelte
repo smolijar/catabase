@@ -18,6 +18,7 @@
   import HistoryTransactionGroup from './components/HistoryTransactionGroup.svelte';
   import AppUpdates from './components/AppUpdates.svelte';
   import DiagnosticDialog from './components/DiagnosticDialog.svelte';
+  import ResumeConnectionDialog from './components/ResumeConnectionDialog.svelte';
   import type { DiagnosticReport } from './lib/diagnostics';
   import AutoTransactionToggle from './components/AutoTransactionToggle.svelte';
   import ExplainDialog from './components/ExplainDialog.svelte';
@@ -36,6 +37,7 @@
   import { connectionOptions, connectionTestTimeout } from './lib/connectionOptions';
   import { hasNativeMacTitlebar } from './lib/nativeTitlebar';
   import { sameConnectionSettings } from './lib/connectionEditor';
+  import { LAST_CONNECTION_KEY, restoreLastConnectionId, resumeConnection } from './lib/connectionRun';
   import type { ConnectionAppearance, ThemePreference } from './lib/appearance';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
@@ -180,6 +182,9 @@
   let pendingChanges: PendingChange[] = [];
 
   let connections: ConnectionRecord[] = [];
+  let lastConnectionId: string | null = null;
+  let queryPreparing = false;
+  let reconnectReview: { connectionId: string; target: ExecutionTarget; resolve: (connection: ConnectionRecord | null) => void } | null = null;
   let connectionOrder: string[] = [];
   let connectionList: HTMLUListElement | undefined;
   let connectionDrag: { id: string; x: number; y: number } | null = null;
@@ -290,7 +295,7 @@
   $: running = operation !== null;
   $: updateBlocked = updateInstallBlock({
     ready: workspaceLoaded,
-    busy: Boolean(operation || connectionMutation || showConnectionModal || schemaLoading || showUpdatePreview || explainSession || explainOpening || discardRunConfirmation || tabCloseTask || closingWorkspace),
+    busy: Boolean(operation || connectionMutation || queryPreparing || showConnectionModal || schemaLoading || showUpdatePreview || explainSession || explainOpening || discardRunConfirmation || tabCloseTask || closingWorkspace),
     transactionKnown: txStatusKnown,
     transactionActive: txStatus.active,
     stagedEdits: tabs.reduce((count, tab) => count + (tab.id === activeTab ? pendingChanges.length : tab.pendingChanges.length), 0),
@@ -343,6 +348,7 @@
       appearances = restoreAppearance(localStorage.getItem(APPEARANCE_KEY));
     } catch { /* Appearance controls remain usable without storage. */ }
     try { connectionOrder = restoreConnectionOrder(localStorage.getItem(CONNECTION_ORDER_KEY)); } catch { /* Keep the order in memory. */ }
+    try { lastConnectionId = restoreLastConnectionId(localStorage.getItem(LAST_CONNECTION_KEY)); } catch { /* A tab's saved connection remains available. */ }
     try { editorFontSize = restoreEditorFontSize(localStorage.getItem(EDITOR_FONT_STORAGE_KEY)); } catch { /* Font controls still work without storage. */ }
     try { vimModeEnabled = localStorage.getItem(VIM_MODE_STORAGE_KEY) === 'true'; } catch { /* Keep the default for this session. */ }
     try { automaticUpdates = localStorage.getItem(AUTO_UPDATE_CHECK_KEY) !== 'false'; } catch { /* Keep the default for this session. */ }
@@ -379,7 +385,7 @@
       connectionId: activeConnection?.id ?? null,
       state: activeConnection ? connectionTests[activeConnection.id] ?? null : null,
       ready: mounted && workspaceLoaded && !closingWorkspace,
-      busy: Boolean(operation || connectionMutation || showConnectionModal || explainSession || explainOpening || schemaLoading || editMode || discardRunConfirmation || tabCloseTask),
+      busy: Boolean(operation || connectionMutation || queryPreparing || showConnectionModal || explainSession || explainOpening || schemaLoading || editMode || discardRunConfirmation || tabCloseTask),
       transactionIdle: txStatusKnown && !txStatus.active
     }), (id) => {
       const connection = connections.find(candidate => candidate.id === id);
@@ -489,7 +495,7 @@
 
   $: if (diagnosticsPending && workspaceLoaded && !running && !connectionMutation && !closingWorkspace
       && !showConnectionModal && !showUpdatePreview && !discardRunConfirmation && !timingDetails
-      && !picker && !explainSession && !explainOpening && !updateInstalling && !historyStorage) {
+      && !picker && !explainSession && !explainOpening && !updateInstalling && !historyStorage && !queryPreparing && !reconnectReview) {
     diagnosticsPending = false;
     diagnosticsOpen = true;
   }
@@ -500,7 +506,7 @@
     if (id) void api.acknowledgeDiagnostics(id).catch(error => flash(`Could not save the report review: ${errorMessage(error)}`, true));
   }
 
-  $: if (failedConnectionIds.length && workspaceLoaded && !operation && !connectionMutation
+  $: if (failedConnectionIds.length && workspaceLoaded && !operation && !connectionMutation && !queryPreparing
       && !txStatus.active && !closingWorkspace && !showConnectionModal) {
     void disconnectFailedConnection(failedConnectionIds[0]);
   }
@@ -928,7 +934,7 @@
   function handleKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented || !workspaceLoaded || closingWorkspace) return;
     if (tabCloseTask) { event.preventDefault(); return; }
-    if (picker || explainSession || explainOpening || diagnosticsOpen) return;
+    if (picker || explainSession || explainOpening || diagnosticsOpen || reconnectReview || queryPreparing) return;
     const fontAction = fontSizeShortcut(event);
     if (fontAction) {
       event.preventDefault();
@@ -1054,6 +1060,17 @@
     if (order.length === connectionOrder.length && order.every((id, index) => id === connectionOrder[index])) return;
     connectionOrder = order;
     try { localStorage.setItem(CONNECTION_ORDER_KEY, JSON.stringify(order)); } catch { /* Session order still applies. */ }
+  }
+
+  function rememberConnection(id: string) {
+    lastConnectionId = id;
+    try { localStorage.setItem(LAST_CONNECTION_KEY, id); } catch { /* Keep the last choice in memory. */ }
+  }
+
+  function resolveReconnectReview(connection: ConnectionRecord | null) {
+    const review = reconnectReview;
+    reconnectReview = null;
+    review?.resolve(connection);
   }
 
   function focusConnectionRow(id: string) {
@@ -1251,7 +1268,7 @@
 
   async function runQuery() {
     if (closingWorkspace || !workspaceLoaded || explainOpening || explainSession) return;
-    if (discardRunConfirmation) return;
+    if (discardRunConfirmation || reconnectReview || queryPreparing) return;
     if (connectionMutation) { flash(connectionMutation); return; }
     if (operation) {
       await cancelQuery();
@@ -1261,28 +1278,59 @@
       flash('Open this SQL in a query tab to run it.');
       return;
     }
-    if (!activeConnection) { sidebar = 'connections'; sidebarOpen = true; flash('Choose a connection for this query.'); return; }
     const tabId = activeTab;
-    const connectionId = activeConnection.id;
+    const initialAssociation = tabConnectionId;
+    const draftSql = sql;
+    let connectionId = activeConnection?.id ?? null;
+    let reviewedTarget: ExecutionTarget | null = null;
     const editor = editorRef;
-    if (pendingChanges.length) {
-      if (!await confirmDiscardForRun()) return;
-      await tick();
-      // Never let a delayed confirmation execute against a different tab or connection.
-      if (activeTab !== tabId || tabConnectionId !== connectionId || operation || connectionMutation || closingWorkspace) return;
-    }
+    const stillCurrent = (association = initialAssociation) => activeTab === tabId && tabConnectionId === association && sql === draftSql && !operation && !closingWorkspace;
+    queryPreparing = true;
+    try {
+      if (pendingChanges.length) {
+        if (!await confirmDiscardForRun()) return;
+        await tick();
+        if (!stillCurrent()) return;
+      }
+      if (!connectionId) {
+        const candidate = resumeConnection(connections, initialAssociation, lastConnectionId);
+        if (!candidate) { picker = 'connections'; flash('Choose a connection, then run this query.'); return; }
+        reviewedTarget = editor ? await editor.getExecutionTarget(api.splitSql) : { sql: draftSql.trim(), start: 0, end: draftSql.length };
+        if (!reviewedTarget.sql.trim()) throw new Error('No query to execute.');
+        if (!stillCurrent()) return;
+        const reviewed = await new Promise<ConnectionRecord | null>(resolve => {
+          reconnectReview = { connectionId: candidate.id, target: reviewedTarget!, resolve };
+        });
+        if (!reviewed || !stillCurrent()) return;
+        const current = connections.find(connection => connection.id === reviewed.id);
+        if (!current || !sameConnectionSettings(current, reviewed)) throw new Error('Connection settings changed. Run again to review the current connection.');
+        connectionMutation = 'Connecting…';
+        const connected = await api.activateConnection(reviewed.id);
+        if (!sameConnectionSettings(connected, reviewed)) throw new Error('Connection settings changed. Run again to review the current connection.');
+        if (!stillCurrent()) return;
+        connectedIds = new Set([...connectedIds, connected.id]);
+        patchTab(tabId, { connectionId: connected.id });
+        rememberConnection(connected.id);
+        connectionId = connected.id;
+        await loadConnections();
+        if (!stillCurrent(connectionId)) return;
+      }
+    } catch (error) { flash(errorMessage(error), true); return; }
+    finally { queryPreparing = false; connectionMutation = null; }
+    if (!connectionId) return;
     const op = beginOperation('query', connectionId);
     const timingStart = performance.now();
     let target: ExecutionTarget = { sql: sql.trim(), start: 0, end: sql.length };
     statusFlash = 'Running query...';
     statusTiming = null;
     try {
-      target = editor ? await editor.getExecutionTarget(api.splitSql) : target;
+      target = reviewedTarget ?? (editor ? await editor.getExecutionTarget(api.splitSql) : target);
       if (!target.sql.trim()) throw new Error('No query to execute.');
       if (op.cancelling) { flash('Query cancelled before execution.'); return; }
       patchTab(op.tabId, { error: null });
       void loadConnectionStats();
       const invokeStart = performance.now();
+      rememberConnection(op.connectionId);
       const next = await connectionTester.query(op.connectionId, () => api.executeQuery(target.sql, op.token, 0, PAGE_SIZE, op.connectionId));
       const invokeEnd = performance.now();
       if (!isCurrentOperation(op)) return;
@@ -1435,7 +1483,7 @@
   }
 
   async function saveConnection() {
-    if (operation || connectionMutation) return;
+    if (operation || connectionMutation || queryPreparing) return;
     const existing = connections.find(connection => connection.id === connectionForm.id);
     if (existing && sameConnectionSettings(existing, connectionForm)) {
       saveConnectionAppearance(existing.id, connectionAppearanceForm);
@@ -1465,6 +1513,7 @@
         }
       }
       patchTab(initiatingTab, { connectionId: saved.id });
+      rememberConnection(saved.id);
       connectedIds = new Set([...connectedIds, saved.id]);
       showConnectionModal = false;
       flash(`${saved.name} saved and ready.`);
@@ -1479,7 +1528,7 @@
   }
 
   async function activateConnection(id: string) {
-    if (operation || connectionMutation) { flash('Wait for the current operation before switching connections.'); return; }
+    if (operation || connectionMutation || queryPreparing) { flash('Wait for the current operation before switching connections.'); return; }
     const connection = connections.find((candidate) => candidate.id === id);
     if (!connection) return;
     // A click on the current connection is a retry, not a switch: keep
@@ -1492,6 +1541,7 @@
     connectionMutation = 'Switching connection…';
     try {
       const active = await api.activateConnection(id);
+      rememberConnection(id);
       connectedIds = new Set([...connectedIds, id]);
       patchTab(initiatingTab, {
         connectionId: id,
@@ -2084,7 +2134,7 @@
 
 <svelte:document on:contextmenu={(event) => event.preventDefault()} on:selectstart={preventWorkspaceSelection} />
 
-<main class="app-shell" class:native-titlebar={nativeTitlebar} inert={closingWorkspace || Boolean(tabCloseTask)} aria-busy={Boolean(tabCloseTask)}>
+<main class="app-shell" class:native-titlebar={nativeTitlebar} inert={closingWorkspace || Boolean(tabCloseTask) || queryPreparing} aria-busy={Boolean(tabCloseTask) || queryPreparing}>
   <header class="toolbar" data-tauri-drag-region={nativeTitlebar ? 'deep' : undefined}>
     <div class="brand" aria-label="catabase">
       <Cat mood={running ? 'prompt' : queryError ? 'error' : !activeConnection || result?.rowCount === 0 ? 'asleep' : 'awake'} />
@@ -2354,7 +2404,7 @@
         <button aria-label="Find in SQL editor" title="Find in SQL editor (Cmd/Ctrl+F)" disabled={!workspaceLoaded} on:click={() => editorRef?.find()}><Icon name="search" size={16} /></button>
         <button aria-label="Format SQL" title="Format selected SQL, or the entire draft" disabled={!workspaceLoaded || tabKind !== 'query'} on:click={formatSql}><Icon name="format" size={16} /><span class="action-label">Format SQL</span></button>
         <button title="Explain selected SQL or the statement at the cursor" aria-label="Explain query" disabled={!workspaceLoaded || running || Boolean(connectionMutation) || explainOpening || tabKind !== 'query' || !activeConnection} on:click={openExplain}><Icon name="explain" size={16} /><span class="action-label">Explain</span></button>
-        <button class="primary run-button" class:cancel-button={running} on:click={runQuery} disabled={!workspaceLoaded || Boolean(connectionMutation) || operation?.cancelling || (!running && (!activeConnection || tabKind !== 'query'))} title={activeConnection ? 'Run current statement (Cmd/Ctrl+Enter)' : 'Add or activate a connection first'}>
+        <button class="primary run-button" class:cancel-button={running} on:click={runQuery} disabled={!workspaceLoaded || Boolean(connectionMutation) || queryPreparing || operation?.cancelling || (!running && tabKind !== 'query')} title={activeConnection ? 'Run current statement (Cmd/Ctrl+Enter)' : 'Review a saved connection before running'}>
           <Icon name={running ? 'stop' : 'play'} size={14} /><span>{operation?.cancelling ? 'Cancelling…' : running ? 'Cancel' : 'Run'}</span><kbd>⌘↵</kbd>
         </button>
       </div>
@@ -2522,6 +2572,9 @@
 {/if}
 {#if diagnosticsOpen && diagnosticReport}
   <DiagnosticDialog report={diagnosticReport} onClose={closeDiagnostics} />
+{/if}
+{#if reconnectReview}
+  <ResumeConnectionDialog {connections} initialConnectionId={reconnectReview.connectionId} {appearances} query={reconnectReview.target.sql} onConfirm={resolveReconnectReview} onClose={() => resolveReconnectReview(null)} />
 {/if}
 {#if picker}
   <WorkspacePicker label={picker === 'connections' ? 'Switch connection' : 'Search workspace'} placeholder={picker === 'connections' ? 'Find a connection…' : 'Search tables, queries, history, commands…'} items={pickerItems} onSearch={searchPickerHistory} searchStatus={picker === 'commands' ? pickerHistory.loading ? 'Searching history…' : pickerHistory.error ? `History unavailable: ${pickerHistory.error}` : pickerHistory.total > 20 ? `Showing the 20 newest of ${pickerHistory.total} history matches. Refine your search for older entries.` : '' : ''} onSelect={selectPickerItem} onClose={() => picker = null} />

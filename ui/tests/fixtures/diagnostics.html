@@ -8,6 +8,12 @@
   <script type="module">
     const timestamp = new Date().toISOString();
     const connection = { id:'fixture',name:'zenbase docker (fixture)',username:'demo',host:'synthetic.invalid',port:5432,database:'demo',ssl:false,isActive:false,createdAt:timestamp,updatedAt:timestamp };
+    const productionPreview = new URLSearchParams(location.search).get('target') === 'production';
+    if (productionPreview) {
+      connection.name = 'Production fixture'; connection.username = 'postgres'; connection.database = 'production_fixture';
+      localStorage.setItem('catabase.connectionAppearance', JSON.stringify({ fixture: { color: 'red', environment: 'PROD ROOT' }, other: { color: 'blue', environment: 'DEV' } }));
+    }
+    const connections = productionPreview ? [connection, { ...connection, id: 'other', name: 'Development fixture', username: 'dev', database: 'development_fixture' }] : [connection];
     const counts = {};
     let reviewed = false;
     const notes = '**macOS build:** updater signatures are included.\n\n## Changes\n\n- **Fix** clipboard crashes ([abc123](https://github.com/smolijar/catabase/commit/abc123))\n- Add `Vim` shortcuts\n\n[Full diff since v0.1.3](https://github.com/smolijar/catabase/compare/v0.1.3...v0.1.4)\n\n<script>window.untrustedMarkdownExecuted=true<\/script><img src="x" onerror="window.untrustedMarkdownExecuted=true"><a href="javascript:alert(1)">Unsafe link</a>';
@@ -20,9 +26,9 @@
         case 'plugin:event|listen': return 0;
         case 'plugin:event|unlisten': return;
         case 'get_settings': return {poolSize:1,supermavenEnabled:false,autoTransaction:true};
-        case 'list_connections': return [{...connection}];
-        case 'activate_connection': connection.isActive=true; return {...connection};
-        case 'disconnect_connection': connection.isActive=false; return;
+        case 'list_connections': return connections.map(value => ({...value}));
+        case 'activate_connection': { const selected = connections.find(value => value.id === args.id); if (!selected) throw new Error('Unknown fixture connection'); for (const value of connections) value.isActive = value === selected; return {...selected}; }
+        case 'disconnect_connection': { const selected = connections.find(value => value.id === args.id); if (selected) selected.isActive=false; return; }
         case 'test_connection': await new Promise(resolve=>setTimeout(resolve,150)); if(document.getElementById('offline').checked) throw new Error('postgres error: error connecting to server'); return;
         case 'connection_stats': return {active:0,idle:1,poolSize:1};
         case 'introspect_schema': return {schemas:[]};

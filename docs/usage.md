@@ -18,6 +18,8 @@ Technical diagnostics include app/OS versions, exception type and stack samples.
 
 The app starts disconnected. Saved tabs remember their connection association, but reopening the app does not connect, reflect the schema or run a healthcheck until you choose a connection. Failed connection checks disconnect the session. Transport/authentication failures during queries do the same; SQL errors keep the connection available. Running operations and open transactions defer disconnection. Automatically disconnecting preserves results and staged edits for review.
 
+Pressing **Run** while disconnected offers the tab's saved connection, or the last explicitly used connection if the tab has none. Review its color, environment label, database, host, username and SQL, then choose **Connect & run**. You can choose a different target or cancel without connecting or executing anything. Connected tabs run normally without this confirmation.
+
 Add a connection in the Connections sidebar. Click its row or press Enter to use it and immediately test it. Double-click opens its settings; F2 edits without activating it. Right-click, Option/Alt-click or Shift+F10 opens connection actions. Connections can be duplicated from this menu or by copying and pasting a focused connection row. The copy inherits the saved connection settings, color, and environment label.
 
 Drag connection rows to reorder them, or press `Alt+Shift+Up/Down` on a focused row. The sidebar and connection switcher remember the order. New connections appear at the end, and duplicates appear directly below their source.
