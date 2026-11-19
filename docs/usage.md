@@ -2,6 +2,14 @@
 
 Catabase is a desktop PostgreSQL workspace for writing SQL, inspecting results, reviewing cell edits and revisiting query history. For downloads and source builds, start with the [README](../README.md).
 
+## Crash reports
+
+After a native crash, Catabase checks recent macOS crash reports on the next launch and offers a report to review. **Settings → Diagnostics → Report a problem** reopens the latest report or prepares a manual report on any platform. Dismissing a crash report prevents repeated prompts for that crash.
+
+**Open GitHub draft** opens a prefilled issue in your browser. Review it and submit it on GitHub; the app never posts automatically and needs no GitHub token. **Copy report** is available without GitHub. Reports too long for a URL are copied for you to paste into the issue.
+
+Technical diagnostics include app/OS versions, exception type and stack samples. They exclude raw logs, personal paths, device identifiers, credentials, results and clipboard contents. **Include latest/running SQL** is off for every new report. Enabling it adds a separate SQL preview; SQL can contain sensitive values. Local query context is bounded, private to your user account and kept across restart to identify the statement active during a crash, including reviewed updates and transaction statements.
+
 ## Connections
 
 Add a connection in the Connections sidebar. Click its row or press Enter to use it and immediately test it. Double-click opens its settings; F2 edits without activating it. Right-click, Option/Alt-click or Shift+F10 opens connection actions. Connections can be duplicated from this menu or by copying and pasting a focused connection row. The copy inherits the saved connection settings, color, and environment label.

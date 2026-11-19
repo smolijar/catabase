@@ -169,7 +169,9 @@ pub(super) async fn explain_query(
             })
             .await?;
         let notify = |saved| notify_history(&app, saved);
-        let history = StatementHistory::new(&state.storage, &active.id, &notify);
+        let diagnostic_observer = super::diagnostics::QueryObserver::new(&app);
+        let history = StatementHistory::new(&state.storage, &active.id, &notify)
+            .with_observer(&diagnostic_observer);
         let mut tx = cancellation
             .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
             .await?;

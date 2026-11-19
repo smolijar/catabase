@@ -17,6 +17,7 @@ pub struct StatementHistory<'a> {
     connection_id: &'a str,
     notify: &'a (dyn Fn(Result<(), CoreError>) + Send + Sync),
     state: Mutex<RecordingState>,
+    observer: Option<&'a dyn StatementObserver>,
 }
 
 #[derive(Default)]
@@ -38,7 +39,13 @@ impl<'a> StatementHistory<'a> {
             connection_id,
             notify,
             state: Mutex::new(RecordingState::default()),
+            observer: None,
         }
+    }
+
+    pub fn with_observer(mut self, observer: &'a dyn StatementObserver) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     pub fn set_transaction(&self, id: Option<String>) {
@@ -76,10 +83,16 @@ impl<'a> StatementHistory<'a> {
 
 impl StatementObserver for StatementHistory<'_> {
     fn started(&self, sql: &str) {
+        if let Some(observer) = self.observer {
+            observer.started(sql);
+        }
         self.state.lock().unwrap().pending = Some((sql.to_owned(), Instant::now()));
     }
 
     fn finished(&self, sql: &str, result: Result<&QueryResult, &CoreError>, duration_ms: u128) {
+        if let Some(observer) = self.observer {
+            observer.finished(sql, result, duration_ms);
+        }
         let start = Instant::now();
         let mut state = self.state.lock().unwrap();
         let saved = match result {

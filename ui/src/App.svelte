@@ -17,6 +17,8 @@
   import HistoryEntryCard from './components/HistoryEntryCard.svelte';
   import HistoryTransactionGroup from './components/HistoryTransactionGroup.svelte';
   import AppUpdates from './components/AppUpdates.svelte';
+  import DiagnosticDialog from './components/DiagnosticDialog.svelte';
+  import type { DiagnosticReport } from './lib/diagnostics';
   import AutoTransactionToggle from './components/AutoTransactionToggle.svelte';
   import ExplainDialog from './components/ExplainDialog.svelte';
   import { createExplainWorkflow, initialExplainState } from './lib/explain';
@@ -167,6 +169,10 @@
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let toastError = false;
   let mounted = false;
+  let diagnosticReport: DiagnosticReport | null = null;
+  let diagnosticsOpen = false;
+  let diagnosticsPending = false;
+  let diagnosticsLoading = false;
   let txStatus: TxStatus = { active: false, startedAt: null };
   let txStatusKnown = false;
   let editMode = false;
@@ -450,6 +456,34 @@
     workspaceLoaded = true;
     await tick();
     if (mounted) onWorkspaceReady();
+    if (mounted && isTauri()) void loadDiagnostics(true);
+  }
+
+  async function loadDiagnostics(automatic = false) {
+    if (diagnosticsLoading) return;
+    diagnosticsLoading = true;
+    try {
+      const report = await api.diagnosticsReport();
+      if (!mounted) return;
+      if (automatic && !report.newCrash) return;
+      diagnosticReport = report;
+      diagnosticsPending = true;
+    } catch (error) {
+      if (!automatic) flash(`Could not load diagnostics: ${errorMessage(error)}`, true);
+    } finally { diagnosticsLoading = false; }
+  }
+
+  $: if (diagnosticsPending && workspaceLoaded && !running && !connectionMutation && !closingWorkspace
+      && !showConnectionModal && !showUpdatePreview && !discardRunConfirmation && !timingDetails
+      && !picker && !explainSession && !explainOpening && !updateInstalling && !historyStorage) {
+    diagnosticsPending = false;
+    diagnosticsOpen = true;
+  }
+
+  function closeDiagnostics() {
+    diagnosticsOpen = false;
+    const id = diagnosticReport?.id;
+    if (id) void api.acknowledgeDiagnostics(id).catch(error => flash(`Could not save the report review: ${errorMessage(error)}`, true));
   }
 
   async function registerExplainEvents() {
@@ -860,7 +894,7 @@
   function handleKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented || !workspaceLoaded || closingWorkspace) return;
     if (tabCloseTask) { event.preventDefault(); return; }
-    if (picker || explainSession || explainOpening) return;
+    if (picker || explainSession || explainOpening || diagnosticsOpen) return;
     const fontAction = fontSizeShortcut(event);
     if (fontAction) {
       event.preventDefault();
@@ -2204,6 +2238,11 @@
             onCheck={() => void updateChecker.check()} onAutomatic={setAutomaticUpdates} onInstall={() => void installAppUpdate()}
             onReleases={() => void api.openReleases().catch(error => flash(errorMessage(error), true))} />
           <section class="settings-card">
+            <div class="settings-card-head"><strong>Diagnostics</strong></div>
+            <p>Review a crash report or report a problem. Nothing is sent automatically.</p>
+            <button disabled={diagnosticsLoading || running} on:click={() => void loadDiagnostics()}>{diagnosticsLoading ? 'Preparing report…' : 'Report a problem'}</button>
+          </section>
+          <section class="settings-card">
             <div class="settings-card-head"><strong>SQL editor</strong></div>
             <Switch label="Vim mode" checked={vimModeEnabled} onChange={setVimMode} />
             <p>Use Vim keybindings across SQL tabs.</p>
@@ -2443,6 +2482,9 @@
 
 {#if historyStorage}
   <HistoryStorageDialog entry={historyStorage.entry} stats={historyStorage.stats} error={historyStorage.error} onClose={() => historyStorage = null} />
+{/if}
+{#if diagnosticsOpen && diagnosticReport}
+  <DiagnosticDialog report={diagnosticReport} onClose={closeDiagnostics} />
 {/if}
 {#if picker}
   <WorkspacePicker label={picker === 'connections' ? 'Switch connection' : 'Search workspace'} placeholder={picker === 'connections' ? 'Find a connection…' : 'Search tables, queries, history, commands…'} items={pickerItems} onSearch={searchPickerHistory} searchStatus={picker === 'commands' ? pickerHistory.loading ? 'Searching history…' : pickerHistory.error ? `History unavailable: ${pickerHistory.error}` : pickerHistory.total > 20 ? `Showing the 20 newest of ${pickerHistory.total} history matches. Refine your search for older entries.` : '' : ''} onSelect={selectPickerItem} onClose={() => picker = null} />

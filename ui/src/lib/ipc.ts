@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { UpdaterStatus, UpdateCheck } from './appUpdates';
 import type { ExplainRequest, ExplainResult, ShareExplainRequest } from './explain';
+import type { DiagnosticReport } from './diagnostics';
 import type {
   SupermavenStatus,
   SupermavenRequest,
@@ -26,6 +27,9 @@ import type {
 } from './types';
 
 export const api = {
+  diagnosticsReport: () => invoke<DiagnosticReport>('diagnostics_report'),
+  acknowledgeDiagnostics: (id: string) => invoke<void>('acknowledge_diagnostics', { id }),
+  openDiagnosticIssue: (title: string, body: string) => invoke<void>('open_diagnostic_issue', { title, body }),
   updaterStatus: () => invoke<UpdaterStatus>('updater_status'),
   checkForUpdate: () => invoke<UpdateCheck>('check_for_update'),
   installUpdate: (version: string) => invoke<void>('install_update', { version }),

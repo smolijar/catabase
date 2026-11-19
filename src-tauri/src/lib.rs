@@ -2,6 +2,7 @@
 mod auto_transaction_tests;
 mod clipboard;
 mod dalibo;
+mod diagnostics;
 mod explain;
 mod updater;
 
@@ -390,7 +391,8 @@ async fn execute_query(
             })
             .await?;
         let notify = |saved| notify_history(&app, saved);
-        let history = StatementHistory::new(&state.storage, &active.id, &notify);
+        let diagnostic_observer = diagnostics::QueryObserver::new(&app);
+        let history = StatementHistory::new(&state.storage, &active.id, &notify).with_observer(&diagnostic_observer);
         let result = run_query_with_state(
             &app,
             &state,
@@ -463,7 +465,9 @@ async fn apply_row_updates(
     let outcome = async {
         let active = requested_connection(&state, Some(&connection_id)).await?;
         let notify = |saved| notify_history(&app, saved);
-        let history = StatementHistory::new(&state.storage, &active.id, &notify);
+        let diagnostic_observer = diagnostics::QueryObserver::new(&app);
+        let history = StatementHistory::new(&state.storage, &active.id, &notify)
+            .with_observer(&diagnostic_observer);
         if active.options.read_only {
             return Err(CoreError::message(
                 "Cell editing is disabled for this read-only connection.",
@@ -1298,7 +1302,9 @@ async fn finish_tx(
         .map(|session| session.connection_id.clone())
         .ok_or_else(|| CoreError::message("No active transaction"))?;
     let notify = |saved| notify_history(app, saved);
-    let history = StatementHistory::new(&state.storage, &connection_id, &notify);
+    let diagnostic_observer = diagnostics::QueryObserver::new(app);
+    let history = StatementHistory::new(&state.storage, &connection_id, &notify)
+        .with_observer(&diagnostic_observer);
     let token = uuid::Uuid::new_v4().to_string();
     let result = finish_tx_with_sql(app, state, sql, &token, 0, 1, &connection_id, &history).await;
     state.cancels.lock().await.remove(&token);
@@ -1533,6 +1539,7 @@ pub fn run() {
             updater::setup(app.handle())?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            app.manage(Arc::new(diagnostics::Diagnostics::new(&data_dir)));
             let storage = Storage::open(data_dir.join("catabase.sqlite3"))?;
             storage.interrupt_history_transactions()?;
             let active = storage.active_connection()?;
@@ -1560,6 +1567,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             clipboard::clipboard_read_text,
             clipboard::clipboard_write_text,
+            diagnostics::diagnostics_report,
+            diagnostics::acknowledge_diagnostics,
+            diagnostics::open_diagnostic_issue,
             updater::updater_status,
             updater::check_for_update,
             updater::install_update,
