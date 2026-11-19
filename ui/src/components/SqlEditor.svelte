@@ -7,6 +7,7 @@
   // editor.api omits the standard word movement, selection and deletion commands.
   import 'monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations';
   import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController';
+  import 'monaco-editor/esm/vs/editor/contrib/multicursor/browser/multicursor';
   import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
   import { initVimMode } from 'monaco-vim';
   import { onDestroy, onMount } from 'svelte';

@@ -124,6 +124,8 @@ On macOS, the workspace header shares a row with the native traffic-light contro
 | `Cmd/Ctrl+Enter` | Run the selection or statement at the cursor. |
 | `Cmd/Ctrl+K` | Search the workspace. |
 | `Cmd/Ctrl+F` | Find in the SQL editor. |
+| `Cmd/Ctrl+D` | Select the word at the cursor, then add the next occurrence. |
+| `Cmd+Option+Up/Down` (macOS) | Add a cursor above or below in the SQL editor. |
 | `Cmd/Ctrl+Alt+F` | Find and replace; `Ctrl+H` also works. |
 | `Cmd/Ctrl++`, `Cmd/Ctrl+-`, `Cmd/Ctrl+0` | Increase, decrease or reset SQL editor font size. |
 | `Cmd/Ctrl+T` | New query tab. |
@@ -134,6 +136,8 @@ On macOS, the workspace header shares a row with the native traffic-light contro
 | `Cmd/Ctrl+C`, `Cmd/Ctrl+V` | Copy/paste a focused tab or connection to duplicate it. |
 
 Editor zoom changes only the SQL font, from 8 to 48 px, and is saved locally. Option/Alt+Left/Right retains word navigation in the editor. Ordinary text copy/paste continues to work inside SQL and rename inputs.
+
+Typing updates every selection or cursor. Press Escape to return to a single cursor.
 
 Enable **Settings → SQL editor → Vim mode** to use Vim keybindings across SQL tabs. Each tab opens in Normal mode. Press `i` to enter Insert, `Esc` to return to Normal, or `/` to search. The current mode and Vim command line appear below the editor.
 
