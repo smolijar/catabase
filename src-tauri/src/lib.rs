@@ -1577,6 +1577,7 @@ pub fn run() {
             updater::check_for_update,
             updater::install_update,
             updater::open_releases,
+            updater::open_release_link,
             activate_connection,
             apply_row_updates,
             supermaven_complete,

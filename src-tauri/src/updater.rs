@@ -182,22 +182,48 @@ pub(super) async fn check_for_update(
 #[tauri::command]
 pub(super) async fn open_releases() -> Result<(), AppError> {
     const RELEASES: &str = "https://github.com/smolijar/catabase/releases";
+    open_release_url(RELEASES).await
+}
+
+#[tauri::command]
+pub(super) async fn open_release_link(url: String) -> Result<(), AppError> {
+    let parsed = release_link(&url)?;
+    open_release_url(parsed.as_str()).await
+}
+
+fn release_link(url: &str) -> Result<url::Url, CoreError> {
+    let parsed = url::Url::parse(url).map_err(|_| CoreError::message("Invalid release link."))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("github.com")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+        || !parsed.path().starts_with("/smolijar/catabase/")
+    {
+        return Err(CoreError::message(
+            "Only links to the Catabase repository can be opened here.",
+        ));
+    }
+    Ok(parsed)
+}
+
+async fn open_release_url(url: &str) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = tokio::process::Command::new("open");
-        command.arg(RELEASES);
+        command.arg(url);
         command
     };
     #[cfg(target_os = "linux")]
     let mut command = {
         let mut command = tokio::process::Command::new("xdg-open");
-        command.arg(RELEASES);
+        command.arg(url);
         command
     };
     #[cfg(target_os = "windows")]
     let mut command = {
         let mut command = tokio::process::Command::new("rundll32.exe");
-        command.arg("url.dll,FileProtocolHandler").arg(RELEASES);
+        command.arg("url.dll,FileProtocolHandler").arg(url);
         command
     };
     let status = tokio::time::timeout(Duration::from_secs(10), command.status())
@@ -311,6 +337,20 @@ pub(super) async fn install_update(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn release_notes_cannot_open_other_origins_or_local_urls() {
+        assert!(super::release_link("https://github.com/smolijar/catabase/commit/abc").is_ok());
+        for url in [
+            "https://github.com.evil.test/smolijar/catabase/",
+            "https://github.com/smolijar/catabase-other/",
+            "https://user:secret@github.com/smolijar/catabase/",
+            "file:///private/data",
+            "javascript:alert(1)",
+            "https://github.com:444/smolijar/catabase/",
+        ] {
+            assert!(super::release_link(url).is_err(), "accepted {url}");
+        }
+    }
     use super::*;
 
     #[test]

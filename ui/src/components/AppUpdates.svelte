@@ -1,5 +1,7 @@
 <script lang="ts">
   import Switch from './Switch.svelte';
+  import ReleaseNotes from './ReleaseNotes.svelte';
+  import { api } from '../lib/ipc';
   import type { UpdateState } from '../lib/appUpdates';
   export let state: UpdateState;
   export let automatic = true;
@@ -18,7 +20,7 @@
     <p>Checks when the app is in the foreground, at most every four hours. Installing an update restarts Catabase.</p>
     {#if state.update}
       <p class="available">Version {state.update.version} is available.</p>
-      {#if state.update.notes}<details><summary>What’s new</summary><pre>{state.update.notes}</pre></details>{/if}
+      {#if state.update.notes}<details><summary>What’s new</summary><ReleaseNotes source={state.update.notes} onLink={api.openReleaseLink} /></details>{/if}
     {:else if state.checkedAt && !state.error}
       <p>You’re up to date.</p>
     {/if}
@@ -42,5 +44,4 @@
   .checked-at { font-size: 11px; }
   details { margin: 12px 0; }
   summary { cursor: pointer; }
-  pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; max-height: 240px; overflow: auto; }
 </style>

@@ -34,6 +34,7 @@ export const api = {
   checkForUpdate: () => invoke<UpdateCheck>('check_for_update'),
   installUpdate: (version: string) => invoke<void>('install_update', { version }),
   openReleases: () => invoke<void>('open_releases'),
+  openReleaseLink: (url: string) => invoke<void>('open_release_link', { url }),
   listConnections: () => invoke<ConnectionRecord[]>('list_connections'),
   saveConnection: (input: ConnectionInput) => invoke<ConnectionRecord>('save_connection', { input }),
   duplicateConnection: (id: string) => invoke<ConnectionRecord>('duplicate_connection', { id }),
