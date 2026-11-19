@@ -15,6 +15,7 @@
     | 'explain'
     | 'key'
     | 'link'
+    | 'lock'
     | 'open'
     | 'plus'
     | 'play'
@@ -66,6 +67,8 @@
   {:else if name === 'key'}
     <circle cx="8" cy="8" r="5" />
     <path d="m11.5 11.5 9 9M17 17l3-3M14 14l3-3" />
+  {:else if name === 'lock'}
+    <rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" />
   {:else if name === 'link'}
     <path d="m10 13 4-4M8 15l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M13 9l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" />
   {:else if name === 'settings'}

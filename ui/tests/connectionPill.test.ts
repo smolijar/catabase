@@ -98,3 +98,15 @@ test('the footer shortcut stays clickable and the toolbar pill remains in the Ta
   assert.doesNotMatch(footer, / disabled/);
   assert.doesNotMatch(renderPill(health), /tabindex="-1"/);
 });
+
+test('a connection lock disables switching while leaving its health check available', () => {
+  const extras = { switcher: true, connectionLocked: true, lockedConnectionName: 'zenbase docker' };
+  const html = renderPill({ status: 'success', checkedAt: 12345 }, false, 12345, extras);
+  const buttons = html.match(/<button\b[^>]*>/g)!;
+  assert.doesNotMatch(buttons[0], / disabled/);
+  assert.match(buttons[1], / disabled/);
+  assert.match(html, /Connection locked to zenbase docker\. Right-click the tab to unlock/);
+  const disconnected = renderPill(null, false, 12345, { ...extras, connection: null });
+  assert.equal((disconnected.match(/ disabled/g) ?? []).length, 2);
+  assert.match(disconnected, /Run a query to review and reconnect/);
+});

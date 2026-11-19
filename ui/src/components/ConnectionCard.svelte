@@ -11,6 +11,9 @@
   export let active = false;
   export let appearance: ConnectionAppearance | undefined = undefined;
   export let disabled = false;
+  export let useDisabled = false;
+  export let useDisabledReason = '';
+  export let globalSelection = false;
   export let reorderable = false;
   export let onDragStart: (x: number, y: number) => void;
   export let onDragMove: (x: number, y: number) => void;
@@ -26,12 +29,12 @@
 
   let actions: ActionMenu;
   let selectButton: HTMLButtonElement;
-  const interaction = createConnectionInteraction(() => onActivate(), () => onEdit(), () => disabled);
+  const interaction = createConnectionInteraction(() => { if (!useDisabled) return onActivate(); }, () => onEdit(), () => disabled);
   $: address = `${connection.username}@${connection.host}:${connection.port}/${connection.database}`;
   $: color = appearance?.color === 'none' ? undefined : appearance?.color;
   $: environment = appearance?.environment;
   $: items = [
-    { id: 'use', label: active ? 'In use in this tab' : 'Use in this tab', disabled: active || disabled },
+    { id: 'use', label: useDisabled ? useDisabledReason : globalSelection ? 'Use in all unlocked tabs' : active ? 'In use in this tab' : 'Use in this tab', disabled: useDisabled || (!globalSelection && active) || disabled },
     ...(active ? [{ id: 'disconnect', label: 'Disconnect', disabled }] : []),
     { id: 'edit', label: 'Edit connection…', disabled },
     { id: 'duplicate', label: 'Duplicate connection', disabled },
@@ -135,12 +138,12 @@
     class:reorderable
     data-connection-id={connection.id}
     type="button"
-    aria-label={`Use ${connection.name} in this tab${environment ? ` (${environment})` : ''}`}
+    aria-label={`Use ${connection.name} in ${globalSelection ? 'all unlocked tabs' : 'this tab'}${environment ? ` (${environment})` : ''}`}
     aria-pressed={active}
-    aria-disabled={disabled}
+    aria-disabled={disabled || useDisabled}
     aria-keyshortcuts={reorderable ? 'Alt+Shift+ArrowUp Alt+Shift+ArrowDown' : undefined}
     aria-haspopup="menu"
-    title={`${address}${active ? ' · This tab' : ''}\nClick or press Enter to use and test. Double-click or F2 to edit. Option/Alt-click, right-click or Shift+F10 for actions.${reorderable ? '\nDrag or Alt+Shift+Up/Down to reorder.' : ''}\nCmd/Ctrl+C to copy. Cmd/Ctrl+V to duplicate a copied connection.`}
+    title={`${address}${active ? ' · This tab' : ''}\n${useDisabled ? useDisabledReason : 'Click or press Enter to use and test.'} Double-click or F2 to edit. Option/Alt-click, right-click or Shift+F10 for actions.${reorderable ? '\nDrag or Alt+Shift+Up/Down to reorder.' : ''}\nCmd/Ctrl+C to copy. Cmd/Ctrl+V to duplicate a copied connection.`}
     use:pointerDrag={{ enabled: reorderable && !disabled, onStart: onDragStart, onMove: onDragMove, onEnd: onDragEnd }}
     on:click={handleClick}
     on:dblclick={handleDoubleClick}

@@ -5,10 +5,16 @@
   import { connectionClipboardAction as clipboardAction } from '../lib/connectionClipboard';
   import { pointerDrag } from '../lib/pointerDrag';
   import { serializeTabReference } from '../lib/tabClipboard';
+  import type { ConnectionColor } from '../lib/appearance';
 
   export let id: string;
   export let title: string;
   export let connectionName: string;
+  export let connectionColor: ConnectionColor = 'none';
+  export let hasConnection = false;
+  export let connectionLocked = false;
+  export let lockDisabled = false;
+  export let onToggleConnectionLock: () => void = () => {};
   export let active = false;
   export let readonly = false;
   export let running = false;
@@ -37,7 +43,8 @@
   $: items = [
     { id: 'close', label: 'Close tab', disabled: closeDisabled },
     { id: 'duplicate', label: 'Duplicate tab' },
-    { id: 'rename', label: 'Rename tab…' }
+    { id: 'rename', label: 'Rename tab…' },
+    { id: 'connection-lock', label: connectionLocked ? 'Unlock connection' : 'Lock connection', disabled: lockDisabled || (!hasConnection && !connectionLocked) }
   ];
 
   function handleContextMenu(event: MouseEvent) {
@@ -78,6 +85,7 @@
     if (action === 'close' && !closeDisabled) onClose();
     else if (action === 'duplicate') onDuplicate();
     else if (action === 'rename') onRename();
+    else if (action === 'connection-lock' && !lockDisabled && (hasConnection || connectionLocked)) onToggleConnectionLock();
   }
 
   function handleCopy(event: ClipboardEvent) {
@@ -99,7 +107,7 @@
   }
 </script>
 
-<div data-tab-chip-id={id} class="tab-chip" class:active class:dragging class:drop-before={dropSide === 'before'} class:drop-after={dropSide === 'after'}>
+<div data-tab-chip-id={id} data-conn={connectionColor} class="tab-chip" class:connection-colored={hasConnection && connectionColor !== 'none'} class:active class:dragging class:drop-before={dropSide === 'before'} class:drop-after={dropSide === 'after'}>
   {#if renaming}
     <div class="tab-rename"><input {...literalTextAttributes} aria-label="Tab name" value={renameValue} on:input={(event) => onRenameValue(event.currentTarget.value)} on:keydown={onRenameKeydown} on:blur={onRenameBlur} /></div>
   {:else}
@@ -107,7 +115,7 @@
       bind:this={label}
       data-tab-id={id}
       class="tab-label"
-      title={`${title} · ${connectionName}\nDouble-click or F2 to rename. Right-click or Shift+F10 for actions.\nDrag or Alt+Shift+Left/Right to reorder. Cmd/Ctrl+C to copy; Cmd/Ctrl+V to duplicate a copied tab.`}
+      title={`${title} · ${connectionName}${connectionLocked ? '\nConnection locked. Right-click this tab to unlock; connection switching is disabled while it is focused.' : ''}\nDouble-click or F2 to rename. Right-click or Shift+F10 for actions.\nDrag or Alt+Shift+Left/Right to reorder. Cmd/Ctrl+C to copy; Cmd/Ctrl+V to duplicate a copied tab.`}
       aria-pressed={active}
       aria-haspopup="menu"
       use:pointerDrag={{ onStart: onDragStart, onMove: onDragMove, onEnd: onDragEnd }}
@@ -119,7 +127,8 @@
       on:paste={handlePaste}
     >
       {#if running}<span class="spinner"></span>{/if}
-      {title}{#if pending}<span class="pending-dot" title="Staged edits">•</span>{/if}
+      {#if connectionLocked}<span class="tab-lock" role="img" aria-label={`Connection locked to ${connectionName}. Right-click tab to unlock.`}><Icon name="lock" size={12} /></span>{/if}
+      <span class="tab-title">{title}</span>{#if pending}<span class="pending-dot" title="Staged edits">•</span>{/if}
       {#if readonly}<small>read only</small>{/if}
     </button>
     <button class="tab-close" aria-label={`Close ${title}`} disabled={closeDisabled} on:click={onClose}><Icon name="close" size={13} /></button>

@@ -20,3 +20,8 @@ test('missing or deleted connection IDs never silently select the first connecti
   for (const value of [null, '', ' ', 'x'.repeat(129)]) assert.equal(restoreLastConnectionId(value), null);
   assert.equal(restoreLastConnectionId('development'), 'development');
 });
+
+test('a locked tab can reconnect only its saved connection, never the latest different connection', () => {
+  assert.equal(resumeConnection(records, 'development', 'production', true)?.id, 'development');
+  assert.equal(resumeConnection(records, 'deleted', 'production', true), null);
+});

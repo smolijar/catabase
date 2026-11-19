@@ -20,11 +20,15 @@ The app starts disconnected. Saved tabs remember their connection association, b
 
 Pressing **Run** while disconnected offers the tab's saved connection, or the last explicitly used connection if the tab has none. Review its color, environment label, database, host, username and SQL, then choose **Connect & run**. You can choose a different target or cancel without connecting or executing anything. Connected tabs run normally without this confirmation.
 
+**Settings → Connection switching** defaults to **Focused tab**. Choose **All unlocked tabs** to apply future connection selections across the workspace. Changing the preference does not reassign existing tabs. A switch asks before discarding staged edits in any affected tab.
+
+Tabs use their assigned connection's color, including while disconnected. Right-click a tab and choose **Lock connection** to pin that assignment. A padlock explains the lock, and connection selection is disabled while the locked tab is focused. Other tabs' global switches skip it. Unlock from the same menu. Locks survive restart, duplication and archiving; a disconnected locked tab can reconnect only to its assigned connection. New tabs in global mode use the last global selection, including when a locked exception is focused.
+
 Add a connection in the Connections sidebar. Click its row or press Enter to use it and immediately test it. Double-click opens its settings; F2 edits without activating it. Right-click, Option/Alt-click or Shift+F10 opens connection actions. Connections can be duplicated from this menu or by copying and pasting a focused connection row. The copy inherits the saved connection settings, color, and environment label.
 
 Drag connection rows to reorder them, or press `Alt+Shift+Up/Down` on a focused row. The sidebar and connection switcher remember the order. New connections appear at the end, and duplicates appear directly below their source.
 
-The connection name in the toolbar and status bar shares the same health status. Click either to test again; the toolbar arrow opens the searchable connection switcher. Checks show success, an error, or a stale state after one minute. While a query is running or cancelling, they show that activity and do not start another test. A failed test leaves the selected connection in place.
+The connection name in the toolbar and status bar shares the same health status. Click either to test again; the toolbar arrow opens the searchable connection switcher. Checks show success, an error, or a stale state after one minute. While a query is running or cancelling, they show that activity and do not start another test. A failed test disconnects the session while keeping the saved tab association available for review.
 
 The active tab's connection is checked automatically when the app gains focus or remains in the foreground and its last check is stale. Background windows do not start checks. Queries, transactions, schema loading, connection dialogs and cell editing defer these checks until the workspace is idle. Running a query refreshes the health timestamp without an extra test.
 
@@ -113,7 +117,7 @@ Explain keeps the current result set and staged cell edits. Each completed EXPLA
 
 ## Tabs and search
 
-Each editable tab saves its SQL, name, connection and editor position. Right-click or Shift+F10 offers Close, Duplicate and Rename. Double-click or F2 also renames; Enter or blur saves, and Escape cancels.
+Each editable tab saves its SQL, name, connection, connection lock and editor position. Right-click or Shift+F10 offers Close, Duplicate, Rename and Lock/Unlock connection. Double-click or F2 also renames; Enter or blur saves, and Escape cancels.
 
 Drag labels to reorder tabs, or use `Alt+Shift+Left/Right` on a focused tab. Order is saved. Copy/paste on a focused tab duplicates that open draft with a `copy` suffix. Duplicates keep SQL, connection and editor position but start without results or staged edits. Duplicating a read-only reference creates an editable query.
 

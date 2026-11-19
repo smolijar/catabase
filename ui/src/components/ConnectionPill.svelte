@@ -9,6 +9,8 @@
   export let disabled = false;
   export let compact = false;
   export let switcher = false;
+  export let connectionLocked = false;
+  export let lockedConnectionName = '';
   export let activity: 'running' | 'cancelling' | null = null;
   export let environment = '';
   export let now = Date.now();
@@ -22,7 +24,8 @@
   $: message = running ? activity === 'cancelling' ? 'Cancelling…' : 'Running…' : testing ? 'Testing…' : stale ? 'Check stale' : error;
   $: stale = health === 'stale';
   $: error = state?.status === 'error' ? state.message : '';
-  $: title = !connection ? 'Choose this tab’s database connection'
+  $: lockReason = `Connection locked to ${lockedConnectionName || connection?.name || 'this tab'}. Right-click the tab to unlock.`;
+  $: title = !connection ? connectionLocked ? `${lockReason} Run a query to review and reconnect.` : 'Choose this tab’s database connection'
     : running ? `${connection.name}: ${activity === 'cancelling' ? 'cancelling the query' : 'query running'}. Wait for it to finish before testing.`
     : testing ? `Testing ${connection.name}…`
     : stale ? `${connection.name}: connection check is over one minute old.${error ? ` Last error: ${error}` : ''} Click to check again, or run a query.`
@@ -40,7 +43,7 @@
   class:testing={busy}
   class:failed={health === 'error' && !running}
   tabindex={compact ? -1 : undefined}
-  disabled={disabled || busy}
+  disabled={disabled || busy || (!connection && connectionLocked)}
   aria-busy={busy}
   aria-label={connection ? `${running ? activity === 'cancelling' ? 'Cancelling on' : 'Running on' : testing ? 'Testing' : 'Test'} ${connection.name}${!running && stale ? ': check is stale' : !running && error ? `: ${error}` : ''}` : 'Choose connection'}
   {title}
@@ -52,7 +55,7 @@
   {#if switcher && environment}<span class="environment">{environment}</span>{/if}
   {#if busy || stale || (!compact && error)}<span class="connection-message" role="status">{message}</span>{/if}
 </button>
-{#if switcher}<button class="switch-arrow" aria-label="Switch connection" aria-haspopup="dialog" title="Switch or disconnect connection" disabled={disabled || running} on:click={onChoose}><span class="chevron"><Icon name="chevron" size={12} /></span></button>{/if}
+{#if switcher}<button class="switch-arrow" aria-label={connectionLocked ? lockReason : 'Switch connection'} aria-haspopup="dialog" title={connectionLocked ? lockReason : 'Switch or disconnect connection'} disabled={disabled || running || connectionLocked} on:click={onChoose}><span class:chevron={!connectionLocked}><Icon name={connectionLocked ? 'lock' : 'chevron'} size={12} /></span></button>{/if}
 </div>
 
 <style>

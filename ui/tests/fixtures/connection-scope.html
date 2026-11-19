@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Catabase connection scope verification</title></head>
+<body>
+  <div id="app"></div>
+  <output id="fixture-probe" hidden></output>
+  <script type="module">
+    const timestamp = new Date().toISOString();
+    const connections = [
+      { id: 'dev', name: 'Development', username: 'developer', host: 'dev.example.invalid', database: 'catabase_dev' },
+      { id: 'prod', name: 'Production', username: 'postgres', host: 'prod.example.invalid', database: 'catabase_prod' }
+    ].map(connection => ({ ...connection, port: 5432, ssl: false, isActive: false, createdAt: timestamp, updatedAt: timestamp }));
+    localStorage.setItem('catabase.connectionAppearance', JSON.stringify({ dev: { color: 'blue', environment: 'DEV' }, prod: { color: 'red', environment: 'PROD' } }));
+    if (!sessionStorage.getItem('scope-fixture-initialized')) {
+      localStorage.removeItem('catabase.connectionScope');
+      localStorage.removeItem('catabase.globalConnectionId');
+      sessionStorage.setItem('scope-fixture-initialized', 'true');
+    }
+    const draft = JSON.stringify({version:2,activeId:'dev-tab',tabs:[
+      {id:'dev-tab',title:'Development query',sql:"select id, name from public.projects",connectionId:'dev'},
+      {id:'prod-tab',title:'Production review',sql:"select id, name from public.projects",connectionId:'prod'},
+      {id:'blank-tab',title:'Scratch query',sql:'select 1',connectionId:null}
+    ],archivedTabs:[]});
+    const requests = [];
+    let callback = 0;
+    window.__TAURI_INTERNALS__ = { transformCallback: () => ++callback, invoke: async (command, args = {}) => {
+      if (['activate_connection', 'execute_query', 'test_connection', 'disconnect_connection'].includes(command)) {
+        requests.push({ command, id: args.id ?? args.connectionId ?? args.input?.id });
+        document.getElementById('fixture-probe').textContent = JSON.stringify(requests);
+      }
+      switch (command) {
+        case 'plugin:event|listen': return 0;
+        case 'plugin:event|unlisten': return;
+        case 'get_settings': return {poolSize:1,supermavenEnabled:false,autoTransaction:true};
+        case 'list_connections': return connections.map(connection => ({...connection}));
+        case 'activate_connection': {
+          const selected = connections.find(connection => connection.id === args.id);
+          if (!selected) throw new Error('Unknown fixture connection');
+          for (const connection of connections) connection.isActive = connection === selected;
+          return {...selected};
+        }
+        case 'disconnect_connection': connections.find(connection => connection.id === args.id).isActive = false; return;
+        case 'test_connection': return;
+        case 'connection_stats': return {active:0,idle:1,poolSize:1};
+        case 'introspect_schema': return {schemas:[]};
+        case 'load_draft': return sessionStorage.getItem('scope-fixture-draft') ?? draft;
+        case 'save_draft': sessionStorage.setItem('scope-fixture-draft', args.content); return;
+        case 'history_page': return {entries:[],total:0};
+        case 'history_stats': return {total:0,errors:0};
+        case 'tx_status': return {active:false,startedAt:null};
+        case 'supermaven_status': return {enabled:false,state:'off',message:'Disabled in fixture'};
+        case 'updater_status': return {currentVersion:'0.1.5',enabled:true};
+        case 'check_for_update': return {currentVersion:'0.1.5',update:null};
+        case 'diagnostics_report': return null;
+        case 'split_sql': return [{start:0,end:args.sql.length,text:args.sql}];
+        case 'execute_query': return {columns:[
+          {name:'id',sourceName:'id',typeOid:23,typeName:'int4',tableSchema:'public',tableName:'projects',tableOid:1,columnId:1,primaryKey:true,generated:false,nullable:false},
+          {name:'name',sourceName:'name',typeOid:25,typeName:'text',tableSchema:'public',tableName:'projects',tableOid:1,columnId:2,primaryKey:false,generated:false,nullable:false}
+        ],rowKeys:[{schema:'public',table:'projects',columns:['id'],primaryKey:true}],rows:[{id:1,name:'Example project'}],rowCount:1,durationMs:1,autoLimited:false,hasMore:false};
+        default: throw new Error(`Unexpected fixture command: ${command}`);
+      }
+    }};
+    await import('../../src/main.ts');
+  </script>
+</body></html>

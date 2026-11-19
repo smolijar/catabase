@@ -9,6 +9,8 @@
   export let initialConnectionId: string;
   export let appearances: Record<string, ConnectionAppearance>;
   export let query: string;
+  export let locked = false;
+  export let globalSelection = false;
   export let onConfirm: (connection: ConnectionRecord) => void;
   export let onClose: () => void;
 
@@ -22,7 +24,9 @@
   <div class="modal resume-connection" data-conn={appearance.color}>
     <div class="panel-head"><h2>Connect before running</h2><button on:click={onClose}>Cancel</button></div>
     <p>This tab is disconnected. Review the connection before running this query.</p>
-    {#if connections.length > 1}
+    {#if locked}<p><Icon name="lock" size={12} /> This tab’s connection is locked. Unlock it from the tab menu to choose another connection.</p>
+    {:else if globalSelection}<p>Choosing a different connection updates all unlocked tabs.</p>{/if}
+    {#if connections.length > 1 && !locked}
       <Dropdown value={selectedId} {options} ariaLabel="Connection to use" onSelect={id => selectedId = id} />
     {/if}
     {#if connection}

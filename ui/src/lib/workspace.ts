@@ -23,6 +23,7 @@ export interface WorkspaceTab {
   kind: 'query' | 'reference';
   sql: string;
   connectionId: string | null;
+  connectionLocked?: boolean;
   viewState: editor.ICodeEditorViewState | null;
   session: ResultSession | null;
   error: AppError | null;
@@ -32,20 +33,20 @@ export interface WorkspaceTab {
   editMode: boolean;
 }
 
-export type ArchivedTab = Pick<WorkspaceTab, 'id' | 'title' | 'sql' | 'connectionId' | 'viewState'> & { closedAt: string };
+export type ArchivedTab = Pick<WorkspaceTab, 'id' | 'title' | 'sql' | 'connectionId' | 'connectionLocked' | 'viewState'> & { closedAt: string };
 
 export function archiveTab(tab: WorkspaceTab, closedAt: string): ArchivedTab | null {
   if (tab.kind !== 'query') return null;
-  const { id, title, sql, connectionId, viewState } = tab;
-  return { id, title, sql, connectionId, viewState: viewState ? structuredClone(viewState) : null, closedAt };
+  const { id, title, sql, connectionId, connectionLocked, viewState } = tab;
+  return { id, title, sql, connectionId, connectionLocked: Boolean(connectionId && connectionLocked), viewState: viewState ? structuredClone(viewState) : null, closedAt };
 }
 
 export function reopenArchivedTab(tab: ArchivedTab): WorkspaceTab {
-  return { ...createQueryTab(tab.id, tab.title, tab.sql, tab.connectionId), viewState: tab.viewState ? structuredClone(tab.viewState) : null };
+  return { ...createQueryTab(tab.id, tab.title, tab.sql, tab.connectionId), connectionLocked: Boolean(tab.connectionId && tab.connectionLocked), viewState: tab.viewState ? structuredClone(tab.viewState) : null };
 }
 
 export function createQueryTab(id: string, title: string, sql = '', connectionId: string | null = null): WorkspaceTab {
-  return { id, title, kind: 'query', sql, connectionId, viewState: null, session: null, error: null, originalRows: [], pendingChanges: [], editMode: false };
+  return { id, title, kind: 'query', sql, connectionId, connectionLocked: false, viewState: null, session: null, error: null, originalRows: [], pendingChanges: [], editMode: false };
 }
 
 /** Failed executions have a saved error, not a QueryResult. Keep their context
@@ -73,6 +74,7 @@ export function duplicateQueryTab(source: WorkspaceTab, id: string, tabs: Worksp
   let title = base;
   for (let suffix = 2; titles.has(title); suffix++) title = `${base} ${suffix}`;
   const copy = createQueryTab(id, title, source.sql, source.connectionId);
+  copy.connectionLocked = Boolean(source.connectionId && source.connectionLocked);
   copy.viewState = source.viewState ? structuredClone(source.viewState) : null;
   return copy;
 }
@@ -86,8 +88,8 @@ export function serializeWorkspace(tabs: WorkspaceTab[], activeId: string, archi
   const queries = tabs.filter((tab) => tab.kind === 'query');
   const openIds = new Set(tabs.map(tab => tab.id));
   return JSON.stringify({ version: 2, activeId,
-    tabs: queries.map(({ id, title, sql, connectionId, viewState }) => ({ id, title, sql, connectionId, viewState })),
-    archivedTabs: archivedTabs.filter(tab => !openIds.has(tab.id)).map(({ id, title, sql, connectionId, viewState, closedAt }) => ({ id, title, sql, connectionId, viewState, closedAt }))
+    tabs: queries.map(({ id, title, sql, connectionId, connectionLocked, viewState }) => ({ id, title, sql, connectionId, connectionLocked, viewState })),
+    archivedTabs: archivedTabs.filter(tab => !openIds.has(tab.id)).map(({ id, title, sql, connectionId, connectionLocked, viewState, closedAt }) => ({ id, title, sql, connectionId, connectionLocked, viewState, closedAt }))
   });
 }
 
@@ -112,6 +114,7 @@ export function restoreWorkspace(serialized: string): { tabs: WorkspaceTab[]; ar
     const readTab = (item: any): WorkspaceTab | null => {
       if (!item || typeof item.id !== 'string' || !item.id || ids.has(item.id) || typeof item.sql !== 'string' || typeof item.title !== 'string' || item.kind === 'reference') return null;
       const tab = createQueryTab(item.id, item.title, item.sql, typeof item.connectionId === 'string' ? item.connectionId : null);
+      tab.connectionLocked = Boolean(tab.connectionId && item.connectionLocked === true);
       if (item.viewState && Array.isArray(item.viewState.cursorState) && item.viewState.viewState) tab.viewState = item.viewState;
       ids.add(tab.id);
       return tab;

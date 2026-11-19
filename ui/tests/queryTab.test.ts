@@ -55,3 +55,15 @@ test('tab labels expose saved-order drag and keyboard reorder affordances', () =
   assert.match(html, /tab-chip[^\"]*dragging[^\"]*drop-before/);
   assert.match(html, /Drag or Alt\+Shift\+Left\/Right to reorder/);
 });
+
+test('connected tab identity is visible in its own color, even when inactive or disconnected', () => {
+  const props = { connectionName: 'Production <admin>', connectionColor: 'red', hasConnection: true, connectionLocked: true };
+  const html = renderTab(props);
+  assert.match(html, /data-conn="red"/);
+  assert.match(html, /tab-chip[^\"]*connection-colored/);
+  assert.match(html, /class="tab-lock/);
+  assert.match(html, /Connection locked to Production &lt;admin>/);
+  assert.match(html, /Right-click this tab to unlock; connection switching is disabled/);
+  assert.doesNotMatch(html, /<admin>/);
+  assert.doesNotMatch(renderTab({ ...props, connectionLocked: false }), /class="tab-lock/);
+});

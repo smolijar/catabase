@@ -3,6 +3,23 @@ import test from 'node:test';
 import { archiveTab, canUseResult, createDraftWriter, createHistoryTab, createQueryTab, duplicateQueryTab, reopenArchivedTab, restoreWorkspace, serializeWorkspace } from '../src/lib/workspace.ts';
 import type { HistoryEntry, QueryResult } from '../src/lib/types.ts';
 
+test('connection locks survive save, duplicate, archive and reopen', () => {
+  const tab = { ...createQueryTab('locked', 'Production', 'select 1', 'prod'), connectionLocked: true };
+  assert.equal(duplicateQueryTab(tab, 'copy', [tab]).connectionLocked, true);
+  const archived = archiveTab(tab, '2026-11-19T10:00:00Z')!;
+  const restored = restoreWorkspace(serializeWorkspace([tab], tab.id, [ { ...archived, id: 'closed' } ]))!;
+  assert.equal(restored.tabs[0].connectionLocked, true);
+  assert.equal(reopenArchivedTab(restored.archivedTabs[0]).connectionLocked, true);
+});
+
+test('legacy tabs default to unlocked and a lock without an association is rejected', () => {
+  const legacy = { id: 'old', title: 'Old', sql: '', connectionId: 'db' };
+  const invalid = { ...legacy, id: 'invalid', connectionId: null, connectionLocked: true };
+  const missing = { ...legacy, id: 'deleted', connectionId: 'deleted-db', connectionLocked: true };
+  const restored = restoreWorkspace(JSON.stringify({ version: 2, tabs: [legacy, invalid, missing] }))!;
+  assert.deepEqual(restored.tabs.map(tab => tab.connectionLocked), [false, false, true]);
+});
+
 const failedHistory: HistoryEntry = {
   id: 42, connectionId: 'docker', query: 'select * from missing_relation', durationMs: 12,
   isError: true, errorMessage: 'relation "missing_relation" does not exist', hasResult: false,

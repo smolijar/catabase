@@ -7,8 +7,8 @@ export function restoreLastConnectionId(value: string | null): string | null {
 }
 
 /** A tab's saved association takes priority; list order never chooses a database. */
-export function resumeConnection(connections: ConnectionRecord[], tabConnectionId: string | null, lastConnectionId: string | null): ConnectionRecord | null {
+export function resumeConnection(connections: ConnectionRecord[], tabConnectionId: string | null, lastConnectionId: string | null, locked = false): ConnectionRecord | null {
   return connections.find(connection => connection.id === tabConnectionId)
-    ?? connections.find(connection => connection.id === lastConnectionId)
+    ?? (!locked ? connections.find(connection => connection.id === lastConnectionId) : null)
     ?? null;
 }

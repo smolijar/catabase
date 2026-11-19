@@ -158,6 +158,7 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .deferred-action button { border-color: transparent; background: transparent; color: var(--ink-muted); padding: 3px 6px; }
 .tab-chip { position: relative; display: flex; align-items: center; flex: 0 0 auto; min-width: 90px; max-width: 200px; height: 32px; border: 0; border-radius: 0; background: transparent; color: var(--ink-muted); }
 .tab-chip:not(.active):hover { background: var(--surface-2); }
+.tab-chip.connection-colored { color: var(--accent); }
 /* Navigation and workspace selection share one treatment. Horizontal editor tabs
    move the same 2px indicator to the top; hover never replaces the selected tint. */
 .icon-strip button.active, .connection-item.active, .tab-chip.active, .section-tabs button[aria-selected='true'] {
@@ -167,7 +168,9 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 }
 .tab-chip.active, .section-tabs button[aria-selected='true'] { box-shadow: inset 0 2px var(--accent); }
 .tab-label, .tab-close { border: 0; border-radius: 0; background: transparent; color: inherit; padding: 2px 6px; min-height: 26px; }
-.tab-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; user-select: none; touch-action: none; }
+.tab-label { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 13px; user-select: none; touch-action: none; }
+.tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tab-lock { flex: 0 0 auto; }
 .tab-label:hover:not(:disabled) { background: transparent; }
 /* Focus belongs to the tab, not its rounded label button. Keep the ring inside
    the scrolling strip and separate from the selected tab's top edge. */
