@@ -35,7 +35,7 @@
             return;
           }
           case 'test_connection': return;
-          case 'plugin:clipboard-manager|write_text': document.getElementById('clipboard-probe').textContent = args.text; return;
+          case 'clipboard_write_text': document.getElementById('clipboard-probe').textContent = args.text; return;
           case 'introspect_schema': return { schemas: [] };
           case 'connection_stats': return { active: 0, idle: 1, poolSize: 1 };
           case 'history_stats': return { total: entries.length, errors: entries.filter(entry => entry.isError).length, lastExecutedAt: base.executedAt };

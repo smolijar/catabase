@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod auto_transaction_tests;
+mod clipboard;
 mod dalibo;
 mod explain;
 mod updater;
@@ -1557,6 +1558,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            clipboard::clipboard_read_text,
+            clipboard::clipboard_write_text,
             updater::updater_status,
             updater::check_for_update,
             updater::install_update,

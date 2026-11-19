@@ -2,7 +2,7 @@
   import Modal from './Modal.svelte';
   import Icon from './Icon.svelte';
   import Switch from './Switch.svelte';
-  import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+  import { copyText } from '../lib/clipboard';
   import { defaultExplainOptions, explainStageLabel } from '../lib/explain';
   import type { ExplainOptions, ExplainState } from '../lib/explain';
   import { formatRunningDuration } from '../lib/status';
@@ -22,7 +22,7 @@
   let linkError = '';
   $: elapsed = formatRunningDuration(state.stageStartedAt, now);
   async function copy(value: string, label: string) {
-    try { await writeText(value).catch(() => navigator.clipboard.writeText(value)); copyStatus = `${label} copied`; }
+    try { await copyText(value); copyStatus = `${label} copied`; }
     catch { copyStatus = `Could not copy ${label.toLowerCase()}`; }
   }
   async function openLink(url: string) {

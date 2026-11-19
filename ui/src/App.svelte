@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
+  import { copyText, readClipboardText } from './lib/clipboard';
   import { save } from '@tauri-apps/plugin-dialog';
   import { isTauri } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -700,7 +700,7 @@
     const tab = tabs.find((tab) => tab.id === id);
     if (!tab || closingWorkspace) return;
     try {
-      await writeText(serializeTabReference(tab)).catch(() => navigator.clipboard.writeText(serializeTabReference(tab)));
+      await copyText(serializeTabReference(tab));
       flash(`${tab.title} copied. Paste on a tab to duplicate.`);
     } catch (error) {
       flash(`Could not copy tab: ${errorMessage(error)}`, true);
@@ -710,7 +710,7 @@
   async function pasteTab(text?: string) {
     if (closingWorkspace || connectionMutation) return;
     try {
-      const reference = text ?? await readText().catch(() => navigator.clipboard.readText());
+      const reference = text ?? await readClipboardText();
       const id = parseTabReference(reference);
       if (!id) { flash('Copy an open tab first, then paste on a tab to duplicate.'); return; }
       duplicateTab(id);
@@ -1317,7 +1317,7 @@
   async function copyConnection(connection: ConnectionRecord) {
     try {
       const reference = serializeConnectionReference(connection);
-      await writeText(reference).catch(() => navigator.clipboard.writeText(reference));
+      await copyText(reference);
       flash(`${connection.name} copied. Paste in the connection list to duplicate.`);
     } catch (error) {
       flash(`Could not copy connection: ${errorMessage(error)}`, true);
@@ -1327,7 +1327,7 @@
   async function pasteConnection(text?: string) {
     if (operation || connectionMutation || closingWorkspace || showConnectionModal) return;
     try {
-      const reference = text ?? await readText().catch(() => navigator.clipboard.readText());
+      const reference = text ?? await readClipboardText();
       const id = parseConnectionReference(reference);
       if (!id) { flash('Copy a saved connection first, then paste in the connection list.'); return; }
       await duplicateConnection(id);
@@ -1683,7 +1683,7 @@
 
   async function copyHistorySql(entry: HistoryEntry) {
     try {
-      await writeText(entry.query).catch(() => navigator.clipboard.writeText(entry.query));
+      await copyText(entry.query);
       flash('SQL copied to clipboard.');
     } catch (error) {
       flash(`Could not copy SQL: ${errorMessage(error)}`, true);
@@ -1761,9 +1761,9 @@
       flash('No exportable data.');
       return;
     }
-    const text = serializeRows(result, format);
     try {
-      await writeText(text).catch(() => navigator.clipboard.writeText(text));
+      const text = serializeRows(result, format);
+      await copyText(text);
       flash(`${format.toUpperCase()} copied to clipboard.`);
     } catch (error) {
       flash(`Copy failed: ${errorMessage(error)}`);

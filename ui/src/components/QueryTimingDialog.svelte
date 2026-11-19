@@ -2,7 +2,7 @@
   import Modal from './Modal.svelte';
   import { formatTiming, timingRows } from '../lib/queryTiming';
   import type { QueryTimingDetails } from '../lib/queryTiming';
-  import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+  import { copyText } from '../lib/clipboard';
   import Icon from './Icon.svelte';
   export let details: QueryTimingDetails;
   export let onClose: () => void;
@@ -11,7 +11,7 @@
   let copyStatus = '';
   async function copyTiming() {
     const text = [`${details.connectionName} · ${details.result.rowCount} rows`, `Query time: ${details.result.durationMs} ms`, `End-to-end through DOM update: ${formatTiming(details.client.totalMs)}`, ...rows.map(row => `${row.label}: ${row.estimated ? '≈ ' : ''}${formatTiming(row.ms)}\n${row.note}`)].join('\n');
-    try { await writeText(text).catch(() => navigator.clipboard.writeText(text)); copyStatus = 'Copied'; }
+    try { await copyText(text); copyStatus = 'Copied'; }
     catch { copyStatus = 'Could not copy'; }
   }
 </script>
