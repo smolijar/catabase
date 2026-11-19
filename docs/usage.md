@@ -32,6 +32,8 @@ Saving connection details or options resets affected sessions/results, asks befo
 
 **Run** (`Cmd/Ctrl+Enter`) executes the selection. With no selection, it executes the statement under the cursor. Besides semicolons, the editor recognizes independent queries, writes, `CREATE INDEX` statements and transaction commands separated by blank lines. CTEs remain attached to their main query or write; nested queries, insert sources, upserts, row locks, MERGE actions and set-operation operands stay together. Use semicolons for other boundaries. Explicit selections are sent as selected.
 
+Blank lines also separate a query from a following `GRANT` or `REVOKE`. Permission statements stay together through their semicolon, including multiline privilege lists.
+
 The editor includes Find/Replace, PostgreSQL formatting and font-size shortcuts. Find overlays the editor rather than pushing SQL down. Formatting operates on the selection or the full editable draft as one undoable change; unsupported syntax leaves the draft intact.
 
 ### Schema-aware completion

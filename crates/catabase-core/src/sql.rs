@@ -98,8 +98,8 @@ pub fn split_statements(sql: &str) -> Vec<StatementRange> {
     ranges
 }
 
-/// Editor-only boundaries for independent queries, writes, index creation and
-/// transaction commands separated by blank lines.
+/// Editor-only boundaries for independent queries, writes, index creation,
+/// permission changes and transaction commands separated by blank lines.
 /// SQL execution and transaction validation still use semicolons exclusively.
 /// A WITH clause stays attached to its first top-level query or write. Insert
 /// sources, upserts, row locks, MERGE actions, set-operation operands, nested
@@ -175,9 +175,11 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
                         "begin" | "commit" | "end" | "rollback" | "abort"
                     ) || (word == "start"
                         && classify_statement(&sql[word_start..]) == StatementKind::TxBegin);
+                    let starts_permission_change = matches!(word.as_str(), "grant" | "revoke");
                     let starts_command = starts_query
                         || starts_write
                         || starts_transaction
+                        || starts_permission_change
                         || (word == "create"
                             && starts_create_index(&sql[word_start..statement.end]));
                     // These keywords can also continue the current statement:
@@ -202,6 +204,12 @@ pub fn split_editor_statements(sql: &str) -> Vec<StatementRange> {
                         let end = start + sql[start..word_start].trim_end().len();
                         push_statement(&mut ranges, sql, start, end);
                         start = word_start;
+                        // Privileges can contain SELECT, INSERT, UPDATE and
+                        // TABLE on separate lines. Keep the remaining permission
+                        // statement intact through its explicit semicolon.
+                        if starts_permission_change {
+                            break;
+                        }
                         command.clear();
                         insert_source_pending = false;
                         row_lock_pending = false;
@@ -763,6 +771,34 @@ SELECT name FROM LANDLORDS"#;
         assert_eq!(ranges[1].text, "select 2");
         assert_eq!(ranges[2].text, "select 3;");
         assert_eq!(ranges[1].start, sql.find("select 2").unwrap());
+    }
+
+    #[test]
+    fn editor_separates_permission_changes_and_preserves_privilege_lists() {
+        for permission in [
+            "GRANT USAGE ON SCHEMA audit TO datastream;",
+            "REVOKE USAGE ON SCHEMA audit FROM datastream;",
+            "grant\n\nselect,\n\ninsert,\n\nupdate\n\non\n\ntable audit.log_partitioned\n\nto datastream\n\nwith grant option;",
+            "revoke grant option for\n\nselect,\n\nupdate\n\non table audit.log_partitioned\n\nfrom datastream;",
+            "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA audit TO datastream;",
+            "GRANT reader TO datastream WITH ADMIN OPTION;",
+        ] {
+            let sql = format!("SELECT 'č🐈'\r\n \t\r\n{permission}\n\nSELECT 2");
+            let ranges = split_editor_statements(&sql);
+            assert_eq!(
+                ranges
+                    .iter()
+                    .map(|range| range.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["SELECT 'č🐈'", permission, "SELECT 2"],
+                "{sql}"
+            );
+            for range in ranges {
+                assert_eq!(&sql[range.start..range.end], range.text);
+            }
+            // Batch execution continues to require explicit SQL delimiters.
+            assert_eq!(split_statements(&sql).len(), 2);
+        }
     }
 
     #[test]

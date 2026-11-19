@@ -1678,6 +1678,33 @@ mod tests {
         assert_eq!(ranges[1].text, index);
     }
 
+    #[tokio::test]
+    async fn editor_cursor_at_start_of_grant_excludes_preceding_select() {
+        let select = "select * from users where id = 'fixture-č🐈'";
+        let grant = "grant usage on schema audit to datastream;";
+        let table_grant = "grant select on table audit.log_partitioned to datastream;";
+        let publication = "create publication bigquery_stream_partitioned_append_only\n    for table audit.log_partitioned\n    with (publish = 'insert', publish_via_partition_root = true);";
+        let sql = format!(
+            "{}{select}\n\n\n\n{grant}\n{table_grant}\n\n{publication}",
+            "\n".repeat(62)
+        );
+        let ranges = split_sql(sql.clone()).await.unwrap();
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| range.text.as_str())
+                .collect::<Vec<_>>(),
+            [select, grant, table_grant, publication]
+        );
+        let cursor = sql[..sql.find(grant).unwrap()].encode_utf16().count();
+        let target = ranges
+            .iter()
+            .find(|range| cursor >= range.start && cursor < range.end)
+            .unwrap();
+        assert_eq!(target.text, grant);
+        assert_eq!(target.start, cursor);
+    }
+
     #[test]
     fn replay_rejects_transaction_escape_and_explicit_mutations() {
         assert!(validate_replay_sql("select 1").is_ok());
