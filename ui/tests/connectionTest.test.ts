@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { connectionHealth, createConnectionTester, queryReachedServer } from '../src/lib/connectionTest.ts';
+import { connectionHealth, createConnectionTester, queryLostConnection, queryReachedServer } from '../src/lib/connectionTest.ts';
 import type { ConnectionTestState } from '../src/lib/connectionTest.ts';
 
 function deferred() {
@@ -35,6 +35,34 @@ test('testing starts immediately, reports failure, and a retry clears the error 
   retry.resolve();
   await retried;
   assert.deepEqual(tester.states.get('zenbase'), { status: 'success', checkedAt: 12345 });
+});
+
+test('failed probes and transport failures disconnect, while SQL and local validation errors do not', async () => {
+  const lost: string[] = [];
+  const tester = createConnectionTester(() => {}, () => 'failure', Date.now, id => lost.push(id));
+  await tester.test('offline', async () => { throw new Error('Timed out'); });
+  assert.deepEqual(lost, ['offline']);
+  for (const error of [{ code: '42601', severity: 'ERROR' }, { code: 'CATABASE_EXPLAIN_INPUT' }, { code: '57014' }, new Error('Choose a valid query')]) {
+    await assert.rejects(tester.query('healthy', async () => { throw error; }));
+  }
+  assert.deepEqual(lost, ['offline']);
+  for (const error of [{ code: '08006' }, { severity: 'FATAL', code: '28P01' }, new Error('postgres error: error connecting to server')]) {
+    assert.equal(queryLostConnection(error), true);
+    await assert.rejects(tester.query('transport', async () => { throw error; }));
+  }
+  assert.deepEqual(lost, ['offline', 'transport', 'transport', 'transport']);
+});
+
+test('superseded and invalidated checks cannot disconnect a newer session', async () => {
+  const lost: string[] = [];
+  const tester = createConnectionTester(() => {}, () => 'failure', Date.now, id => lost.push(id));
+  const old = deferred();
+  const checking = tester.test('connection', () => old.promise);
+  tester.invalidate('connection');
+  await tester.test('connection', async () => {});
+  old.reject(new Error('Old failure'));
+  await checking;
+  assert.deepEqual(lost, []);
 });
 
 test('repeated clicks share the in-flight test instead of opening duplicate connections', async () => {

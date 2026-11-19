@@ -18,12 +18,19 @@ export function queryReachedServer(error: unknown): boolean {
   return severity === 'ERROR' && typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) && !code.startsWith('08');
 }
 
+export function queryLostConnection(error: unknown): boolean {
+  const { code, severity, message } = (error ?? {}) as { code?: string; severity?: string; message?: string };
+  return Boolean(code?.startsWith('08') || severity === 'FATAL'
+    || /error connecting to server|error communicating with the server|connection (?:refused|closed|reset|timed out)|authentication failed|server closed|broken pipe|network is unreachable|tls handshake|ssl connection/i.test(message ?? ''));
+}
+
 // Tests belong to saved connections, not whichever tab happens to be visible
 // when they finish. Invalidating a configuration also invalidates its old test.
 export function createConnectionTester(
   onChange: (id: string, state: ConnectionTestState | null) => void,
   describeError: (error: unknown) => string,
-  clock = () => Date.now()
+  clock = () => Date.now(),
+  onConnectionLost?: (id: string) => void
 ) {
   const requests = new Map<string, { promise: Promise<void> }>();
   const settledStates = new Map<string, Extract<ConnectionTestState, { checkedAt: number }>>();
@@ -47,7 +54,11 @@ export function createConnectionTester(
         setStatus(id, { status: 'success', checkedAt: clock() });
         onSuccess?.();
       },
-      (error) => { if (requests.get(id) === request) setStatus(id, { status: 'error', message: describeError(error), checkedAt: clock() }); }
+      (error) => {
+        if (requests.get(id) !== request) return;
+        setStatus(id, { status: 'error', message: describeError(error), checkedAt: clock() });
+        onConnectionLost?.(id);
+      }
     ).finally(() => {
       if (requests.get(id) === request) requests.delete(id);
     });
@@ -78,6 +89,7 @@ export function createConnectionTester(
         setStatus(id, neutral ? settledStates.get(id) ?? null : queryReachedServer(error)
           ? { status: 'success', checkedAt: clock() }
           : { status: 'error', message: describeError(error), checkedAt: clock() });
+        if (!neutral && queryLostConnection(error)) onConnectionLost?.(id);
       }
       throw error;
     } finally {

@@ -47,7 +47,7 @@
   on:click={() => connection ? onTest() : onChoose()}
 >
   <span class="status-dot"></span>
-  <span class="connection-name">{connection?.name ?? 'Choose connection'}</span>
+  <span class="connection-name">{connection?.name ?? (compact ? 'Disconnected' : 'Choose connection')}</span>
   {#if switcher && connection}<span class="connection-user">{connection.username}</span>{/if}
   {#if switcher && environment}<span class="environment">{environment}</span>{/if}
   {#if busy || stale || (!compact && error)}<span class="connection-message" role="status">{message}</span>{/if}

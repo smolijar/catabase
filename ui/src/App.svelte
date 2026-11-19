@@ -185,9 +185,13 @@
   let connectionDrop: ListDrop | null = null;
   let connectionDragFrame = 0;
   let connectionTests: Record<string, ConnectionTestState | null> = {};
+  let connectedIds = new Set<string>();
+  let failedConnectionIds: string[] = [];
   const connectionTester = createConnectionTester(
     (id, state) => { connectionTests = { ...connectionTests, [id]: state }; },
-    errorMessage
+    errorMessage,
+    Date.now,
+    id => { if (connectedIds.has(id) && !failedConnectionIds.includes(id)) failedConnectionIds = [...failedConnectionIds, id]; }
   );
   let settings: Settings = { poolSize: 5, supermavenEnabled: false, autoTransaction: true };
   let autoTransactionSaving = false;
@@ -254,8 +258,9 @@
   const writeWorkspaceDraft = createDraftWriter((content) => api.saveDraft('workspace.v1', content));
   const nativeCleanup: Array<() => void> = [];
 
-  $: activeConnection = connections.find((connection) => connection.id === tabConnectionId) ?? null;
-  $: connectionAppearance = workspaceAppearance(appearances, tabConnectionId,
+  $: activeConnection = connectedIds.has(tabConnectionId ?? '') ? connections.find((connection) => connection.id === tabConnectionId) ?? null : null;
+  $: liveConnectionId = activeConnection?.id ?? null;
+  $: connectionAppearance = workspaceAppearance(appearances, activeConnection?.id ?? null,
     showConnectionModal ? { id: connectionForm.id, appearance: connectionAppearanceForm } : undefined);
   $: resolvedTheme = resolveThemePreference(theme, systemLight);
   $: themeKey = `${resolvedTheme}:${connectionAppearance.color}`;
@@ -269,7 +274,7 @@
   }
   $: pickerItems = picker === 'connections'
     ? [
-      ...connections.map(c => ({ id: c.id, label: c.name, detail: c.username, group: 'Connections', active: c.id === tabConnectionId, disabled: running || Boolean(connectionMutation) })),
+      ...connections.map(c => ({ id: c.id, label: c.name, detail: c.username, group: 'Connections', active: c.id === activeConnection?.id, disabled: running || Boolean(connectionMutation) })),
       ...(activeConnection ? [{ id: 'command:disconnect', label: `Disconnect ${activeConnection.name}`, detail: 'Keep saved connection & drafts', group: 'Actions', disabled: running || Boolean(connectionMutation) }] : [])
     ]
     : [
@@ -312,7 +317,7 @@
   $: canLoadMore = Boolean(result?.autoLimited && result.hasMore && resultUsable && !running && !connectionMutation && !pendingChanges.length);
   $: schemaGroups = groupSchemaItems(schemaItems, schemaSearch);
   $: if (workspaceLoaded) scheduleDraftSave(sql, activeTab, tabConnectionId, tabs, archivedTabs);
-  $: if (workspaceLoaded) void refreshSchemaForConnection(tabConnectionId);
+  $: if (workspaceLoaded) void refreshSchemaForConnection(liveConnectionId);
   $: if (workspaceLoaded) void loadConnectionStats(activeConnection?.id ?? null);
   $: exportItems = [
     { id: 'copy-csv', label: 'Copy as CSV' },
@@ -484,6 +489,26 @@
     diagnosticsOpen = false;
     const id = diagnosticReport?.id;
     if (id) void api.acknowledgeDiagnostics(id).catch(error => flash(`Could not save the report review: ${errorMessage(error)}`, true));
+  }
+
+  $: if (failedConnectionIds.length && workspaceLoaded && !operation && !connectionMutation
+      && !txStatus.active && !closingWorkspace && !showConnectionModal) {
+    void disconnectFailedConnection(failedConnectionIds[0]);
+  }
+
+  async function disconnectFailedConnection(id: string) {
+    failedConnectionIds = failedConnectionIds.filter(candidate => candidate !== id);
+    if (!connectedIds.has(id) || connectionTests[id]?.status !== 'error') return;
+    connectionMutation = 'Disconnecting…';
+    try {
+      await api.disconnectConnection(id);
+      connectedIds = new Set([...connectedIds].filter(candidate => candidate !== id));
+      // Preserve the connection association, previous results and staged edits.
+      // They remain read-only until the user deliberately reconnects.
+      await loadConnections();
+      flash('Disconnected', true);
+    } catch (error) { flash(`Could not disconnect: ${errorMessage(error)}`, true); }
+    finally { connectionMutation = null; }
   }
 
   async function registerExplainEvents() {
@@ -1431,10 +1456,11 @@
         }
       }
       patchTab(initiatingTab, { connectionId: saved.id });
+      connectedIds = new Set([...connectedIds, saved.id]);
       showConnectionModal = false;
       flash(`${saved.name} saved and ready.`);
       void refreshTxStatus();
-      void refreshSchema();
+      void testSavedConnection(saved);
     } catch (error) {
       modalFeedback = errorMessage(error);
     } finally {
@@ -1449,7 +1475,7 @@
     if (!connection) return;
     // A click on the current connection is a retry, not a switch: keep
     // its result set, staged edits, pool and manual transaction intact.
-    if (tabConnectionId === id) { void testSavedConnection(connection); return; }
+    if (activeConnection?.id === id) { void testSavedConnection(connection); return; }
     if (pendingChanges.length && !confirm('Discard staged edits before changing this tab’s connection?')) return;
     const initiatingTab = activeTab;
     const current = snapshotActive();
@@ -1457,6 +1483,7 @@
     connectionMutation = 'Switching connection…';
     try {
       const active = await api.activateConnection(id);
+      connectedIds = new Set([...connectedIds, id]);
       patchTab(initiatingTab, {
         connectionId: id,
         pendingChanges: [],
@@ -1499,6 +1526,7 @@
     try {
       await api.disconnectConnection(id);
       connectionTester.invalidate(id);
+      connectedIds = new Set([...connectedIds].filter(candidate => candidate !== id));
       for (const tab of affected) patchTab(tab.id, {
         connectionId: null, editMode: false, pendingChanges: [],
         session: tab.session ? { ...tab.session, data: { ...tab.session.data, rows: cloneRows(tab.originalRows) } } : null
@@ -1672,7 +1700,7 @@
   }
 
   async function refreshSchema() {
-    const connectionId = tabConnectionId;
+    const connectionId = activeConnection?.id;
     if (!connectionId) return;
     const request = ++schemaRequest;
     schemaLoading = true;
@@ -2139,7 +2167,7 @@
                 >
                   <ConnectionCard
                     {connection}
-                    active={connection.id === tabConnectionId}
+                    active={connection.id === activeConnection?.id}
                     appearance={connection.id === tabConnectionId ? connectionAppearance : appearances[connection.id]}
                     disabled={running || Boolean(connectionMutation)}
                     reorderable={connections.length > 1}

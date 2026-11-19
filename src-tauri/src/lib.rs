@@ -1542,7 +1542,10 @@ pub fn run() {
             app.manage(Arc::new(diagnostics::Diagnostics::new(&data_dir)));
             let storage = Storage::open(data_dir.join("catabase.sqlite3"))?;
             storage.interrupt_history_transactions()?;
-            let active = storage.active_connection()?;
+            // Saved defaults are not live sessions after restarting the app.
+            if let Some(previous) = storage.active_connection()? {
+                storage.deactivate_connection(&previous.id)?;
+            }
             let enabled = storage.get_settings()?.supermaven_enabled;
             let supermaven = Arc::new(SupermavenClient::new(data_dir.join("supermaven")));
             if enabled {
@@ -1553,7 +1556,7 @@ pub fn run() {
             }
             app.manage(AppState {
                 storage,
-                active: RwLock::new(active),
+                active: RwLock::new(None),
                 pool: RwLock::new(None),
                 tx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
