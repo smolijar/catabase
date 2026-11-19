@@ -19,6 +19,8 @@ pnpm install --frozen-lockfile
 pnpm tauri dev
 ```
 
+`pnpm tauri dev` launches Catabase Dev with its own connections, drafts, settings and history. On macOS, its data directory is `~/Library/Application Support/com.catabase.dev`. Release builds use the standard Catabase profile.
+
 To run just the frontend development server:
 
 ```sh
