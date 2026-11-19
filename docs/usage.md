@@ -129,6 +129,8 @@ Closing an editable tab saves it under **Tabs → Closed** without confirmation.
 
 History records individual completed statements and errors, including statements inside manual transactions and reviewed cell updates. Transaction groups can be expanded. **Open** displays the saved SQL and result/error without running it. Click the SQL preview to copy it; **Delete** removes the entry. **Open in new query tab** makes an editable copy.
 
+New entries show the SQL sent to PostgreSQL, including any automatic `LIMIT` and `OFFSET` clauses. Earlier entries keep the SQL recorded at the time.
+
 Result snapshots are capped at 256 KiB. Larger entries retain their SQL, duration and row count but have no saved result snapshot. Exact repeated SQL and identical response snapshots share storage while each execution remains visible with its own timestamp and timing information.
 
 History's storage control reports table/index disk usage, unique SQL/snapshot sizes and avoided duplicate bytes. Per-entry sizes describe referenced content, which may be shared with other entries. Deleting history can free reusable SQLite pages without shrinking the database file.

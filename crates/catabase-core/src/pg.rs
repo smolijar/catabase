@@ -290,19 +290,32 @@ pub async fn execute_on_client_observed(
     }
     let batch = crate::split_statements(sql).len() > 1;
     let start = Instant::now();
-    if !batch && let Some(observer) = observer {
-        observer.started(sql);
-    }
     let result = if batch {
         // Keep PostgreSQL's single-message, implicit-transaction semantics.
         // Splitting this into separate requests would commit partial batches.
         execute_simple(client, sql, start, observer).await
     } else {
-        execute_reflected(client, sql, offset, page_size, cancelled, reflection).await
+        let requested_page = page_size.clamp(1, 10_000);
+        let limited_sql = auto_limit_sql(sql, offset, requested_page);
+        let exec_sql = limited_sql.as_deref().unwrap_or(sql).trim();
+        // Observe the same SQL sent to PostgreSQL, including failed or interrupted requests.
+        if let Some(observer) = observer {
+            observer.started(exec_sql);
+        }
+        let result = execute_reflected(
+            client,
+            exec_sql,
+            requested_page,
+            limited_sql.is_some(),
+            cancelled,
+            reflection,
+        )
+        .await;
+        if let Some(observer) = observer {
+            observer.finished(exec_sql, result.as_ref(), start.elapsed().as_millis());
+        }
+        result
     };
-    if !batch && let Some(observer) = observer {
-        observer.finished(sql, result.as_ref(), start.elapsed().as_millis());
-    }
     if invalidates {
         reflection.invalidate();
     }
@@ -311,17 +324,13 @@ pub async fn execute_on_client_observed(
 
 async fn execute_reflected(
     client: &PgClient,
-    sql: &str,
-    offset: usize,
-    page_size: usize,
+    exec_sql: &str,
+    requested_page: usize,
+    auto_limited: bool,
     cancelled: Option<&AtomicBool>,
     reflection: &ReflectionCache,
 ) -> Result<QueryResult, CoreError> {
     check_query_cancelled(cancelled)?;
-    let requested_page = page_size.clamp(1, 10_000);
-    let limited_sql = auto_limit_sql(sql, offset, requested_page);
-    let auto_limited = limited_sql.is_some();
-    let exec_sql = limited_sql.as_deref().unwrap_or(sql).trim();
     let start = Instant::now();
 
     // Use a fresh unnamed Parse/Bind/Describe/Execute request for SELECT-like

@@ -251,6 +251,79 @@ async fn statement_history_records_manual_transactions_reviewed_edits_and_atomic
 
 #[tokio::test]
 #[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE pointing at the saved zenbase docker connection"]
+async fn history_records_executed_sql_with_pagination() -> Result<(), Box<dyn Error>> {
+    use catabase_core::{CoreError, StatementHistory, Storage, execute_on_client_observed};
+
+    let client = connect_client(&docker_fields()?).await?;
+    let storage = Storage::in_memory()?;
+    let notify = |saved: Result<(), CoreError>| saved.unwrap();
+    let history = StatementHistory::new(&storage, "docker", &notify);
+    let reflection = ReflectionCache::default();
+
+    let page = execute_on_client_observed(
+        &client,
+        "SELECT n FROM generate_series(1, 4) AS n ORDER BY n;",
+        1,
+        2,
+        None,
+        &reflection,
+        Some(&history),
+    )
+    .await?;
+    assert!(page.auto_limited && page.has_more);
+    assert_eq!(
+        page.rows,
+        [serde_json::json!({"n": 2}), serde_json::json!({"n": 3})]
+    );
+
+    let explicit_limit = execute_on_client_observed(
+        &client,
+        "SELECT 42 AS n LIMIT 1;",
+        0,
+        2,
+        None,
+        &reflection,
+        Some(&history),
+    )
+    .await?;
+    assert!(!explicit_limit.auto_limited);
+
+    let incomplete_join = "SELECT * FROM (SELECT 1) a\nLEFT JOIN (SELECT 2) b";
+    let error = execute_on_client_observed(
+        &client,
+        incomplete_join,
+        0,
+        2,
+        None,
+        &reflection,
+        Some(&history),
+    )
+    .await
+    .unwrap_err();
+    let pg_error = error.pg_info().expect("expected a PostgreSQL parse error");
+    assert!(
+        pg_error.message.contains("\"LIMIT\""),
+        "{}",
+        pg_error.message
+    );
+
+    let entries = storage.history_page(None, 0, 10)?.entries;
+    assert_eq!(entries.len(), 3);
+    assert!(entries[0].is_error);
+    assert_eq!(
+        entries[0].query,
+        format!("{incomplete_join} LIMIT 3 OFFSET 0")
+    );
+    assert_eq!(entries[1].query, "SELECT 42 AS n LIMIT 1;");
+    assert_eq!(
+        entries[2].query,
+        "SELECT n FROM generate_series(1, 4) AS n ORDER BY n LIMIT 3 OFFSET 1"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE pointing at the saved zenbase docker connection"]
 async fn connection_options_apply_to_direct_and_pooled_docker_sessions()
 -> Result<(), Box<dyn Error>> {
     use catabase_core::{ConnectionOptions, checkout_pool_client, create_pool};
