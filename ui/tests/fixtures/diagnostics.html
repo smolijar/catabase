@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Catabase diagnostics verification</title></head>
+<body>
+  <div id="app"></div>
+  <aside style="position:fixed;bottom:28px;right:16px;z-index:10;display:flex;gap:8px;background:var(--surface-2);padding:6px;border:1px solid var(--line)"><label><input type="checkbox" id="offline" />Simulate offline</label><output id="fixture-probe" style="max-width:250px;max-height:24px;overflow:auto;font-size:10px">No requests</output></aside>
+  <output id="copy-report-probe" hidden></output><output id="issue-probe" hidden></output><output id="link-probe" hidden></output>
+  <script type="module">
+    const timestamp = new Date().toISOString();
+    const connection = { id:'fixture',name:'zenbase docker (fixture)',username:'demo',host:'synthetic.invalid',port:5432,database:'demo',ssl:false,isActive:false,createdAt:timestamp,updatedAt:timestamp };
+    const counts = {};
+    let reviewed = false;
+    const notes = '**macOS build:** updater signatures are included.\n\n## Changes\n\n- **Fix** clipboard crashes ([abc123](https://github.com/smolijar/catabase/commit/abc123))\n- Add `Vim` shortcuts\n\n[Full diff since v0.1.3](https://github.com/smolijar/catabase/compare/v0.1.3...v0.1.4)\n\n<script>window.untrustedMarkdownExecuted=true<\/script><img src="x" onerror="window.untrustedMarkdownExecuted=true"><a href="javascript:alert(1)">Unsafe link</a>';
+    const draft = JSON.stringify({version:2,activeId:'fixture-query',tabs:[{id:'fixture-query',title:'Crash reporting check',sql:'select 1 as answer',connectionId:'fixture',viewState:null}],archivedTabs:[]});
+    const count = command => { counts[command] = (counts[command] ?? 0)+1; document.getElementById('fixture-probe').textContent=JSON.stringify(counts); };
+    let callback = 0;
+    window.__TAURI_INTERNALS__ = { transformCallback:() => ++callback, invoke:async (command,args={}) => {
+      if (!['save_draft','tx_status','supermaven_status'].includes(command)) count(command);
+      switch(command) {
+        case 'plugin:event|listen': return 0;
+        case 'plugin:event|unlisten': return;
+        case 'get_settings': return {poolSize:1,supermavenEnabled:false,autoTransaction:true};
+        case 'list_connections': return [{...connection}];
+        case 'activate_connection': connection.isActive=true; return {...connection};
+        case 'disconnect_connection': connection.isActive=false; return;
+        case 'test_connection': await new Promise(resolve=>setTimeout(resolve,150)); if(document.getElementById('offline').checked) throw new Error('postgres error: error connecting to server'); return;
+        case 'connection_stats': return {active:0,idle:1,poolSize:1};
+        case 'introspect_schema': return {schemas:[]};
+        case 'load_draft': return sessionStorage.getItem('diagnostics-fixture-draft') ?? draft;
+        case 'save_draft': sessionStorage.setItem('diagnostics-fixture-draft',args.content); return;
+        case 'history_page': return {entries:[],total:0};
+        case 'history_stats': return {total:0,errors:0};
+        case 'tx_status': return {active:false,startedAt:null};
+        case 'supermaven_status': return {enabled:false,state:'off',message:'Disabled in fixture'};
+        case 'updater_status': return {currentVersion:'0.1.3',enabled:true};
+        case 'check_for_update': return {currentVersion:'0.1.3',update:{version:'0.1.4',notes,publishedAt:timestamp}};
+        case 'open_release_link': document.getElementById('link-probe').textContent=args.url; return;
+        case 'diagnostics_report': return {id:'fixture-report',newCrash:!reviewed,title:'Crash: EXC_BAD_ACCESS (Catabase 0.1.3)',body:'## What happened\n\nDescribe the steps to reproduce.\n\n## Diagnostics\n\n- Catabase: 0.1.4\n- Platform: macos / aarch64\n- Exception: EXC_BAD_ACCESS (SIGSEGV)\n\n### Crashed thread\n\n```text\n0 AppKit: -[NSPasteboard changeCount]\n1 catabase: image offset 0x200\n```\n',query:{sql:"select 'private-fixture-value' as secret",phase:'running',truncated:false,startedAt:timestamp,fromCrash:!args.currentSession},note:'A recent macOS crash report is available. Review the report before sharing.'};
+        case 'acknowledge_diagnostics': reviewed=true; return;
+        case 'clipboard_write_text': document.getElementById('copy-report-probe').textContent=args.text; return;
+        case 'open_diagnostic_issue': document.getElementById('issue-probe').textContent=JSON.stringify(args); return;
+        case 'split_sql': return [{start:0,end:args.sql.length,text:args.sql}];
+        case 'execute_query': if(document.getElementById('offline').checked) throw {code:'08006',message:'Connection closed'}; return {columns:[{name:'answer',typeName:'int4',typeOid:23,primaryKey:false,generated:false}],rows:[{answer:1}],rowCount:1,durationMs:1,autoLimited:false,hasMore:false};
+        default: throw new Error(`Unexpected fixture command: ${command}`);
+      }
+    }};
+    await import('../../src/main.ts');
+  </script>
+</body></html>
