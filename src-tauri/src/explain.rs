@@ -146,6 +146,7 @@ pub(super) async fn explain_query(
         error.code = Some("CATABASE_EXPLAIN_INPUT".into());
         error
     })?;
+    let _diagnostic_query = super::diagnostics::track_query(&app, &sql);
     let cancellation = begin_operation(&state, &request.query_token).await;
     let total_runs = if request.use_second_result { 2 } else { 1 };
     let progress = |stage, run| {

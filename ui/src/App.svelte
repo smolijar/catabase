@@ -173,6 +173,7 @@
   let diagnosticsOpen = false;
   let diagnosticsPending = false;
   let diagnosticsLoading = false;
+  let diagnosticsRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let txStatus: TxStatus = { active: false, startedAt: null };
   let txStatusKnown = false;
   let editMode = false;
@@ -440,6 +441,7 @@
       window.clearInterval(aiInterval);
       window.clearInterval(healthInterval);
       if (toastTimer) window.clearTimeout(toastTimer);
+      if (diagnosticsRetryTimer) window.clearTimeout(diagnosticsRetryTimer);
       if (draftTimer) window.clearTimeout(draftTimer);
       if (historyTimer) window.clearTimeout(historyTimer);
       if (historyRefreshTimer) window.clearTimeout(historyRefreshTimer);
@@ -461,18 +463,25 @@
     workspaceLoaded = true;
     await tick();
     if (mounted) onWorkspaceReady();
-    if (mounted && isTauri()) void loadDiagnostics(true);
+    if (mounted && isTauri()) {
+      void loadDiagnostics(true);
+      // macOS may finish writing its crash log after a quick relaunch.
+      diagnosticsRetryTimer = setTimeout(() => {
+        if (mounted && document.visibilityState === 'visible' && !closingWorkspace) void loadDiagnostics(true);
+      }, 15_000);
+    }
   }
 
   async function loadDiagnostics(automatic = false) {
-    if (diagnosticsLoading) return;
+    if (diagnosticsLoading || (automatic && (diagnosticsOpen || diagnosticsPending))) return;
     diagnosticsLoading = true;
     try {
-      const report = await api.diagnosticsReport();
+      const report = await api.diagnosticsReport(!automatic);
       if (!mounted) return;
       if (automatic && !report.newCrash) return;
       diagnosticReport = report;
-      diagnosticsPending = true;
+      if (automatic) diagnosticsPending = true;
+      else diagnosticsOpen = true;
     } catch (error) {
       if (!automatic) flash(`Could not load diagnostics: ${errorMessage(error)}`, true);
     } finally { diagnosticsLoading = false; }
@@ -2268,7 +2277,7 @@
           <section class="settings-card">
             <div class="settings-card-head"><strong>Diagnostics</strong></div>
             <p>Review a crash report or report a problem. Nothing is sent automatically.</p>
-            <button disabled={diagnosticsLoading || running} on:click={() => void loadDiagnostics()}>{diagnosticsLoading ? 'Preparing report…' : 'Report a problem'}</button>
+            <button disabled={diagnosticsLoading} on:click={() => void loadDiagnostics()}>{diagnosticsLoading ? 'Preparing report…' : 'Report a problem'}</button>
           </section>
           <section class="settings-card">
             <div class="settings-card-head"><strong>SQL editor</strong></div>

@@ -47,8 +47,18 @@ pub(super) struct DiagnosticReport {
     new_crash: bool,
     title: String,
     body: String,
-    query: Option<QueryContext>,
+    query: Option<ReportQuery>,
     note: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReportQuery {
+    sql: String,
+    phase: String,
+    truncated: bool,
+    started_at: DateTime<Utc>,
+    from_crash: bool,
 }
 
 struct Crash {
@@ -194,7 +204,10 @@ impl Drop for QueryTracking {
 }
 
 #[tauri::command]
-pub(super) async fn diagnostics_report(app: AppHandle) -> Result<DiagnosticReport, AppError> {
+pub(super) async fn diagnostics_report(
+    app: AppHandle,
+    current_session: Option<bool>,
+) -> Result<DiagnosticReport, AppError> {
     let state = Arc::clone(&app.state::<Arc<Diagnostics>>());
     let version = app.package_info().version.to_string();
     let logs = if cfg!(target_os = "macos") {
@@ -206,7 +219,13 @@ pub(super) async fn diagnostics_report(app: AppHandle) -> Result<DiagnosticRepor
         None
     };
     tauri::async_runtime::spawn_blocking(move || {
-        make_report(&state, &version, logs.as_deref(), SystemTime::now())
+        make_report(
+            &state,
+            &version,
+            logs.as_deref(),
+            current_session.unwrap_or(false),
+            SystemTime::now(),
+        )
     })
     .await
     .map_err(|_| CoreError::message("Could not prepare diagnostics.").into())
@@ -277,14 +296,25 @@ fn make_report(
     state: &Diagnostics,
     version: &str,
     logs: Option<&Path>,
+    current_session: bool,
     now: SystemTime,
 ) -> DiagnosticReport {
     let crash = logs.and_then(|directory| latest_crash(directory, now));
-    let query = if let Some(crash) = &crash {
-        state.crash_query(crash)
+    let current = state.query.lock().ok().and_then(|query| query.clone());
+    let (query, from_crash) = if current_session && current.is_some() {
+        (current, false)
+    } else if let Some(crash) = &crash {
+        (state.crash_query(crash), true)
     } else {
-        state.query.lock().ok().and_then(|query| query.clone())
+        (current, false)
     };
+    let query = query.map(|query| ReportQuery {
+        sql: query.sql,
+        phase: query.phase,
+        truncated: query.truncated,
+        started_at: query.started_at,
+        from_crash,
+    });
     let mut body = format!(
         "## What happened\n\nDescribe what you were doing and how to reproduce the problem.\n\n## Diagnostics\n\n- Catabase: {version}\n- Platform: {} / {}\n- Build: {}\n",
         std::env::consts::OS,
@@ -622,15 +652,15 @@ mod tests {
         let now: SystemTime = DateTime::parse_from_rfc3339("2026-11-19T11:00:00Z")
             .unwrap()
             .into();
-        let first = make_report(&state, "0.1.4", Some(&logs), now);
+        let first = make_report(&state, "0.1.4", Some(&logs), false, now);
         assert!(first.new_crash);
         state.acknowledge(first.id.as_ref().unwrap()).unwrap();
-        let reopened = make_report(&Diagnostics::new(&temp.0), "0.1.4", Some(&logs), now);
+        let reopened = make_report(&Diagnostics::new(&temp.0), "0.1.4", Some(&logs), false, now);
         assert!(!reopened.new_crash);
         assert_eq!(first.body, reopened.body);
         assert!(!reopened.body.contains("SELECT"));
         assert!(state.acknowledge("../../outside").is_err());
-        assert!(!make_report(&state, "0.1.4", Some(&logs), now + REPORT_AGE).new_crash);
+        assert!(!make_report(&state, "0.1.4", Some(&logs), false, now + REPORT_AGE).new_crash);
     }
 
     #[test]
@@ -675,7 +705,7 @@ mod tests {
         let temp = Fixture::new();
         let state = Diagnostics::new(&temp.0);
         let missing = temp.0.join("missing");
-        let report = make_report(&state, "0.1.4", Some(&missing), SystemTime::now());
+        let report = make_report(&state, "0.1.4", Some(&missing), false, SystemTime::now());
         assert!(report.id.is_none());
         assert!(!report.new_crash);
         assert!(report.body.contains("Catabase: 0.1.4"));
@@ -685,6 +715,48 @@ mod tests {
             .set_len(MAX_LOG_BYTES + 1)
             .unwrap();
         assert!(latest_crash(&temp.0, SystemTime::now()).is_none());
+    }
+
+    #[test]
+    fn manual_reports_can_include_current_sql_without_mislabeling_it_as_crash_sql() {
+        let temp = Fixture::new();
+        let state = Diagnostics::new(&temp.0);
+        let logs = temp.0.join("logs");
+        fs::create_dir(&logs).unwrap();
+        fs::write(logs.join("catabase-fixture.ips"), log("com.catabase.app")).unwrap();
+        let crash = parse_crash(&log("com.catabase.app")).unwrap();
+        let old = QueryContext {
+            sql: "select 'at crash'".into(),
+            phase: "running".into(),
+            truncated: false,
+            pid: 123,
+            started_at: crash.time - chrono::Duration::seconds(1),
+        };
+        write_private(&state.context_file, &old).unwrap();
+        *state.query.lock().unwrap() = Some(QueryContext {
+            sql: "select 'current private SQL'".into(),
+            phase: "running".into(),
+            truncated: false,
+            pid: 456,
+            started_at: crash.time + chrono::Duration::seconds(1),
+        });
+        let now: SystemTime = (crash.time + chrono::Duration::seconds(10)).into();
+        let automatic = make_report(&state, "0.1.4", Some(&logs), false, now);
+        assert!(automatic.query.as_ref().unwrap().from_crash);
+        assert_eq!(automatic.query.as_ref().unwrap().sql, old.sql);
+        let manual = make_report(&state, "0.1.4", Some(&logs), true, now);
+        assert!(!manual.query.as_ref().unwrap().from_crash);
+        assert!(
+            manual
+                .query
+                .as_ref()
+                .unwrap()
+                .sql
+                .contains("current private SQL")
+        );
+        assert!(!manual.body.contains("private SQL"));
+        assert!(!manual.body.contains(&old.sql));
+        assert!(!serde_json::to_string(&manual).unwrap().contains("\"pid\""));
     }
 
     #[test]

@@ -5,7 +5,7 @@ import type { DiagnosticReport } from '../src/lib/diagnostics.ts';
 
 const report: DiagnosticReport = {
   id: 'crash', newCrash: true, title: 'Native crash', body: 'Technical details only', note: '',
-  query: { sql: "SELECT 'sensitive ``` value'", phase: 'running', truncated: false, startedAt: '2026-11-19T11:00:00Z' }
+  query: { sql: "SELECT 'sensitive ``` value'", phase: 'running', truncated: false, startedAt: '2026-11-19T11:00:00Z', fromCrash: true }
 };
 
 test('SQL is excluded by default from both GitHub and clipboard and can be removed again', () => {
@@ -23,6 +23,7 @@ test('SQL with Markdown fences cannot escape its code block', () => {
   assert.match(body, /````sql\nSELECT/);
   assert.match(body, /\n````\n$/);
   assert.match(diagnosticBody({ ...report, query: { ...report.query!, truncated: true } }, true), /SQL truncated/);
+  assert.match(diagnosticBody({ ...report, query: { ...report.query!, fromCrash: false } }, true), /Latest SQL in this session/);
 });
 
 test('short reports are prefilled; long encoded reports use the full clipboard fallback', () => {

@@ -47,7 +47,7 @@
       <p>{report.query ? 'Off by default. SQL can contain sensitive values; review it before sharing.' : 'No SQL context is available for this report.'}</p>
     </div>
     <label>Report<textarea {...literalTextAttributes} rows="14" bind:value={body}></textarea></label>
-    {#if includeSql && report.query}<label>SQL to include ({report.query.phase}{report.query.truncated ? ', truncated' : ''})<textarea {...literalTextAttributes} rows="4" readonly value={report.query.sql}></textarea></label>{/if}
+    {#if includeSql && report.query}<label>SQL to include ({report.query.fromCrash ? 'crashed session' : 'this session'}, {report.query.phase}{report.query.truncated ? ', truncated' : ''})<textarea {...literalTextAttributes} rows="4" readonly value={report.query.sql}></textarea></label>{/if}
     {#if draft.copyRequired}<p class="privacy">This report is too long for a URL. Opening GitHub will copy the full report for you to paste into the issue.</p>{/if}
     {#if status}<p class:error-text={failed} role="status">{status}</p>{/if}
     <div class="row-actions"><button disabled={busy} on:click={copy}><Icon name="copy" size={14} />Copy report</button><button class="primary" disabled={busy || !title.trim() || !body.trim()} on:click={openIssue}><Icon name="open" size={14} />{busy ? 'Opening…' : 'Open GitHub draft'}</button></div>

@@ -379,6 +379,9 @@ async fn execute_query(
     read_only_replay: Option<bool>,
 ) -> Result<QueryResult, AppError> {
     let _workspace = state.updates.workspace_operation()?;
+    // Capture connection/setup failures too. Statement observers replace this
+    // context with the exact statement once execution begins.
+    let _diagnostic_query = diagnostics::track_query(&app, &sql);
     let command_start = Instant::now();
     let cancellation = begin_operation(&state, &query_token).await;
     let outcome = async {

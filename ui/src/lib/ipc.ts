@@ -27,7 +27,7 @@ import type {
 } from './types';
 
 export const api = {
-  diagnosticsReport: () => invoke<DiagnosticReport>('diagnostics_report'),
+  diagnosticsReport: (currentSession = false) => invoke<DiagnosticReport>('diagnostics_report', { currentSession }),
   acknowledgeDiagnostics: (id: string) => invoke<void>('acknowledge_diagnostics', { id }),
   openDiagnosticIssue: (title: string, body: string) => invoke<void>('open_diagnostic_issue', { title, body }),
   updaterStatus: () => invoke<UpdaterStatus>('updater_status'),
