@@ -40,7 +40,7 @@ pub use sql::{
 };
 pub use sql_safety::requires_transaction;
 pub use storage::{
-    ConnectionInput, ConnectionRecord, HistoryEntry, HistoryPage, HistoryStats,
+    CommitMode, ConnectionInput, ConnectionRecord, HistoryEntry, HistoryPage, HistoryStats,
     HistoryStorageStats, NewHistoryEntry, Settings, Storage,
 };
 pub use supermaven::{SupermavenClient, SupermavenCompletion, SupermavenRequest, SupermavenStatus};

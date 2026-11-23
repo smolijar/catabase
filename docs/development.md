@@ -80,7 +80,7 @@ CATABASE_TEST_CONNECTION_STORE="/path/to/catabase.sqlite3" \
   cargo test -p catabase-core --test reflection_docker -- --ignored --nocapture
 ```
 
-The native auto-transaction suite uses the same guarded Docker connection and session-local temporary tables. It checks read/write routing, transaction reuse, rollback, reviewed edits, cancellation and history:
+The native transaction suite uses the same guarded Docker connection and session-local temporary tables. It checks commit-mode routing, transaction reuse and completion, reviewed edits, cancellation and history.
 
 ```sh
 CATABASE_TEST_CONNECTION_STORE="/path/to/catabase.sqlite3" \

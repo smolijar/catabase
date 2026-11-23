@@ -41,7 +41,7 @@
       <textarea {...literalTextAttributes} id="explain-preamble" class="preamble" rows="2" bind:value={options.preamble} disabled={state.busy}></textarea>
       <Switch label="Use second result" bind:checked={options.useSecondResult} disabled={state.busy} />
       <p class="help">{options.useSecondResult ? 'Run EXPLAIN twice and keep the second plan, after the first run has warmed the cache.' : 'Run EXPLAIN once and keep that plan.'}</p>
-      <div class="effect-note">With ANALYZE, the query executes{options.useSecondResult ? ' twice' : ''}, including writes. Auto transaction is bypassed. {transactionActive ? 'This will use your open transaction.' : 'No transaction will be opened; writes can commit immediately.'}</div>
+      <div class="effect-note">With ANALYZE, the query executes{options.useSecondResult ? ' twice' : ''}, including writes. {transactionActive ? 'This will use your open transaction.' : 'Writes can commit immediately in any commit mode.'}</div>
       <Switch label="Share on Dalibo" bind:checked={options.share} disabled={state.busy} />
       <p class="help">{options.share ? 'Send the plan, SQL, title and comments to explain.dalibo.com. Anyone with the returned link can view them.' : 'Keep the plan in this dialog. Nothing is sent to Dalibo.'}</p>
     {/if}

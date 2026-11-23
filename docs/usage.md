@@ -69,11 +69,15 @@ Relationships are not inferred from similarly named columns. Derived tables and 
 
 ### Transactions and cancellation
 
-**Auto transaction** is on by default. Toggle **Auto TX on/off** in the status bar or use **Settings → Transactions**; the preference is saved. Read-only queries, including read-only CTEs, execute normally. Writes, including nested write CTEs, row-locking queries and SQL that cannot be recognized as read-only open a transaction if one is not already active. Unknown or user-defined functions are treated conservatively and may open a transaction even when they only read. Reviewed cell edits follow the same mode. Use **Commit** to save these changes or **Rollback** to undo them; the transaction stays open across subsequent queries.
+Choose **Commit mode** in the status bar or in Settings. Catabase saves your choice.
 
-Turning auto transaction off does not finish an open transaction. Commit or roll back first when you need to run commands such as `VACUUM` that PostgreSQL requires outside a transaction.
+- **Auto-commit** commits successful writes immediately outside an open transaction.
+- **Manual commit** opens a transaction on the first statement, including reads. Use **Commit** or **Rollback** to finish it.
+- **Smart commit** is the default. Read-only queries run normally. Writes, including writes inside CTEs, open a transaction. Row locks, unknown functions and SQL that Catabase cannot classify as read-only also open a transaction.
 
-Manual `BEGIN`, `COMMIT`/`END` and `ROLLBACK` still use the held transaction connection. The transaction banner distinguishes automatically opened transactions and shows elapsed time. Statements enter history as they finish, including transaction commands and updates applied through the cell-edit review. Related entries share a transaction ID and can be expanded as a group; automatically opened groups are labeled **Auto transaction**.
+Changing modes takes effect on the next transaction. For commands such as `VACUUM`, finish the open transaction and choose **Auto-commit** first. The old Auto TX preference maps to **Smart commit** when on and **Auto-commit** when off.
+
+You can also run `BEGIN`, `COMMIT`/`END` and `ROLLBACK` in the editor. The transaction banner shows elapsed time and offers **Commit** and **Rollback**. Results show whether writes have committed or are pending. History records statements as they finish, including transaction commands and reviewed edits. Entries from the same transaction can be expanded as a group. Groups opened by Smart commit use that label.
 
 Cancel sends PostgreSQL's cancellation signal. An unresponsive connection is closed rather than returned to the pool. If the app cannot confirm cancellation, it reports an unknown write/commit outcome; check the database before retrying that operation.
 
@@ -97,7 +101,7 @@ Stage values in the cell inspector, then review the generated SQL before applyin
 
 Foreign-key cells use a searchable picker of existing rows rather than free-form input. Choices include a compact row preview and key; the first 50 matches are shown. Composite picks stage all projected components together. An incomplete composite selection explains which columns are missing. These previews show committed rows, not uncommitted changes in a manual transaction.
 
-Applying changes is atomic. With auto transaction enabled, or inside an existing transaction, applied edits remain pending until you commit. Running a new query with staged edits asks before discarding them.
+Applying changes is atomic. Reviewed edits follow the selected commit mode and remain pending when applied inside an open transaction. Running a new query with staged edits asks before discarding them.
 
 ### Query timing
 

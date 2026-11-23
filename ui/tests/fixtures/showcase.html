@@ -24,7 +24,7 @@
       }
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_event, id) => listeners.delete(id) };
       const transactionDemo = new URLSearchParams(location.search).get('transaction');
-      let autoTransaction = localStorage.getItem('catabase.demo.autoTransaction') !== 'false';
+      let commitMode = localStorage.getItem('catabase.demo.commitMode') ?? 'smart';
       let transaction = { active: transactionDemo === 'auto', automatic: transactionDemo === 'auto', startedAt: transactionDemo === 'auto' ? new Date(Date.now() - 15000).toISOString() : null };
       const sql = `select
     id, title, price,
@@ -119,13 +119,13 @@ order by id;`;
           case 'install_update': throw new Error('This browser fixture cannot install updates. Your workspace is unchanged.');
           case 'open_releases': return;
           case 'list_connections': return [connection];
-          case 'get_settings': return { poolSize: 5, supermavenEnabled: false, autoTransaction };
-          case 'set_auto_transaction':
+          case 'get_settings': return { poolSize: 5, supermavenEnabled: false, commitMode };
+          case 'set_commit_mode':
             await new Promise(resolve => setTimeout(resolve, 300));
             if (transactionDemo === 'save-error') throw new Error('Demo settings write failed.');
-            autoTransaction = args.enabled;
-            localStorage.setItem('catabase.demo.autoTransaction', String(autoTransaction));
-            return autoTransaction;
+            commitMode = args.mode;
+            localStorage.setItem('catabase.demo.commitMode', commitMode);
+            return commitMode;
           case 'tx_status': return transaction;
           case 'tx_commit': case 'tx_rollback':
             transaction = { active: false, automatic: false, startedAt: null };

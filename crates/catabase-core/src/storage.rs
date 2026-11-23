@@ -116,7 +116,34 @@ pub struct Storage {
 pub struct Settings {
     pub pool_size: u32,
     pub supermaven_enabled: bool,
-    pub auto_transaction: bool,
+    pub commit_mode: CommitMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommitMode {
+    Auto,
+    Manual,
+    #[default]
+    Smart,
+}
+
+impl CommitMode {
+    pub fn opens_transaction(self, statement_needs_transaction: bool) -> bool {
+        match self {
+            Self::Auto => false,
+            Self::Manual => true,
+            Self::Smart => statement_needs_transaction,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+            Self::Smart => "smart",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -317,14 +344,19 @@ impl Storage {
             .clamp(1, 32);
         let supermaven_enabled =
             setting_value(&conn, "supermaven_enabled")?.as_deref() == Some("true");
-        // Existing installations opt in too. Only an explicit saved opt-out
-        // allows statements to run without automatic transaction protection.
-        let auto_transaction =
-            setting_value(&conn, "auto_transaction")?.as_deref() != Some("false");
+        let commit_mode = match setting_value(&conn, "commit_mode")?.as_deref() {
+            Some("auto") => CommitMode::Auto,
+            Some("manual") => CommitMode::Manual,
+            Some("smart") => CommitMode::Smart,
+            _ if setting_value(&conn, "auto_transaction")?.as_deref() == Some("false") => {
+                CommitMode::Auto
+            }
+            _ => CommitMode::Smart,
+        };
         Ok(Settings {
             pool_size,
             supermaven_enabled,
-            auto_transaction,
+            commit_mode,
         })
     }
 
@@ -345,9 +377,13 @@ impl Storage {
         Ok(())
     }
 
-    pub fn set_auto_transaction(&self, enabled: bool) -> Result<(), CoreError> {
+    pub fn set_commit_mode(&self, mode: CommitMode) -> Result<(), CoreError> {
         let conn = self.lock()?;
-        conn.execute("INSERT INTO settings (key, value) VALUES ('auto_transaction', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![enabled.to_string()])?;
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('commit_mode', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![mode.as_str()],
+        )?;
         Ok(())
     }
 
@@ -1469,21 +1505,36 @@ mod tests {
 
         assert_eq!(settings.pool_size, 5);
         assert!(!settings.supermaven_enabled);
-        assert!(settings.auto_transaction);
+        assert_eq!(settings.commit_mode, CommitMode::Smart);
     }
 
     #[test]
-    fn auto_transaction_defaults_on_and_persists_opt_out_across_reopen() {
+    fn commit_mode_preserves_legacy_choices_and_persists_new_choices() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.sqlite3");
         let storage = Storage::open(&path).unwrap();
-        assert!(storage.get_settings().unwrap().auto_transaction);
-        storage.set_auto_transaction(false).unwrap();
-        drop(storage);
-        let storage = Storage::open(&path).unwrap();
-        assert!(!storage.get_settings().unwrap().auto_transaction);
-        storage.set_auto_transaction(true).unwrap();
-        assert!(storage.get_settings().unwrap().auto_transaction);
+        for (legacy, expected) in [("true", CommitMode::Smart), ("false", CommitMode::Auto)] {
+            storage
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES ('auto_transaction', ?1)",
+                    [legacy],
+                )
+                .unwrap();
+            assert_eq!(storage.get_settings().unwrap().commit_mode, expected);
+        }
+        for mode in [CommitMode::Manual, CommitMode::Smart, CommitMode::Auto] {
+            storage.set_commit_mode(mode).unwrap();
+            assert_eq!(
+                Storage::open(&path)
+                    .unwrap()
+                    .get_settings()
+                    .unwrap()
+                    .commit_mode,
+                mode
+            );
+        }
     }
 
     #[test]

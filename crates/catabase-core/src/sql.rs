@@ -347,6 +347,21 @@ fn leading_keywords(mut sql: &str, limit: usize) -> Vec<String> {
     words
 }
 
+/// The affected count describes the top-level DML command. Returned rows from
+/// a batch or a SELECT reading a writing CTE may describe something else.
+pub fn row_change_verb(sql: &str) -> Option<&'static str> {
+    let statements = split_statements(sql);
+    let [statement] = statements.as_slice() else {
+        return None;
+    };
+    match leading_keywords(&statement.text, 1).first()?.as_str() {
+        "update" => Some("updated"),
+        "delete" => Some("deleted"),
+        "insert" | "merge" => Some("affected"),
+        _ => None,
+    }
+}
+
 pub fn auto_limit_sql(sql: &str, offset: usize, page_size: usize) -> Option<String> {
     if classify_statement(sql) != StatementKind::SelectLike
         || crate::requires_transaction(sql)

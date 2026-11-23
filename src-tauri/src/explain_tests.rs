@@ -13,7 +13,7 @@ async fn two_runs_return_second_plan_and_skip_automatic_transactions() -> Result
     let (active, pool) = fixture_pool().await?;
     let client = checkout_pool_client(&pool).await?;
     let storage = Storage::in_memory()?;
-    assert!(storage.get_settings()?.auto_transaction);
+    assert_eq!(storage.get_settings()?.commit_mode, CommitMode::Smart);
     let notify = |saved: Result<(), CoreError>| saved.unwrap();
     let history = StatementHistory::new(&storage, &active.id, &notify);
     let reflection = ReflectionCache::default();

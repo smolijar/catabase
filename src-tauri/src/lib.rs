@@ -16,16 +16,17 @@ use std::{
 };
 
 use catabase_core::{
-    ApplyUpdatesResult, CommandTimings, ConnectionFields, ConnectionInput, ConnectionRecord,
-    ConnectionStats, CoreError, ForeignKeyLookup, ForeignKeyValues, HistoryPage, HistoryStats,
-    HistoryStorageStats, PgClient, PgErrorInfo, PgPool, PooledPgClient, QueryCancellation,
-    QueryResult, ReflectionCache, RowUpdate, SchemaTree, Settings, StatementHistory, StatementKind,
-    StatementRange, Storage, SupermavenClient, SupermavenCompletion, SupermavenRequest,
-    SupermavenStatus, apply_row_updates_observed as apply_rows, build_connection_url as build_url,
+    ApplyUpdatesResult, CommandTimings, CommitMode, ConnectionFields, ConnectionInput,
+    ConnectionRecord, ConnectionStats, CoreError, ForeignKeyLookup, ForeignKeyValues, HistoryPage,
+    HistoryStats, HistoryStorageStats, PgClient, PgErrorInfo, PgPool, PooledPgClient,
+    QueryCancellation, QueryResult, ReflectionCache, RowUpdate, SchemaTree, Settings,
+    StatementHistory, StatementKind, StatementRange, Storage, SupermavenClient,
+    SupermavenCompletion, SupermavenRequest, SupermavenStatus,
+    apply_row_updates_observed as apply_rows, build_connection_url as build_url,
     checkout_pool_client, classify_statement, connection_stats as load_connection_stats,
     create_pool, execute_on_client_observed, get_ddl_on_client as load_ddl,
     lookup_foreign_key_values as lookup_fk_values, parse_connection_url as parse_url,
-    requires_transaction, split_editor_statements, split_statements,
+    requires_transaction, split_editor_statements, split_statements, sql::row_change_verb,
     test_connection as test_pg_connection, validate_transaction_sql,
 };
 use serde::{Deserialize, Serialize};
@@ -110,6 +111,98 @@ struct TxStatus {
     automatic: bool,
     started_at: Option<String>,
     transaction_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion: Option<TxCompletion>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum CommitOutcome {
+    Pending,
+    Committed,
+    RolledBack,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TxCompletion {
+    id: String,
+    outcome: CommitOutcome,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitFeedback {
+    outcome: CommitOutcome,
+    transaction_id: Option<String>,
+    affected_rows: Option<usize>,
+    row_verb: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryExecution {
+    #[serde(flatten)]
+    result: QueryResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_feedback: Option<CommitFeedback>,
+}
+
+impl From<QueryResult> for QueryExecution {
+    fn from(result: QueryResult) -> Self {
+        Self {
+            result,
+            commit_feedback: None,
+        }
+    }
+}
+
+impl QueryExecution {
+    fn with_commit_feedback(
+        result: QueryResult,
+        outcome: CommitOutcome,
+        transaction_id: Option<String>,
+        row_verb: Option<&'static str>,
+    ) -> Self {
+        let affected_rows = row_verb.map(|_| result.row_count);
+        Self {
+            result,
+            commit_feedback: Some(CommitFeedback {
+                outcome,
+                transaction_id,
+                affected_rows,
+                row_verb,
+            }),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppliedRows {
+    #[serde(flatten)]
+    result: ApplyUpdatesResult,
+    commit_feedback: CommitFeedback,
+}
+
+impl AppliedRows {
+    fn new(
+        result: ApplyUpdatesResult,
+        outcome: CommitOutcome,
+        transaction_id: Option<String>,
+    ) -> Self {
+        let affected_rows = Some(result.updated_rows);
+        Self {
+            result,
+            commit_feedback: CommitFeedback {
+                outcome,
+                transaction_id,
+                affected_rows,
+                row_verb: Some("updated"),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -313,12 +406,15 @@ async fn get_settings(state: State<'_, AppState>) -> Result<Settings, AppError> 
 }
 
 #[tauri::command]
-async fn set_auto_transaction(state: State<'_, AppState>, enabled: bool) -> Result<bool, AppError> {
+async fn set_commit_mode(
+    state: State<'_, AppState>,
+    mode: CommitMode,
+) -> Result<CommitMode, AppError> {
     let _workspace = state.updates.workspace_operation()?;
     // Changing the policy only affects later executions. It must never commit
     // or roll back the transaction that is already open.
-    state.storage.set_auto_transaction(enabled)?;
-    Ok(enabled)
+    state.storage.set_commit_mode(mode)?;
+    Ok(mode)
 }
 
 #[tauri::command]
@@ -377,7 +473,7 @@ async fn execute_query(
     page_size: u32,
     connection_id: Option<String>,
     read_only_replay: Option<bool>,
-) -> Result<QueryResult, AppError> {
+) -> Result<QueryExecution, AppError> {
     let _workspace = state.updates.workspace_operation()?;
     // Capture connection/setup failures too. Statement observers replace this
     // context with the exact statement once execution begins.
@@ -415,25 +511,25 @@ async fn execute_query(
         .await;
 
         match result {
-            Ok(mut result) => {
+            Ok(mut execution) => {
                 let total_ms = command_start.elapsed().as_secs_f64() * 1000.0;
                 let history_ms = history.save_time_ms();
-                if let Some(timings) = result.timings.as_mut() {
+                if let Some(timings) = execution.result.timings.as_mut() {
                     timings.command = Some(CommandTimings {
                         setup_ms: (total_ms - timings.total_ms - history_ms).max(0.0),
                         history_ms,
                         total_ms,
                     });
                 }
-                Ok(result)
+                Ok(execution)
             }
             Err(error) => {
                 history.rejected(&sql, &error);
                 let mut error = AppError::from(error);
                 if error.code.as_deref() == Some("25001")
-                    && state.tx.lock().await.as_ref().is_some_and(|session| session.automatic)
+                    && state.tx.lock().await.is_some()
                 {
-                    error.hint = Some("This statement must run outside a transaction. Roll back the open transaction, turn off Auto TX, then run it again.".into());
+                    error.hint = Some("This statement must run outside a transaction. Roll back, choose Auto-commit, and run it again.".into());
                 }
                 Err(error)
             }
@@ -441,8 +537,9 @@ async fn execute_query(
     }
     .await;
     state.cancels.lock().await.remove(&query_token);
-    outcome.map(|mut result| {
-        if let Some(command) = result
+    outcome.map(|mut execution| {
+        if let Some(command) = execution
+            .result
             .timings
             .as_mut()
             .and_then(|timings| timings.command.as_mut())
@@ -451,7 +548,7 @@ async fn execute_query(
             command.setup_ms += total_ms - command.total_ms;
             command.total_ms = total_ms;
         }
-        result
+        execution
     })
 }
 
@@ -462,7 +559,7 @@ async fn apply_row_updates(
     connection_id: String,
     query_token: String,
     updates: Vec<RowUpdate>,
-) -> Result<ApplyUpdatesResult, AppError> {
+) -> Result<AppliedRows, AppError> {
     let _workspace = state.updates.workspace_operation()?;
     let cancellation = begin_operation(&state, &query_token).await;
     let outcome = async {
@@ -480,7 +577,8 @@ async fn apply_row_updates(
         let mut tx = cancellation
             .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
             .await?;
-        if tx.is_none() && state.storage.get_settings()?.auto_transaction && !updates.is_empty() {
+        let mode = state.storage.get_settings()?.commit_mode;
+        if tx.is_none() && mode.opens_transaction(true) && (1..=1000).contains(&updates.len()) {
             let pool = cancellation.setup(active_pool(&state, &active)).await?;
             let run = QueryRun {
                 history: &history,
@@ -494,15 +592,21 @@ async fn apply_row_updates(
                 page_size: 1,
                 read_only_replay: false,
             };
-            let (session, _) =
-                begin_transaction_session(&state.storage, &run, "BEGIN", true, &cancellation)
-                    .await?;
+            let (session, _) = begin_transaction_session(
+                &state.storage,
+                &run,
+                "BEGIN",
+                mode == CommitMode::Smart,
+                &cancellation,
+            )
+            .await?;
             *tx = Some(session);
             let _ = app.emit("tx-changed", transaction_status(tx.as_ref()));
         }
         if let Some(session) = tx.as_ref() {
             check_transaction_connection(&session.connection_id, &active.id)?;
-            history.set_transaction(Some(session.history_id.clone()));
+            let transaction_id = session.history_id.clone();
+            history.set_transaction(Some(transaction_id.clone()));
             let result = cancellation
                 .run(
                     &session.client,
@@ -520,11 +624,24 @@ async fn apply_row_updates(
             if let Err(error) = &result {
                 history.interrupted(error);
             }
-            if must_discard(&result) || session.client.is_closed() {
+            let interrupted = must_discard(&result) || session.client.is_closed();
+            if interrupted {
                 discard_transaction(&app, &state, &mut tx);
                 invalidate_pool_reflection(&state, &active.id).await;
             }
-            result.map_err(AppError::from)
+            result
+                .map(|result| {
+                    AppliedRows::new(
+                        result,
+                        if interrupted {
+                            CommitOutcome::Interrupted
+                        } else {
+                            CommitOutcome::Pending
+                        },
+                        Some(transaction_id),
+                    )
+                })
+                .map_err(AppError::from)
         } else {
             // Hold the transaction-state lock so another request cannot begin a
             // manual transaction halfway through an independently committed batch.
@@ -562,7 +679,9 @@ async fn apply_row_updates(
                 },
             );
             release_client(client, &result);
-            result.map_err(AppError::from)
+            result
+                .map(|result| AppliedRows::new(result, CommitOutcome::Committed, None))
+                .map_err(AppError::from)
         }
     }
     .await;
@@ -634,19 +753,13 @@ async fn tx_status(state: State<'_, AppState>) -> Result<TxStatus, AppError> {
 #[tauri::command]
 async fn tx_commit(app: AppHandle, state: State<'_, AppState>) -> Result<TxStatus, AppError> {
     let _workspace = state.updates.workspace_operation()?;
-    finish_tx(&app, &state, "COMMIT").await?;
-    let status = tx_status_inner(&state).await;
-    let _ = app.emit("tx-changed", &status);
-    Ok(status)
+    finish_tx(&app, &state, "COMMIT").await
 }
 
 #[tauri::command]
 async fn tx_rollback(app: AppHandle, state: State<'_, AppState>) -> Result<TxStatus, AppError> {
     let _workspace = state.updates.workspace_operation()?;
-    finish_tx(&app, &state, "ROLLBACK").await?;
-    let status = tx_status_inner(&state).await;
-    let _ = app.emit("tx-changed", &status);
-    Ok(status)
+    finish_tx(&app, &state, "ROLLBACK").await
 }
 
 #[tauri::command]
@@ -954,16 +1067,28 @@ async fn begin_transaction_session(
 
 /// Called with the tx lock held. A mode change only controls whether to open a
 /// new session; it never replaces or finishes an existing session.
-async fn maybe_begin_automatic_transaction(
+async fn maybe_begin_transaction(
     storage: &Storage,
     tx: &mut Option<TxSession>,
     run: &QueryRun<'_>,
     cancellation: &QueryCancellation,
+    needs_transaction: bool,
 ) -> Result<bool, CoreError> {
-    if tx.is_some() || !storage.get_settings()?.auto_transaction || !requires_transaction(run.sql) {
+    if tx.is_some() {
         return Ok(false);
     }
-    let (session, _) = begin_transaction_session(storage, run, "BEGIN", true, cancellation).await?;
+    let mode = storage.get_settings()?.commit_mode;
+    if !mode.opens_transaction(needs_transaction) {
+        return Ok(false);
+    }
+    let (session, _) = begin_transaction_session(
+        storage,
+        run,
+        "BEGIN",
+        mode == CommitMode::Smart,
+        cancellation,
+    )
+    .await?;
     *tx = Some(session);
     Ok(true)
 }
@@ -972,10 +1097,12 @@ async fn run_query_with_state(
     app: &AppHandle,
     state: &State<'_, AppState>,
     run: QueryRun<'_>,
-) -> Result<QueryResult, CoreError> {
+) -> Result<QueryExecution, CoreError> {
     validate_transaction_sql(run.sql)?;
     if run.read_only_replay {
-        return execute_read_only_replay(state, &run).await;
+        return execute_read_only_replay(state, &run)
+            .await
+            .map(QueryExecution::from);
     }
     let cancellation = register_cancel(state, run.query_token).await;
     match classify_statement(run.sql) {
@@ -995,54 +1122,54 @@ async fn run_query_with_state(
             *tx = Some(session);
             drop(tx);
             let _ = app.emit("tx-changed", tx_status_inner(state).await);
-            Ok(result)
+            Ok(result.into())
         }
-        StatementKind::TxCommit => {
-            let result = finish_tx_with_sql(
+        StatementKind::TxCommit | StatementKind::TxRollback => {
+            let (result, completion) = finish_tx_with_sql(
                 app,
                 state,
                 run.sql,
                 run.query_token,
-                run.offset,
-                run.page_size,
                 &run.active.id,
                 run.history,
             )
             .await?;
-            Ok(result)
-        }
-        StatementKind::TxRollback => {
-            let result = finish_tx_with_sql(
-                app,
-                state,
-                run.sql,
-                run.query_token,
-                run.offset,
-                run.page_size,
-                &run.active.id,
-                run.history,
-            )
-            .await?;
-            Ok(result)
+            Ok(QueryExecution::with_commit_feedback(
+                result,
+                completion.outcome,
+                Some(completion.id),
+                None,
+            ))
         }
         _ => {
+            let statement_count = split_statements(run.sql).len();
+            if statement_count == 0 {
+                return Err(CoreError::message("No query to execute."));
+            }
+            let needs_transaction = requires_transaction(run.sql);
             // Serialize the routing decision with BEGIN/COMMIT and reviewed
             // writes, including the standalone path. A concurrent request must
             // not slip outside a transaction that has just been opened.
             let mut tx = cancellation
                 .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
                 .await?;
-            if maybe_begin_automatic_transaction(&state.storage, &mut tx, &run, &cancellation)
-                .await?
+            if maybe_begin_transaction(
+                &state.storage,
+                &mut tx,
+                &run,
+                &cancellation,
+                needs_transaction,
+            )
+            .await?
             {
-                // Show the transaction while a long-running write is executing,
+                // Show the transaction while the first statement is executing,
                 // without trying to acquire the lock we already hold.
                 let _ = app.emit("tx-changed", transaction_status(tx.as_ref()));
             }
             if let Some(session) = tx.as_ref() {
                 check_transaction_connection(&session.connection_id, &run.active.id)?;
-                run.history
-                    .set_transaction(Some(session.history_id.clone()));
+                let transaction_id = session.history_id.clone();
+                run.history.set_transaction(Some(transaction_id.clone()));
                 let result = execute_with_cancel(
                     state,
                     run.history,
@@ -1055,17 +1182,33 @@ async fn run_query_with_state(
                     run.page_size,
                 )
                 .await;
-                if must_discard(&result) || session.client.is_closed() {
+                let interrupted = must_discard(&result) || session.client.is_closed();
+                if interrupted {
                     discard_transaction(app, state, &mut tx);
                     invalidate_pool_reflection(state, &run.active.id).await;
                 }
                 drop(tx);
                 let _ = app.emit("tx-changed", tx_status_inner(state).await);
-                return result;
+                return result.map(|result| {
+                    if needs_transaction {
+                        QueryExecution::with_commit_feedback(
+                            result,
+                            if interrupted {
+                                CommitOutcome::Interrupted
+                            } else {
+                                CommitOutcome::Pending
+                            },
+                            Some(transaction_id),
+                            row_change_verb(run.sql),
+                        )
+                    } else {
+                        result.into()
+                    }
+                });
             }
 
             let client = cancellation.setup(checkout_pool_client(run.pool)).await?;
-            let batch_id = if split_statements(run.sql).len() > 1 {
+            let batch_id = if statement_count > 1 {
                 Some(state.storage.start_history_transaction("batch")?)
             } else {
                 None
@@ -1098,7 +1241,18 @@ async fn run_query_with_state(
                 );
             }
             release_client(client, &result);
-            result
+            result.map(|result| {
+                if needs_transaction {
+                    QueryExecution::with_commit_feedback(
+                        result,
+                        CommitOutcome::Committed,
+                        None,
+                        row_change_verb(run.sql),
+                    )
+                } else {
+                    result.into()
+                }
+            })
         }
     }
 }
@@ -1206,17 +1360,64 @@ async fn execute_with_cancel(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
+async fn transaction_is_aborted(client: &PgClient) -> Result<bool, CoreError> {
+    match client.simple_query("SELECT 1").await {
+        Ok(_) => Ok(false),
+        Err(error) if error.code().is_some_and(|code| code.code() == "25P02") => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn commit_error_rolled_back(client: &PgClient, error: &CoreError) -> bool {
+    // A server error during COMMIT can leave the session idle (for example
+    // a deferred constraint) or still in a failed transaction (invalid SQL).
+    error.pg_info().is_some()
+        && matches!(
+            tokio::time::timeout(Duration::from_secs(2), transaction_is_aborted(client)).await,
+            Ok(Ok(false))
+        )
+}
+
+async fn execute_transaction_end(
+    session: &TxSession,
+    sql: &str,
+    history: &StatementHistory<'_>,
+    cancellation: &QueryCancellation,
+) -> Result<(QueryResult, CommitOutcome), CoreError> {
+    cancellation
+        .run(&session.client, session.ssl, async {
+            // PostgreSQL accepts COMMIT in an aborted transaction and responds
+            // with a ROLLBACK tag. The driver exposes only row counts.
+            let rolled_back = classify_statement(sql) == StatementKind::TxRollback
+                || transaction_is_aborted(&session.client).await?;
+            let outcome = if rolled_back {
+                CommitOutcome::RolledBack
+            } else {
+                CommitOutcome::Committed
+            };
+            let result = execute_on_client_observed(
+                &session.client,
+                sql,
+                0,
+                1,
+                Some(cancellation.flag()),
+                &session.reflection,
+                Some(history),
+            )
+            .await?;
+            Ok((result, outcome))
+        })
+        .await
+}
+
 async fn finish_tx_with_sql(
     app: &AppHandle,
     state: &State<'_, AppState>,
     sql: &str,
     query_token: &str,
-    offset: usize,
-    page_size: usize,
     connection_id: &str,
     history: &StatementHistory<'_>,
-) -> Result<QueryResult, CoreError> {
+) -> Result<(QueryResult, TxCompletion), CoreError> {
     let cancellation = register_cancel(state, query_token).await;
     let mut tx = cancellation
         .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
@@ -1228,38 +1429,53 @@ async fn finish_tx_with_sql(
         .as_ref()
         .ok_or_else(|| CoreError::message("No active transaction"))?;
     history.set_transaction(Some(session.history_id.clone()));
-    let result = execute_with_cancel(
-        state,
-        history,
-        &session.client,
-        &session.reflection,
-        session.ssl,
-        sql,
-        query_token,
-        offset,
-        page_size,
-    )
-    .await;
-    if must_discard(&result) || session.client.is_closed() {
-        discard_transaction(app, state, &mut tx);
-        invalidate_pool_reflection(state, connection_id).await;
-    } else if result.is_ok() {
-        finish_history(
-            app,
-            &state.storage,
-            &session.history_id,
-            if classify_statement(sql) == StatementKind::TxRollback {
-                "rolledBack"
+    let (result, ended) = match execute_transaction_end(session, sql, history, &cancellation).await
+    {
+        Ok((result, outcome)) => (Ok(result), Some(outcome)),
+        Err(error) => {
+            history.interrupted(&error);
+            let ended = if matches!(error, CoreError::ConnectionDiscarded(_))
+                || session.client.is_closed()
+            {
+                Some(CommitOutcome::Interrupted)
+            } else if classify_statement(sql) == StatementKind::TxCommit
+                && commit_error_rolled_back(&session.client, &error).await
+            {
+                Some(CommitOutcome::RolledBack)
             } else {
-                "finished"
-            },
-        );
-        *tx = None;
+                None
+            };
+            (Err(error), ended)
+        }
+    };
+    let completion = if let Some(outcome) = ended {
+        let session = tx.take().expect("transaction was held during completion");
+        let status = match outcome {
+            CommitOutcome::Committed => "finished",
+            CommitOutcome::RolledBack => "rolledBack",
+            CommitOutcome::Interrupted => "interrupted",
+            CommitOutcome::Pending => unreachable!("an ended transaction cannot be pending"),
+        };
+        finish_history(app, &state.storage, &session.history_id, status);
+        release_client(session.client, &result);
         invalidate_pool_reflection(state, connection_id).await;
-    }
+        Some(TxCompletion {
+            id: session.history_id,
+            outcome,
+        })
+    } else {
+        None
+    };
+    let mut status = transaction_status(tx.as_ref());
+    status.completion = completion.clone();
     drop(tx);
-    let _ = app.emit("tx-changed", tx_status_inner(state).await);
-    result
+    let _ = app.emit("tx-changed", status);
+    result.map(|result| {
+        (
+            result,
+            completion.expect("successful transaction end has a completion"),
+        )
+    })
 }
 
 fn must_discard<T>(result: &Result<T, CoreError>) -> bool {
@@ -1278,6 +1494,12 @@ fn discard_transaction(app: &AppHandle, state: &State<'_, AppState>, tx: &mut Op
     if let Some(session) = tx.take() {
         finish_history(app, &state.storage, &session.history_id, "interrupted");
         drop(PooledPgClient::take(session.client));
+        let mut status = transaction_status(None);
+        status.completion = Some(TxCompletion {
+            id: session.history_id,
+            outcome: CommitOutcome::Interrupted,
+        });
+        let _ = app.emit("tx-changed", status);
     }
 }
 
@@ -1296,7 +1518,7 @@ async fn finish_tx(
     app: &AppHandle,
     state: &State<'_, AppState>,
     sql: &str,
-) -> Result<(), AppError> {
+) -> Result<TxStatus, AppError> {
     let connection_id = state
         .tx
         .lock()
@@ -1309,12 +1531,18 @@ async fn finish_tx(
     let history = StatementHistory::new(&state.storage, &connection_id, &notify)
         .with_observer(&diagnostic_observer);
     let token = uuid::Uuid::new_v4().to_string();
-    let result = finish_tx_with_sql(app, state, sql, &token, 0, 1, &connection_id, &history).await;
+    let result = finish_tx_with_sql(app, state, sql, &token, &connection_id, &history).await;
     state.cancels.lock().await.remove(&token);
     if let Err(error) = &result {
         history.rejected(sql, error);
     }
-    result.map(|_| ()).map_err(Into::into)
+    result
+        .map(|(_, completion)| {
+            let mut status = transaction_status(None);
+            status.completion = Some(completion);
+            status
+        })
+        .map_err(Into::into)
 }
 
 async fn active_connection(state: &State<'_, AppState>) -> Result<ConnectionRecord, AppError> {
@@ -1466,6 +1694,7 @@ fn transaction_status(tx: Option<&TxSession>) -> TxStatus {
         automatic: tx.is_some_and(|session| session.automatic),
         started_at,
         transaction_id: tx.map(|session| session.history_id.clone()),
+        completion: None,
     }
 }
 
@@ -1621,7 +1850,7 @@ pub fn run() {
             save_connection,
             save_draft,
             set_supermaven_enabled,
-            set_auto_transaction,
+            set_commit_mode,
             set_pool_size,
             split_sql,
             test_connection,

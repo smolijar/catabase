@@ -362,18 +362,25 @@ async fn execute_reflected(
     let enrichment = reflection.enrich(client, &mut columns, cancelled).await?;
     check_query_cancelled(cancelled)?;
     let enriched_at = Instant::now();
-    let (mut rows, fetched_at) = match prefetched {
-        Some(rows) => (rows, enriched_at),
+    let (mut rows, affected, fetched_at) = match prefetched {
+        Some(rows) => (rows, None, enriched_at),
         None => {
-            let rows = client
-                .query(
-                    statement
-                        .as_ref()
-                        .expect("separate preparation has a statement"),
-                    &[],
-                )
+            let statement = statement
+                .as_ref()
+                .expect("separate preparation has a statement");
+            let stream = client
+                .query_raw(statement, std::iter::empty::<&str>())
                 .await?;
-            (rows, Instant::now())
+            let mut stream = std::pin::pin!(stream);
+            let rows: Vec<Row> = stream.as_mut().try_collect().await?;
+            let affected = if columns.is_empty() && rows.is_empty() {
+                stream
+                    .rows_affected()
+                    .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+            } else {
+                None
+            };
+            (rows, affected, Instant::now())
         }
     };
     let mut has_more = false;
@@ -386,7 +393,7 @@ async fn execute_reflected(
     let decoded_at = Instant::now();
     let total_ms = decoded_at.duration_since(start).as_secs_f64() * 1000.0;
     Ok(QueryResult {
-        row_count: rows.len(),
+        row_count: affected.unwrap_or(rows.len()),
         columns,
         row_keys: enrichment.keys,
         rows,

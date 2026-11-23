@@ -344,8 +344,7 @@ async fn failed_begin_detaches_its_client_and_records_interrupted_transaction()
 
 #[tokio::test]
 #[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE for the saved zenbase docker connection"]
-async fn auto_transaction_policy_routes_reads_writes_and_existing_sessions()
--> Result<(), Box<dyn Error>> {
+async fn commit_modes_route_reads_writes_and_existing_sessions() -> Result<(), Box<dyn Error>> {
     let (active, pool) = fixture_pool().await?;
     let storage = Storage::in_memory()?;
     let notify = |saved: Result<(), CoreError>| saved.unwrap();
@@ -360,7 +359,16 @@ async fn auto_transaction_policy_routes_reads_writes_and_existing_sessions()
              SELECT * FROM inner_read) SELECT * FROM outer_read",
     ] {
         let run = query_run(&history, &active, &pool, &reflection, sql);
-        assert!(!maybe_begin_automatic_transaction(&storage, &mut tx, &run, &cancellation).await?);
+        assert!(
+            !maybe_begin_transaction(
+                &storage,
+                &mut tx,
+                &run,
+                &cancellation,
+                requires_transaction(sql)
+            )
+            .await?
+        );
         assert!(tx.is_none());
         assert_eq!(pool.status().available, 1);
         assert_eq!(
@@ -373,19 +381,37 @@ async fn auto_transaction_policy_routes_reads_writes_and_existing_sessions()
     let sql = "WITH changed AS (UPDATE catabase_auto_transaction_probe
                    SET value = 21 RETURNING *) SELECT * FROM changed";
     let run = query_run(&history, &active, &pool, &reflection, sql);
-    storage.set_auto_transaction(false)?;
-    assert!(!maybe_begin_automatic_transaction(&storage, &mut tx, &run, &cancellation).await?);
+    storage.set_commit_mode(CommitMode::Auto)?;
+    assert!(
+        !maybe_begin_transaction(
+            &storage,
+            &mut tx,
+            &run,
+            &cancellation,
+            requires_transaction(sql)
+        )
+        .await?
+    );
     assert!(
         tx.is_none(),
         "Explicit opt-out leaves writes on the standalone path."
     );
-    storage.set_auto_transaction(true)?;
-    assert!(maybe_begin_automatic_transaction(&storage, &mut tx, &run, &cancellation).await?);
+    storage.set_commit_mode(CommitMode::Smart)?;
+    assert!(
+        maybe_begin_transaction(
+            &storage,
+            &mut tx,
+            &run,
+            &cancellation,
+            requires_transaction(sql)
+        )
+        .await?
+    );
     let auto_id = tx.as_ref().unwrap().history_id.clone();
     assert!(transaction_status(tx.as_ref()).automatic);
     let result = execute_held(tx.as_ref().unwrap(), &history, &cancellation, sql).await?;
     assert_eq!(result.rows[0]["value"], json!(21));
-    assert!(!maybe_begin_automatic_transaction(&storage, &mut tx, &run, &cancellation).await?);
+    assert!(!maybe_begin_transaction(&storage, &mut tx, &run, &cancellation, true).await?);
     assert_eq!(tx.as_ref().unwrap().history_id, auto_id);
     assert_eq!(
         storage.history_transaction_page(&auto_id, 0, 50)?.total,
@@ -393,8 +419,8 @@ async fn auto_transaction_policy_routes_reads_writes_and_existing_sessions()
         "An existing transaction must not receive another BEGIN."
     );
 
-    storage.set_auto_transaction(false)?;
-    assert!(!maybe_begin_automatic_transaction(&storage, &mut tx, &run, &cancellation).await?);
+    storage.set_commit_mode(CommitMode::Auto)?;
+    assert!(!maybe_begin_transaction(&storage, &mut tx, &run, &cancellation, true).await?);
     assert!(transaction_status(tx.as_ref()).active);
     assert!(transaction_status(tx.as_ref()).automatic);
     assert_eq!(tx.as_ref().unwrap().history_id, auto_id);
@@ -417,8 +443,8 @@ async fn auto_transaction_policy_routes_reads_writes_and_existing_sessions()
         begin_transaction_session(&storage, &run, "BEGIN", false, &cancellation).await?;
     let manual_id = manual.history_id.clone();
     tx = Some(manual);
-    storage.set_auto_transaction(true)?;
-    assert!(!maybe_begin_automatic_transaction(&storage, &mut tx, &run, &cancellation).await?);
+    storage.set_commit_mode(CommitMode::Smart)?;
+    assert!(!maybe_begin_transaction(&storage, &mut tx, &run, &cancellation, true).await?);
     assert_eq!(tx.as_ref().unwrap().history_id, manual_id);
     assert!(!transaction_status(tx.as_ref()).automatic);
     assert_eq!(
@@ -426,5 +452,85 @@ async fn auto_transaction_policy_routes_reads_writes_and_existing_sessions()
         1
     );
     execute_held(tx.as_ref().unwrap(), &history, &cancellation, "ROLLBACK").await?;
+    drop(tx.take());
+
+    storage.set_commit_mode(CommitMode::Manual)?;
+    let read = "SELECT value FROM catabase_auto_transaction_probe";
+    let run = query_run(&history, &active, &pool, &reflection, read);
+    assert!(maybe_begin_transaction(&storage, &mut tx, &run, &cancellation, false).await?);
+    let session = tx.as_ref().unwrap();
+    assert!(!session.automatic);
+    let read_result = execute_held(session, &history, &cancellation, read).await?;
+    assert_eq!(read_result.rows[0]["value"], json!(10));
+    let update = "UPDATE catabase_auto_transaction_probe SET value = 34";
+    let update_result = execute_held(session, &history, &cancellation, update).await?;
+    assert_eq!(update_result.row_count, 1);
+    assert!(update_result.rows.is_empty());
+    assert_eq!(
+        storage
+            .history_transaction_page(&session.history_id, 0, 50)?
+            .total,
+        3
+    );
+    let (_, outcome) = execute_transaction_end(session, "COMMIT", &history, &cancellation).await?;
+    assert!(matches!(outcome, CommitOutcome::Committed));
+    let previous_id = session.history_id.clone();
+    drop(tx.take());
+
+    assert!(maybe_begin_transaction(&storage, &mut tx, &run, &cancellation, false).await?);
+    let session = tx.as_ref().unwrap();
+    assert_ne!(session.history_id, previous_id);
+    let read_result = execute_held(session, &history, &cancellation, read).await?;
+    assert_eq!(read_result.rows[0]["value"], json!(34));
+    execute_held(
+        session,
+        &history,
+        &cancellation,
+        "UPDATE catabase_auto_transaction_probe SET value = 55",
+    )
+    .await?;
+    assert!(
+        execute_held(session, &history, &cancellation, "SELECT 1 / 0")
+            .await
+            .is_err()
+    );
+    let (_, outcome) = execute_transaction_end(session, "COMMIT", &history, &cancellation).await?;
+    assert!(matches!(outcome, CommitOutcome::RolledBack));
+    let read_result = execute_held(session, &history, &cancellation, read).await?;
+    assert_eq!(read_result.rows[0]["value"], json!(34));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE for the saved zenbase docker connection"]
+async fn commit_errors_distinguish_rollback_from_a_failed_open_transaction()
+-> Result<(), Box<dyn Error>> {
+    let (active, pool) = fixture_pool().await?;
+    let storage = Storage::in_memory()?;
+    let notify = |saved: Result<(), CoreError>| saved.unwrap();
+    let history = StatementHistory::new(&storage, &active.id, &notify);
+    let reflection = ReflectionCache::default();
+    let cancellation = QueryCancellation::default();
+    let run = query_run(&history, &active, &pool, &reflection, "BEGIN");
+
+    let (session, _) =
+        begin_transaction_session(&storage, &run, "BEGIN", false, &cancellation).await?;
+    session.client.batch_execute(
+        "CREATE TEMP TABLE catabase_deferred_unique (id int UNIQUE DEFERRABLE INITIALLY DEFERRED);
+         INSERT INTO catabase_deferred_unique VALUES (1), (1)",
+    ).await?;
+    let error = execute_transaction_end(&session, "COMMIT", &history, &cancellation)
+        .await
+        .unwrap_err();
+    assert!(commit_error_rolled_back(&session.client, &error).await);
+    drop(session);
+
+    let (session, _) =
+        begin_transaction_session(&storage, &run, "BEGIN", false, &cancellation).await?;
+    let error = execute_transaction_end(&session, "COMMIT invalid", &history, &cancellation)
+        .await
+        .unwrap_err();
+    assert!(!commit_error_rolled_back(&session.client, &error).await);
+    execute_transaction_end(&session, "ROLLBACK", &history, &cancellation).await?;
     Ok(())
 }

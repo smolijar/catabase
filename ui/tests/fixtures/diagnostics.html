@@ -25,7 +25,7 @@
       switch(command) {
         case 'plugin:event|listen': return 0;
         case 'plugin:event|unlisten': return;
-        case 'get_settings': return {poolSize:1,supermavenEnabled:false,autoTransaction:true};
+        case 'get_settings': return {poolSize:1,supermavenEnabled:false,commitMode:'smart'};
         case 'list_connections': return connections.map(value => ({...value}));
         case 'activate_connection': { const selected = connections.find(value => value.id === args.id); if (!selected) throw new Error('Unknown fixture connection'); for (const value of connections) value.isActive = value === selected; return {...selected}; }
         case 'disconnect_connection': { const selected = connections.find(value => value.id === args.id); if (selected) selected.isActive=false; return; }

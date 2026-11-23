@@ -6,10 +6,10 @@
   import { onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
 
-  type DropdownOption = { value: string; label: string; disabled?: boolean; danger?: boolean };
+  type DropdownOption = { value: string; label: string; description?: string; disabled?: boolean; danger?: boolean };
 
   export let value: string;
-  export let options: DropdownOption[];
+  export let options: readonly DropdownOption[];
   export let ariaLabel: string;
   export let disabled = false;
   export let compact = false;
@@ -169,7 +169,7 @@
     return options.flatMap((option, index) => option.disabled ? [] : [index]);
   }
 
-  async function reconcileOptions(nextOptions: DropdownOption[]) {
+  async function reconcileOptions(nextOptions: readonly DropdownOption[]) {
     const focusedOption = menu?.contains(document.activeElement)
       ? document.activeElement as HTMLButtonElement
       : undefined;
@@ -321,7 +321,10 @@
           on:focus={() => (activeIndex = index)}
           on:click={() => choose(option.value)}
         >
-          <span>{option.label}</span>
+          <span>
+            {option.label}
+            {#if option.description}<small>{option.description}</small>{/if}
+          </span>
           {#if !menuMode && option.value === value}<Icon name="check" size={14} />{/if}
         </button>
       {/each}
@@ -350,6 +353,14 @@
 
   .dropdown-option.danger {
     color: var(--danger);
+  }
+
+  .dropdown-option small {
+    display: block;
+    max-width: 35ch;
+    margin-top: 2px;
+    color: var(--ink-muted);
+    font-size: 12px;
   }
 
   .dropdown-option:disabled {

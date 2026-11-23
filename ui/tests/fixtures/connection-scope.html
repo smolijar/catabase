@@ -31,7 +31,7 @@
       switch (command) {
         case 'plugin:event|listen': return 0;
         case 'plugin:event|unlisten': return;
-        case 'get_settings': return {poolSize:1,supermavenEnabled:false,autoTransaction:true};
+        case 'get_settings': return {poolSize:1,supermavenEnabled:false,commitMode:'smart'};
         case 'list_connections': return connections.map(connection => ({...connection}));
         case 'activate_connection': {
           const selected = connections.find(connection => connection.id === args.id);

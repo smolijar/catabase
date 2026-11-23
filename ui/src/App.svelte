@@ -20,7 +20,8 @@
   import DiagnosticDialog from './components/DiagnosticDialog.svelte';
   import ResumeConnectionDialog from './components/ResumeConnectionDialog.svelte';
   import type { DiagnosticReport } from './lib/diagnostics';
-  import AutoTransactionToggle from './components/AutoTransactionToggle.svelte';
+  import CommitModeSelect from './components/CommitModeSelect.svelte';
+  import { commitFeedbackLabel, commitModeLabels, transactionCompletionLabel } from './lib/commitMode';
   import ExplainDialog from './components/ExplainDialog.svelte';
   import { createExplainWorkflow, initialExplainState } from './lib/explain';
   import type { ExplainOptions, ExplainProgress } from './lib/explain';
@@ -70,6 +71,7 @@
   import type {
     SupermavenStatus,
     AppError,
+    CommitMode,
     ConnectionInput,
     ConnectionRecord,
     ConnectionStats,
@@ -82,6 +84,7 @@
     RowUpdate,
     SchemaItem,
     Settings,
+    TxCompletion,
     TxStatus
   } from './lib/types';
 
@@ -182,6 +185,7 @@
   let diagnosticsRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let txStatus: TxStatus = { active: false, startedAt: null };
   let txStatusKnown = false;
+  let txCompletions = new Map<string, TxCompletion>();
   let editMode = false;
   let pendingChanges: PendingChange[] = [];
 
@@ -203,8 +207,7 @@
     Date.now,
     id => { if (connectedIds.has(id) && !failedConnectionIds.includes(id)) failedConnectionIds = [...failedConnectionIds, id]; }
   );
-  let settings: Settings = { poolSize: 5, supermavenEnabled: false, autoTransaction: true };
-  let autoTransactionSaving = false;
+  let settings: Settings = { poolSize: 5, supermavenEnabled: false, commitMode: 'smart' };
   let poolStats: ConnectionStats | null = null;
   let poolStatsConnectionId: string | null = null;
   let poolStatsRequest = 0;
@@ -313,6 +316,9 @@
   $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
   $: historyContext = tabs.find(tab => tab.id === activeTab)?.historyContext ?? null;
   $: resultContext = resultSession ?? historyContext;
+  $: resultCommitLabel = result?.commitFeedback
+    ? commitFeedbackLabel(result.commitFeedback, txCompletions.get(result.commitFeedback.transactionId ?? ''))
+    : '';
   $: resultUsable = Boolean(activeConnection) && canUseResult(resultSession, tabConnectionId) && tabKind === 'query';
   $: editEligibility = assessRowEditing(result, editMode ? originalRows : result?.rows);
   $: editableColumns = editEligibility.target?.editableColumns.map((column) => column.name) ?? [];
@@ -326,7 +332,7 @@
     : resultSession?.snapshot ? 'History snapshots are read-only. Re-run the query to edit.'
     : result && !resultUsable ? 'Re-run this query on its original connection before editing.'
     : editEligibility.reason;
-  $: canLoadMore = Boolean(result?.autoLimited && result.hasMore && resultUsable && !running && !connectionMutation && !pendingChanges.length);
+  $: canLoadMore = Boolean(result?.autoLimited && result.hasMore && resultUsable && !txStatus.active && !running && !connectionMutation && !pendingChanges.length);
   $: schemaGroups = groupSchemaItems(schemaItems, schemaSearch);
   $: if (workspaceLoaded) scheduleDraftSave(sql, activeTab, tabConnectionId, tabs, archivedTabs);
   $: if (workspaceLoaded) void refreshSchemaForConnection(liveConnectionId);
@@ -338,8 +344,8 @@
     { id: 'save-csv', label: 'Save CSV…' },
     { id: 'save-tsv', label: 'Save TSV…' },
     { id: 'save-json', label: 'Save JSON…' },
-    { id: 'more-csv', label: 'Re-run & save up to 10k (CSV)…', disabled: !resultUsable || !result?.autoLimited || running || Boolean(connectionMutation) },
-    { id: 'more-json', label: 'Re-run & save up to 10k (JSON)…', disabled: !resultUsable || !result?.autoLimited || running || Boolean(connectionMutation) }
+    { id: 'more-csv', label: 'Re-run & save up to 10k (CSV)…', disabled: !resultUsable || !result?.autoLimited || txStatus.active || running || Boolean(connectionMutation) },
+    { id: 'more-json', label: 'Re-run & save up to 10k (JSON)…', disabled: !resultUsable || !result?.autoLimited || txStatus.active || running || Boolean(connectionMutation) }
   ];
 
   onMount(() => {
@@ -563,8 +569,7 @@
         // An automatically opened transaction is visible while the triggering
         // statement is still running. Ignore older in-flight status responses.
         txStatusRequest++;
-        txStatus = event.payload;
-        txStatusKnown = true;
+        updateTransactionStatus(event.payload);
       })
     ]);
     if (mounted) nativeCleanup.push(...cleanups);
@@ -1086,8 +1091,7 @@
 
   async function loadSettings() {
     try {
-      const loaded = await api.getSettings();
-      settings = { ...loaded, autoTransaction: loaded.autoTransaction ?? true };
+      settings = await api.getSettings();
       poolSizeInput = settings.poolSize;
     } catch (error) {
       flash(`Settings unavailable: ${errorMessage(error)}`);
@@ -1397,7 +1401,10 @@
       await tick();
       const uiEnd = performance.now();
       if (!isCurrentOperation(op)) return;
-      flash(`${op.cancelling ? 'Query completed before cancellation. ' : ''}Loaded ${next.rowCount}${next.hasMore ? '+' : ''} ${next.rowCount === 1 ? 'row' : 'rows'} in ${next.durationMs} ms.`, false, {
+      const summary = next.commitFeedback
+        ? `${commitFeedbackLabel(next.commitFeedback)} · ${next.durationMs} ms`
+        : `Loaded ${next.rowCount}${next.hasMore ? '+' : ''} ${next.rowCount === 1 ? 'row' : 'rows'} in ${next.durationMs} ms.`;
+      flash(`${op.cancelling ? 'Query completed before cancellation. ' : ''}${summary}`, next.commitFeedback?.outcome === 'interrupted', {
         result: next, connectionName: session.connectionName, executedAt: session.executedAt, batch: false,
         client: { targetMs: invokeStart - timingStart, invokeMs: invokeEnd - invokeStart, uiMs: uiEnd - invokeEnd, totalMs: uiEnd - timingStart }
       });
@@ -1432,7 +1439,7 @@
   }
 
   async function loadMoreRows() {
-    if (!result || !result.autoLimited || !result.hasMore || !resultSession || !resultUsable || operation || connectionMutation || !tabConnectionId) return;
+    if (!result || !result.autoLimited || !result.hasMore || !resultSession || !resultUsable || txStatus.active || operation || connectionMutation || !tabConnectionId) return;
     if (pendingChanges.length) { flash('Apply or discard staged edits before loading more rows.'); return; }
     const session = { ...resultSession, data: result };
     const op = beginOperation('load', tabConnectionId);
@@ -1683,18 +1690,16 @@
     }
   }
 
-  async function setAutoTransaction(enabled: boolean) {
-    if (!workspaceLoaded || closingWorkspace || operation || connectionMutation) return;
-    autoTransactionSaving = true;
-    connectionMutation = 'Saving auto-transaction mode…';
+  async function setCommitMode(mode: CommitMode) {
+    if (!workspaceLoaded || closingWorkspace || operation || connectionMutation || mode === settings.commitMode) return;
+    connectionMutation = 'Saving commit mode…';
     try {
-      const saved = await api.setAutoTransaction(enabled);
-      settings = { ...settings, autoTransaction: saved };
-      flash(`Auto transaction ${saved ? 'on' : 'off'}.${txStatus.active ? ' The open transaction remains active.' : ''}`);
+      const saved = await api.setCommitMode(mode);
+      settings = { ...settings, commitMode: saved };
+      flash(`${commitModeLabels[saved]} selected.`);
     } catch (error) {
-      flash(`Could not save auto-transaction mode: ${errorMessage(error)}`, true);
+      flash(`Could not save commit mode. ${errorMessage(error)}`, true);
     } finally {
-      autoTransactionSaving = false;
       connectionMutation = null;
     }
   }
@@ -1759,12 +1764,21 @@
     }
   }
 
+  function updateTransactionStatus(next: TxStatus) {
+    if (next.completion) {
+      const liveIds = new Set(tabs.map(tab => (tab.id === activeTab ? result : tab.session?.data)?.commitFeedback?.transactionId));
+      txCompletions = new Map([...txCompletions].filter(([id]) => liveIds.has(id))).set(next.completion.id, next.completion);
+    }
+    txStatus = next;
+    txStatusKnown = true;
+  }
+
   async function refreshTxStatus() {
     const request = ++txStatusRequest;
     txStatusKnown = false;
     try {
       const next = await api.txStatus();
-      if (request === txStatusRequest) { txStatus = next; txStatusKnown = true; }
+      if (request === txStatusRequest) updateTransactionStatus(next);
     } catch {
       // Unknown is not idle. Keep the last known transaction visible and do
       // not start automatic probes after a failed status refresh.
@@ -1778,10 +1792,11 @@
     txStatusKnown = false;
     try {
       const next = await api.txCommit();
-      if (request === txStatusRequest) { txStatus = next; txStatusKnown = true; }
-      flash('Transaction committed.');
+      if (request === txStatusRequest) updateTransactionStatus(next);
+      const outcome = next.completion?.outcome ?? 'committed';
+      flash(outcome === 'rolledBack' ? 'Transaction rolled back after an error.' : `${transactionCompletionLabel(outcome)}.`, outcome !== 'committed');
     } catch (error) {
-      flash(errorMessage(error));
+      flash(errorMessage(error), true);
     } finally {
       connectionMutation = null;
     }
@@ -1794,7 +1809,7 @@
     txStatusKnown = false;
     try {
       const next = await api.txRollback();
-      if (request === txStatusRequest) { txStatus = next; txStatusKnown = true; }
+      if (request === txStatusRequest) updateTransactionStatus(next);
       flash('Transaction rolled back.');
     } catch (error) {
       flash(errorMessage(error));
@@ -1955,6 +1970,7 @@
       flash('No exportable data.');
       return;
     }
+    if (full && txStatus.active) { flash('Commit or roll back before re-running an export.'); return; }
     if (full && (!resultUsable || !resultSession || operation || connectionMutation || !result.autoLimited)) {
       flash('Re-run this query on its original connection before requesting a larger export.');
       return;
@@ -1968,6 +1984,7 @@
       if (!path) return;
       let exportResult = source;
       if (full && session?.connectionId) {
+        if (txStatus.active) { flash('Commit or roll back before re-running an export.'); return; }
         if (operation || connectionMutation) { flash('Wait for the current operation before exporting.'); return; }
         const sourceTab = sourceTabId === activeTab ? snapshotActive() : tabs.find((tab) => tab.id === sourceTabId);
         if (!canUseResult(sourceTab?.session ?? null, sourceTab?.connectionId ?? null) || sourceTab?.session?.executedAt !== session.executedAt) {
@@ -2048,13 +2065,18 @@
 
     updateReviewError = '';
     const op = beginOperation('apply', tabConnectionId);
-    const editedRows = cloneRows(result!.rows);
+    const editedResult = result!;
+    const editedSession = resultSession!;
+    const editedRows = cloneRows(editedResult.rows);
     try {
       const applied = await api.applyRowUpdates(op.connectionId, op.token, reviewedUpdates);
       if (!isCurrentOperation(op)) return;
-      patchTab(op.tabId, { originalRows: editedRows, pendingChanges: [], editMode: false });
+      patchTab(op.tabId, {
+        session: { ...editedSession, data: { ...editedResult, commitFeedback: applied.commitFeedback } },
+        originalRows: editedRows, pendingChanges: [], editMode: false
+      });
       showUpdatePreview = false;
-      flash(`${applied.updatedRows} ${applied.updatedRows === 1 ? 'row' : 'rows'} updated${applied.inTransaction ? ' in the open transaction. Commit to save.' : '.'}`);
+      flash(commitFeedbackLabel(applied.commitFeedback), applied.commitFeedback.outcome === 'interrupted');
     } catch (error) {
       const cancelled = normalizeAppError(error).code === '57014';
       updateReviewError = cancelled ? 'Update cancelled. Staged edits retained.' : `Apply failed: ${errorMessage(error)}`;
@@ -2403,10 +2425,9 @@
             <p>Use Vim keybindings across SQL tabs.</p>
           </section>
           <section class="settings-card">
-            <div class="settings-card-head"><strong>Transactions</strong></div>
-            <AutoTransactionToggle enabled={settings.autoTransaction} busy={autoTransactionSaving} disabled={!workspaceLoaded || running || Boolean(connectionMutation) || closingWorkspace} onChange={setAutoTransaction} />
-            <p>Read-only queries run normally. Writes, including those inside CTEs, and unrecognized SQL open a transaction until you Commit or Rollback.</p>
-            <p>On by default. Turning it off keeps any open transaction active. Disable it before running commands that require execution outside a transaction.</p>
+            <div class="settings-card-head"><strong>Commit mode</strong></div>
+            <CommitModeSelect mode={settings.commitMode} disabled={!workspaceLoaded || running || Boolean(connectionMutation) || closingWorkspace} onChange={setCommitMode} />
+            <p>Changing mode applies when the next transaction opens.</p>
           </section>
           <section class="settings-card">
             <div class="settings-card-head"><strong>Appearance</strong></div>
@@ -2485,7 +2506,7 @@
       <div class="editor-pane">
         {#if txStatus.active}
           <div class="tx-banner">
-            <strong>{txStatus.automatic ? 'Auto transaction active' : 'Transaction active'}</strong>
+            <strong>Transaction open</strong>
             <span title={txStatus.startedAt ? `Started ${formatHistoryTime(txStatus.startedAt)}` : undefined}>{transactionDuration}</span>
             <button disabled={running || Boolean(connectionMutation)} on:click={commitTransaction}>Commit</button>
             <button disabled={running || Boolean(connectionMutation)} on:click={rollbackTransaction}>Rollback</button>
@@ -2535,7 +2556,12 @@
             {:else if queryError}
               <span>Failed{historyContext ? ` · ${historyContext.durationMs} ms` : ''}</span>
             {:else if result}
-              <span>{result.rowCount}{result.hasMore ? '+' : ''} {result.rowCount === 1 ? 'row' : 'rows'} · {result.durationMs} ms</span>
+              <span>
+                {#if !resultCommitLabel || (result.columns.length && result.commitFeedback?.affectedRows === null)}
+                  {result.rowCount}{result.hasMore ? '+' : ''} {result.rowCount === 1 ? 'row' : 'rows'} ·
+                {/if}
+                {#if resultCommitLabel}{resultCommitLabel} · {/if}{result.durationMs} ms
+              </span>
             {:else if historyContext}
               <span>No snapshot stored · {historyContext.durationMs} ms</span>
             {:else}
@@ -2584,7 +2610,7 @@
                 {#if queryError.position}<span>Position: {queryError.position}</span>{/if}
               </div>
             {:else}
-              <strong>{result ? 'No rows returned' : tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
+              <strong>{result ? result.columns.length ? 'No rows returned' : 'Statement completed' : tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
             {/if}
             {#if tabKind !== 'query' && (!result || queryError)}
               <button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>
@@ -2601,7 +2627,7 @@
             {#if operation?.tabId === activeTab && operation.kind === 'load'}
               <span class="running-state" role="status"><span class="spinner"></span> Loading next {PAGE_SIZE} rows…</span>
             {:else if result.autoLimited && result.hasMore && resultUsable}
-              <span>{pendingChanges.length ? 'Apply or discard edits to load more' : 'Scroll down to load more'}</span>
+              <span>{txStatus.active ? 'Commit or roll back to load more' : pendingChanges.length ? 'Apply or discard edits to load more' : 'Scroll down to load more'}</span>
             {/if}
           </footer>
         {/if}
@@ -2611,7 +2637,7 @@
 
   <footer class="status-bar">
     <ConnectionPill connection={activeConnection} connectionLocked={focusedConnectionLocked} {lockedConnectionName} state={activeConnection ? connectionTests[activeConnection.id] ?? null : null} activity={operation?.connectionId === tabConnectionId ? operation.cancelling ? 'cancelling' : 'running' : null} now={nowMs} compact disabled={Boolean(connectionMutation)} onTest={testCurrentConnection} onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }} />
-    <AutoTransactionToggle compact enabled={settings.autoTransaction} busy={autoTransactionSaving} disabled={!workspaceLoaded || running || Boolean(connectionMutation) || closingWorkspace} onChange={setAutoTransaction} />
+    <CommitModeSelect compact mode={settings.commitMode} disabled={!workspaceLoaded || running || Boolean(connectionMutation) || closingWorkspace} onChange={setCommitMode} />
     {#if activeConnection}<button class="status-link" tabindex="-1" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
     <button class="status-link" tabindex="-1" title="Open schema browser" on:click={() => { sidebar = 'schema'; sidebarOpen = true; }}>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : 'Schema'}</button>
     <span class="draft-status">{!workspaceLoaded ? 'restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'saving drafts…' : draftStatus === 'pending' ? 'saving drafts…' : draftStatus === 'error' ? 'draft save failed' : 'drafts saved'}</span>
@@ -2675,8 +2701,10 @@
     <div class="modal update-review">
       <div class="panel-head"><h2>Review cell edits</h2><button disabled={running} on:click={() => (showUpdatePreview = false)}>Close</button></div>
       <p>{pendingChanges.length} staged {pendingChanges.length === 1 ? 'change' : 'changes'} on {resultSession?.connectionName}. {#if editEligibility.target}Rows are identified by {editEligibility.target.key.primaryKey ? 'primary' : 'unique'} key ({editEligibility.target.key.columns.join(', ')}).{/if}</p>
-      {#if txStatus.active || settings.autoTransaction}
-        <p class="context-warning">{txStatus.active ? 'Changes will use the open transaction.' : 'Auto transaction will open a transaction for these changes.'} Commit to save them, or Rollback to undo them.</p>
+      {#if txStatus.active || settings.commitMode !== 'auto'}
+        <p class="context-warning">{txStatus.active ? 'Changes will use the open transaction.' : 'Applying changes will open a transaction.'} Commit to save them, or Rollback to undo them.</p>
+      {:else}
+        <p class="context-warning">Changes will commit when applied.</p>
       {/if}
       <div>
         <Switch label="Only if unchanged" bind:checked={checkOriginalValues} disabled={running} />

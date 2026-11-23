@@ -39,7 +39,22 @@ export interface ConnectionRecord extends ConnectionFields {
 export interface Settings {
   poolSize: number;
   supermavenEnabled: boolean;
-  autoTransaction: boolean;
+  commitMode: CommitMode;
+}
+
+export type CommitMode = 'auto' | 'manual' | 'smart';
+export type CommitOutcome = 'pending' | 'committed' | 'rolledBack' | 'interrupted';
+
+export interface CommitFeedback {
+  outcome: CommitOutcome;
+  transactionId: string | null;
+  affectedRows: number | null;
+  rowVerb: 'affected' | 'deleted' | 'updated' | null;
+}
+
+export interface TxCompletion {
+  id: string;
+  outcome: Exclude<CommitOutcome, 'pending'>;
 }
 
 export interface ColumnMeta {
@@ -65,6 +80,7 @@ export interface QueryResult {
   durationMs: number;
   /** Absent on results saved before timing instrumentation was added. */
   timings?: QueryTimings;
+  commitFeedback?: CommitFeedback;
   autoLimited: boolean;
   hasMore: boolean;
   /** New results preserve JSON/JSONB as raw text; older history contains decoded values. */
@@ -103,6 +119,7 @@ export interface RowUpdate {
 export interface ApplyUpdatesResult {
   updatedRows: number;
   inTransaction: boolean;
+  commitFeedback: CommitFeedback;
 }
 
 export interface CancelResult {
@@ -230,6 +247,7 @@ export interface TxStatus {
   automatic?: boolean;
   startedAt?: string | null;
   transactionId?: string | null;
+  completion?: TxCompletion;
 }
 
 export interface ConnectionStats {
