@@ -362,6 +362,38 @@ pub fn row_change_verb(sql: &str) -> Option<&'static str> {
     }
 }
 
+/// Transaction setup must be allowed to run before the first stats snapshot.
+pub fn transaction_activity_scope(sql: &str) -> (bool, bool) {
+    let mut may_write = false;
+    let mut sets_transaction = false;
+    for statement in split_statements(sql) {
+        let words = leading_keywords(&statement.text, 3);
+        let mut words = words.iter().map(String::as_str);
+        match words.next() {
+            Some(
+                "insert" | "update" | "delete" | "merge" | "copy" | "create" | "select" | "with"
+                | "values" | "table" | "do" | "call" | "execute" | "explain" | "truncate"
+                | "refresh",
+            ) => {
+                may_write = true;
+            }
+            Some("set") => {
+                sets_transaction |= words.any(|word| {
+                    matches!(
+                        word,
+                        "transaction"
+                            | "transaction_isolation"
+                            | "transaction_read_only"
+                            | "transaction_deferrable"
+                    )
+                });
+            }
+            _ => {}
+        }
+    }
+    (may_write, sets_transaction)
+}
+
 pub fn auto_limit_sql(sql: &str, offset: usize, page_size: usize) -> Option<String> {
     if classify_statement(sql) != StatementKind::SelectLike
         || crate::requires_transaction(sql)

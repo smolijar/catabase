@@ -11,6 +11,7 @@
     | 'edit'
     | 'ellipsis'
     | 'history'
+    | 'activity'
     | 'format'
     | 'explain'
     | 'key'
@@ -64,6 +65,8 @@
   {:else if name === 'history'}
     <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
     <path d="M3 3v5h5M12 7v5l3 2" />
+  {:else if name === 'activity'}
+    <path d="M3 12h4l3-7 4 14 3-7h4" />
   {:else if name === 'key'}
     <circle cx="8" cy="8" r="5" />
     <path d="m11.5 11.5 9 9M17 17l3-3M14 14l3-3" />

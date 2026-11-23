@@ -7,6 +7,7 @@ export interface ResultSession {
   connectionId: string | null;
   connectionName: string;
   executedAt: string;
+  historyEntryIds?: number[];
   snapshot: boolean;
 }
 
@@ -56,7 +57,7 @@ export function createHistoryTab(entry: HistoryEntry, result: QueryResult | null
   const context = {
     execution: { sql: entry.query, start: 0, end: entry.query.length },
     connectionId: entry.connectionId ?? null, connectionName,
-    executedAt: entry.executedAt, snapshot: true
+    executedAt: entry.executedAt, historyEntryIds: [entry.id], snapshot: true
   };
   return {
     ...tab, kind: 'reference',

@@ -5,6 +5,7 @@
   import Icon from './Icon.svelte';
 
   export let connection: ConnectionRecord | null = null;
+  export let online = Boolean(connection);
   export let state: ConnectionTestState | null = null;
   export let disabled = false;
   export let compact = false;
@@ -21,15 +22,18 @@
   $: testing = health === 'testing';
   $: running = Boolean(activity) || health === 'running';
   $: busy = testing || running;
-  $: message = running ? activity === 'cancelling' ? 'Cancelling…' : 'Running…' : testing ? 'Testing…' : stale ? 'Check stale' : error;
-  $: stale = health === 'stale';
-  $: error = state?.status === 'error' ? state.message : '';
+  $: disconnected = !online || (!running && state?.status === 'error' && state.origin === 'query');
+  $: stale = !disconnected && health === 'stale';
+  $: testError = state?.status === 'error' && state.origin === 'test' ? state.message : '';
+  $: showTestError = Boolean(testError) && (health === 'error' || !online);
+  $: message = running ? activity === 'cancelling' ? 'Cancelling…' : 'Running…' : testing ? 'Testing…' : stale ? 'Check stale'
+    : disconnected && connection ? `${connection.name}: ${testError}` : testError;
   $: lockReason = `Connection locked to ${lockedConnectionName || connection?.name || 'this tab'}. Right-click the tab to unlock.`;
   $: title = !connection ? connectionLocked ? `${lockReason} Run a query to review and reconnect.` : 'Choose this tab’s database connection'
     : running ? `${connection.name}: ${activity === 'cancelling' ? 'cancelling the query' : 'query running'}. Wait for it to finish before testing.`
     : testing ? `Testing ${connection.name}…`
-    : stale ? `${connection.name}: connection check is over one minute old.${error ? ` Last error: ${error}` : ''} Click to check again, or run a query.`
-    : error ? `${connection.name}: ${error}\nClick to test again.`
+    : stale ? `${connection.name}: connection check is over one minute old.${testError ? ` Last error: ${testError}` : ''} Click to check again, or run a query.`
+    : testError ? `${connection.name}: ${testError}\nClick to test again.`
     : state?.status === 'success' ? `${connection.name}: connection test succeeded. Click to test again.`
     : `Test ${connection.name}. Click to check the connection.`;
 </script>
@@ -37,23 +41,24 @@
 <div class="connection-control" class:split={switcher} class:compact>
 <button
   class="chip connection-chip"
-  class:connected={health === 'success' && !running}
+  class:connected={!disconnected && health === 'success' && !running}
   class:compact
   class:stale={stale && !running}
-  class:testing={busy}
-  class:failed={health === 'error' && !running}
+  class:testing={testing && !running}
+  class:running
+  class:failed={(health === 'error' || showTestError) && !running}
   tabindex={compact ? -1 : undefined}
   disabled={disabled || busy || (!connection && connectionLocked)}
   aria-busy={busy}
-  aria-label={connection ? `${running ? activity === 'cancelling' ? 'Cancelling on' : 'Running on' : testing ? 'Testing' : 'Test'} ${connection.name}${!running && stale ? ': check is stale' : !running && error ? `: ${error}` : ''}` : 'Choose connection'}
+  aria-label={connection ? `${running ? activity === 'cancelling' ? 'Cancelling on' : 'Running on' : testing ? 'Testing' : 'Test'} ${connection.name}${!running && stale ? ': check is stale' : !running && testError ? `: ${testError}` : ''}` : 'Disconnected. Choose connection'}
   {title}
   on:click={() => connection ? onTest() : onChoose()}
 >
   <span class="status-dot"></span>
-  <span class="connection-name">{connection?.name ?? (compact ? 'Disconnected' : 'Choose connection')}</span>
-  {#if switcher && connection}<span class="connection-user">{connection.username}</span>{/if}
-  {#if switcher && environment}<span class="environment">{environment}</span>{/if}
-  {#if busy || stale || (!compact && error)}<span class="connection-message" role="status">{message}</span>{/if}
+  <span class="connection-name">{disconnected ? 'Disconnected' : connection?.name ?? 'Disconnected'}</span>
+  {#if switcher && connection && !disconnected}<span class="connection-user">{connection.username}</span>{/if}
+  {#if switcher && environment && !disconnected}<span class="environment">{environment}</span>{/if}
+  {#if running || testing || stale || (!compact && showTestError)}<span class="connection-message" role={running ? undefined : 'status'}>{message}</span>{/if}
 </button>
 {#if switcher}<button class="switch-arrow" aria-label={connectionLocked ? lockReason : 'Switch connection'} aria-haspopup="dialog" title={connectionLocked ? lockReason : 'Switch or disconnect connection'} disabled={disabled || running || connectionLocked} on:click={onChoose}><span class:chevron={!connectionLocked}><Icon name={connectionLocked ? 'lock' : 'chevron'} size={12} /></span></button>{/if}
 </div>
@@ -75,11 +80,10 @@
   .status-dot { flex-shrink: 0; }
   .connection-chip.connected { color: var(--ink); }
   .connection-chip.testing { color: var(--warn); opacity: 1; }
-  .testing .status-dot { background: var(--warn); animation: busy 1.06s steps(1) infinite; }
+  .connection-chip.running { opacity: 1; }
   .connection-chip.stale { color: var(--warn); }
-  .stale .status-dot { background: var(--warn); }
+  .running .status-dot, .testing .status-dot, .stale .status-dot { background: var(--warn); }
   .connection-chip.failed { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
   .failed .status-dot { background: var(--danger); }
-  @keyframes busy { 50% { opacity: .25; } }
   @media (max-width: 1000px) { .connection-user { display: none; } }
 </style>

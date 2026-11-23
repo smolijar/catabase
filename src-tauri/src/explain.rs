@@ -176,19 +176,41 @@ pub(super) async fn explain_query(
         let mut tx = cancellation
             .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
             .await?;
-        let local = if let Some(session) = tx.as_ref() {
+        let local = if let Some(session) = tx.as_mut() {
             check_transaction_connection(&session.connection_id, &active.id)?;
             history.set_transaction(Some(session.history_id.clone()));
-            let result = ExplainSession {
-                client: &session.client,
-                reflection: &session.reflection,
-                history: &history,
-                cancellation: &cancellation,
-                ssl: session.ssl,
-            }
-            .run(&sql, request.use_second_result, &progress)
-            .await;
-            if must_discard(&result) || session.client.is_closed() {
+            let may_write = requires_transaction(&sql);
+            let before = if may_write {
+                session
+                    .activity
+                    .before_write(&session.client, session.ssl, &cancellation, false)
+                    .await
+            } else {
+                Ok(())
+            };
+            let result = match before {
+                Ok(()) => {
+                    ExplainSession {
+                        client: &session.client,
+                        reflection: &session.reflection,
+                        history: &history,
+                        cancellation: &cancellation,
+                        ssl: session.ssl,
+                    }
+                    .run(&sql, request.use_second_result, &progress)
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            let counts = if may_write && result.is_ok() && !session.client.is_closed() {
+                session
+                    .activity
+                    .after_write(&session.client, session.ssl, &cancellation)
+                    .await
+            } else {
+                Ok(())
+            };
+            if must_discard(&result) || counts.is_err() || session.client.is_closed() {
                 discard_transaction(&app, &state, &mut tx);
                 invalidate_pool_reflection(&state, &active.id).await;
             }

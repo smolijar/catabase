@@ -5,6 +5,7 @@
   export let label = 'More';
   export let disabled = false;
   export let iconOnly = false;
+  export let triggerIcon: 'ellipsis' | 'copy' = 'ellipsis';
   export let contextOnly = false;
   export let items: Array<{ id: string; label: string; disabled?: boolean; danger?: boolean }>;
   export let onSelect: (id: string) => void = () => {};
@@ -24,6 +25,7 @@
   {ariaLabel}
   {disabled}
   {iconOnly}
+  {triggerIcon}
   hideTrigger={contextOnly}
   compact
   menuMode

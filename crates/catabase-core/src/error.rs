@@ -8,6 +8,8 @@ pub enum CoreError {
     Storage(#[from] rusqlite::Error),
     #[error("postgres error: {0}")]
     Postgres(#[from] tokio_postgres::Error),
+    #[error("postgres connection error: {0}")]
+    PostgresConnect(#[source] deadpool_postgres::PoolError),
     #[error("invalid connection URL: {0}")]
     InvalidConnectionUrl(String),
     #[error("url parse error: {0}")]
@@ -55,8 +57,10 @@ impl CoreError {
                 position: None,
             });
         }
-        let Self::Postgres(error) = self else {
-            return None;
+        let error = match self {
+            Self::Postgres(error)
+            | Self::PostgresConnect(deadpool_postgres::PoolError::Backend(error)) => error,
+            _ => return None,
         };
 
         let db = error.as_db_error()?;

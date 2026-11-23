@@ -1,20 +1,24 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
+  import ActionMenu from './ActionMenu.svelte';
   import { formatBytes, historyEntryBytes } from '../lib/history';
   import type { HistoryEntry, ConnectionRecord } from '../lib/types';
   export let entry: HistoryEntry;
   export let grouped = false;
   export let connections: ConnectionRecord[];
   export let onCopy: (entry: HistoryEntry) => void;
+  export let onCopyLog: (entry: HistoryEntry) => void;
   export let onOpen: (entry: HistoryEntry) => void;
   export let onDelete: (id: number) => void;
   $: connectionName = connections.find(connection => connection.id === entry.connectionId)?.name ?? 'Unavailable connection';
+  const copyItems = [{ id: 'sql', label: 'Copy SQL' }, { id: 'log', label: 'Copy execution log' }];
   $: sizeDetails = `Referenced content: ${formatBytes(historyEntryBytes(entry))}\nSQL: ${formatBytes(entry.querySize)} · shared by ${entry.queryReferences} executions\nResult: ${entry.hasResult ? `${formatBytes(entry.resultSize ?? 0)} · shared by ${entry.resultReferences} executions` : 'No snapshot stored'}\nExecution details: ${formatBytes(entry.executionSize)}\nLogical size, not exclusive disk usage. Shared SQL and results are stored once.${entry.queryHash ? `\nQuery hash: ${entry.queryHash}` : ''}${entry.resultHash ? `\nResult hash: ${entry.resultHash}` : ''}`;
 </script>
 
 <article aria-label={`History #${entry.id}`} class:error-card={entry.isError} class:transaction-entry={grouped} class="history-card">
   <div class="history-entry-head">
-    <button class="history-sql" aria-label="Copy SQL" title={`Copy SQL\n${entry.query}`} on:click={() => onCopy(entry)}><code>{entry.query}</code><Icon name="copy" size={13} /></button>
+    <button class="history-sql" aria-label="Copy SQL" title={`Copy SQL\n${entry.query}`} on:click={() => onCopy(entry)}><code>{entry.query}</code></button>
+    <ActionMenu ariaLabel="Copy from history" iconOnly triggerIcon="copy" items={copyItems} onSelect={choice => choice === 'log' ? onCopyLog(entry) : onCopy(entry)} />
     <button class="history-icon-button" aria-label="Open" title="Open SQL and saved result" on:click={() => onOpen(entry)}><Icon name="open" size={15} /></button>
     <button class="history-icon-button danger-quiet" aria-label="Delete history entry" title="Delete history entry" on:click={() => onDelete(entry.id)}><Icon name="trash" size={14} /></button>
   </div>

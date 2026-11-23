@@ -11,7 +11,7 @@
   let copyStatus = '';
   async function copyTiming() {
     const text = [`${details.connectionName} · ${details.result.rowCount} rows`, `Query time: ${details.result.durationMs} ms`, `End-to-end through DOM update: ${formatTiming(details.client.totalMs)}`, ...rows.map(row => `${row.label}: ${row.estimated ? '≈ ' : ''}${formatTiming(row.ms)}\n${row.note}`)].join('\n');
-    try { await copyText(text); copyStatus = 'Copied'; }
+    try { await copyText(text, 'Copy query timing'); copyStatus = 'Copied'; }
     catch { copyStatus = 'Could not copy'; }
   }
 </script>

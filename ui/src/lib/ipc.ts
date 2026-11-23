@@ -14,6 +14,7 @@ import type {
   ConnectionInput,
   ConnectionRecord,
   ConnectionStats,
+  HistoryEntry,
   HistoryPage,
   HistoryStats,
   HistoryStorageStats,
@@ -70,6 +71,7 @@ export const api = {
     invoke<HistoryPage>('history_page', { search, offset, limit }),
   historyTransactionPage: (id: string, offset = 0, limit = 50) =>
     invoke<HistoryPage>('history_transaction_page', { id, offset, limit }),
+  historyEntries: (ids: number[]) => invoke<HistoryEntry[]>('history_entries', { ids }),
   historyStats: () => invoke<HistoryStats>('history_stats'),
   historyStorageStats: () => invoke<HistoryStorageStats>('history_storage_stats'),
   historyGetResult: (id: number) => invoke<{ result: QueryResult | null }>('history_get_result', { id }),

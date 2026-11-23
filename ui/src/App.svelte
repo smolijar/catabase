@@ -16,6 +16,7 @@
   import HistoryStorageDialog from './components/HistoryStorageDialog.svelte';
   import HistoryEntryCard from './components/HistoryEntryCard.svelte';
   import HistoryTransactionGroup from './components/HistoryTransactionGroup.svelte';
+  import ActivityPanel from './components/ActivityPanel.svelte';
   import AppUpdates from './components/AppUpdates.svelte';
   import DiagnosticDialog from './components/DiagnosticDialog.svelte';
   import ResumeConnectionDialog from './components/ResumeConnectionDialog.svelte';
@@ -44,6 +45,8 @@
   import type { ConnectionAppearance, ThemePreference } from './lib/appearance';
   import { serializeRows } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
+  import { startActivity } from './lib/activity';
+  import { formatExecutionLog } from './lib/executionLog';
   import { AUTO_UPDATE_CHECK_KEY, createUpdateChecker, initialUpdateState, updateInstallBlock } from './lib/appUpdates';
   import type { UpdateProgress } from './lib/appUpdates';
   import { formatRunningDuration } from './lib/status';
@@ -79,6 +82,7 @@
     HistoryEntry,
     HistoryStats,
     HistoryStorageStats,
+    HistoryTransaction,
     ForeignKeyLookup,
     QueryResult,
     RowUpdate,
@@ -92,7 +96,7 @@
   const PAGE_SIZE = 200;
   const VIM_MODE_STORAGE_KEY = 'catabase.vimMode';
 
-  type SidebarTab = 'connections' | 'schema' | 'history' | 'tabs' | 'settings';
+  type SidebarTab = 'connections' | 'schema' | 'history' | 'activity' | 'tabs' | 'settings';
   type EditorHandle = {
     formatSql: () => void;
     find: (replace?: boolean) => void;
@@ -104,6 +108,7 @@
   };
   type SchemaGroup = { name: string; items: SchemaItem[] };
   type Operation = { token: string; tabId: string; connectionId: string; kind: 'query' | 'load' | 'export' | 'apply' | 'explain'; startedAt: number; cancelling: boolean };
+  const operationLabels = { query: 'Running', load: 'Loading rows', export: 'Exporting', apply: 'Applying edits', explain: 'Explaining' };
 
   export let onWorkspaceReady: () => void = () => {};
 
@@ -174,7 +179,7 @@
   let statusFlash = 'Ready';
   let statusTiming: QueryTimingDetails | null = null;
   let timingDetails: QueryTimingDetails | null = null;
-  let toastVisible = false;
+  let toastMessage = '';
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
   let toastError = false;
   let mounted = false;
@@ -271,10 +276,17 @@
   const writeWorkspaceDraft = createDraftWriter((content) => api.saveDraft('workspace.v1', content));
   const nativeCleanup: Array<() => void> = [];
 
-  $: activeConnection = connectedIds.has(tabConnectionId ?? '') ? connections.find((connection) => connection.id === tabConnectionId) ?? null : null;
+  $: savedTabConnection = connections.find(connection => connection.id === tabConnectionId) ?? null;
+  $: activeConnection = connectedIds.has(tabConnectionId ?? '') ? savedTabConnection : null;
+  $: tabConnectionTest = savedTabConnection ? connectionTests[savedTabConnection.id] ?? null : null;
+  $: statusConnection = activeConnection ?? (tabConnectionTest?.status === 'testing'
+    || (tabConnectionTest?.status === 'error' && tabConnectionTest.origin === 'test') ? savedTabConnection : null);
+  $: connectionLabels = Object.fromEntries(connections.map(connection =>
+    [connection.id, [connection.name, appearances[connection.id]?.environment].filter(Boolean).join(' · ')]
+  ));
   $: liveConnectionId = activeConnection?.id ?? null;
   $: focusedConnectionLocked = tabs.find(tab => tab.id === activeTab)?.connectionLocked === true;
-  $: lockedConnectionName = connections.find(connection => connection.id === tabConnectionId)?.name ?? 'Unavailable connection';
+  $: lockedConnectionName = savedTabConnection?.name ?? 'Unavailable connection';
   $: connectionAppearance = workspaceAppearance(appearances, activeConnection?.id ?? null,
     showConnectionModal ? { id: connectionForm.id, appearance: connectionAppearanceForm } : undefined);
   $: resolvedTheme = resolveThemePreference(theme, systemLight);
@@ -297,7 +309,7 @@
       ...archivedTabs.map(t => ({ id: `closed-tab:${t.id}`, label: t.title, title: t.sql, searchText: t.sql, detail: `Reopen · ${connections.find(c => c.id === t.connectionId)?.name ?? 'No connection'} · ${formatHistoryTime(t.closedAt)}`, group: 'Closed tabs' })),
       ...schemaItems.map(item => ({ id: `table:${item.schema}.${item.name}`, label: `${item.schema}.${item.name}`, detail: `${item.columns.length} columns`, group: 'Tables & views' })),
       ...pickerHistory.entries.map(entry => ({ id: `history:${entry.id}`, label: entry.query.replace(/\s+/g, ' ').slice(0, 200), title: entry.query, detail: `#${entry.id} · ${entry.durationMs} ms · ${connections.find(c => c.id === entry.connectionId)?.name ?? 'Unavailable connection'} · ${formatHistoryTime(entry.executedAt)} · ${entry.isError ? 'Error' : entry.hasResult ? 'Snapshot' : 'SQL only'}`, group: 'History', matched: true })),
-      ...(['new', 'connections', 'schema', 'history', 'tabs', 'settings', 'find', 'format'] as const).map(id => ({ id: `command:${id}`, label: ({ new: 'New query', connections: 'Switch connection', schema: 'Browse schema', history: 'Query history', tabs: 'Browse open & closed tabs', settings: 'Settings', find: 'Find in SQL', format: 'Format SQL' })[id], detail: id === 'new' ? '⌘T' : id === 'find' ? '⌘F' : id === 'connections' && focusedConnectionLocked ? 'Unlock the focused tab first' : '', disabled: id === 'connections' && focusedConnectionLocked, group: 'Commands' })),
+      ...(['new', 'connections', 'schema', 'history', 'activity', 'tabs', 'settings', 'find', 'format'] as const).map(id => ({ id: `command:${id}`, label: ({ new: 'New query', connections: 'Switch connection', schema: 'Browse schema', history: 'Query history', activity: 'Activity log', tabs: 'Browse open & closed tabs', settings: 'Settings', find: 'Find in SQL', format: 'Format SQL' })[id], detail: id === 'new' ? '⌘T' : id === 'find' ? '⌘F' : id === 'connections' && focusedConnectionLocked ? 'Unlock the focused tab first' : '', disabled: id === 'connections' && focusedConnectionLocked, group: 'Commands' })),
       ...(statusTiming ? [{ id: 'command:query-timing', label: 'Show query timing', detail: '', group: 'Commands' }] : [])
     ];
   $: if (picker !== 'commands') pickerHistorySearch.cancel();
@@ -311,7 +323,10 @@
     cellEditing: tabs.some(tab => tab.id === activeTab ? editMode : tab.editMode)
   });
   $: visibleSidebarWidth = clampSidebarWidth(sidebarWidth, workspaceWidth);
-  $: runningDuration = formatRunningDuration(operation?.startedAt, nowMs);
+  $: activeOperation = operation?.tabId === activeTab ? operation : null;
+  $: operationText = operation
+    ? `${operation.cancelling ? 'Cancelling' : operationLabels[operation.kind]} · ${formatRunningDuration(operation.startedAt, nowMs, 'seconds')}`
+    : '';
   $: transactionDuration = formatRunningDuration(txStatus.startedAt, nowMs);
   $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
   $: historyContext = tabs.find(tab => tab.id === activeTab)?.historyContext ?? null;
@@ -327,6 +342,7 @@
     ? buildRowUpdates(editEligibility.target, originalRows, pendingChanges, checkOriginalValues)
     : [];
   $: editDisabledReason = running || connectionMutation ? 'Wait for the current operation to finish before editing.'
+    : queryError ? 'Show previous results before editing.'
     : activeConnection?.options?.readOnly ? 'Cell editing is disabled for this read-only connection.'
     : historyContext ? 'History snapshots are read-only. Open a new query to run this SQL again.'
     : resultSession?.snapshot ? 'History snapshots are read-only. Re-run the query to edit.'
@@ -537,7 +553,6 @@
       // Preserve the connection association, previous results and staged edits.
       // They remain read-only until the user deliberately reconnects.
       await loadConnections();
-      flash('Disconnected', true);
     } catch (error) { flash(`Could not disconnect: ${errorMessage(error)}`, true); }
     finally { connectionMutation = null; }
   }
@@ -793,7 +808,7 @@
     const tab = tabs.find((tab) => tab.id === id);
     if (!tab || closingWorkspace) return;
     try {
-      await copyText(serializeTabReference(tab));
+      await copyText(() => serializeTabReference(tab), 'Copy tab reference', tab.title);
       flash(`${tab.title} copied. Paste on a tab to duplicate.`);
     } catch (error) {
       flash(`Could not copy tab: ${errorMessage(error)}`, true);
@@ -1086,7 +1101,7 @@
     else if (command === 'find') editorRef?.find();
     else if (command === 'format') formatSql();
     else if (command === 'query-timing') timingDetails = statusTiming;
-    else if (command === 'schema' || command === 'history' || command === 'tabs' || command === 'settings') { sidebar = command; sidebarOpen = true; }
+    else if (command === 'schema' || command === 'history' || command === 'activity' || command === 'tabs' || command === 'settings') { sidebar = command; sidebarOpen = true; }
   }
 
   async function loadSettings() {
@@ -1252,7 +1267,7 @@
   }
 
   function makeSession(data: QueryResult, execution: ExecutionTarget, connectionId: string, snapshot = false): ResultSession {
-    return { data, execution, connectionId, connectionName: connections.find((connection) => connection.id === connectionId)?.name ?? 'Unavailable connection', executedAt: new Date().toISOString(), snapshot };
+    return { data, execution, connectionId, connectionName: connections.find((connection) => connection.id === connectionId)?.name ?? 'Unavailable connection', executedAt: new Date().toISOString(), historyEntryIds: data.historyEntryIds, snapshot };
   }
 
   function resultPatch(session: ResultSession | null, error: AppError | null = null): Partial<WorkspaceTab> {
@@ -1335,6 +1350,7 @@
     const initialAssociation = tabConnectionId;
     const draftSql = sql;
     let connectionId = activeConnection?.id ?? null;
+    let reconnecting: ConnectionRecord | null = null;
     let reviewedTarget: ExecutionTarget | null = null;
     const editor = editorRef;
     const stillCurrent = (association = initialAssociation) => activeTab === tabId && tabConnectionId === association && sql === draftSql && !operation && !closingWorkspace;
@@ -1348,8 +1364,8 @@
       if (!connectionId) {
         const candidate = resumeConnection(connections, initialAssociation, connectionScope === 'global' ? globalConnectionId ?? lastConnectionId : lastConnectionId, focusedConnectionLocked);
         if (!candidate) {
-          if (focusedConnectionLocked) flash('This tab’s locked connection is unavailable. Unlock it from the tab menu to choose another.');
-          else { picker = 'connections'; flash('Choose a connection, then run this query.'); }
+          if (focusedConnectionLocked) throw new Error('This tab’s locked connection is unavailable. Unlock it from the tab menu to choose another.');
+          picker = 'connections';
           return;
         }
         reviewedTarget = editor ? await editor.getExecutionTarget(api.splitSql) : { sql: draftSql.trim(), start: 0, end: draftSql.length };
@@ -1367,7 +1383,9 @@
         const targets = reviewed.id === initialAssociation ? [] : connectionTargets(tabs, tabId, connectionScope);
         if (!await confirmConnectionChange(targets, reviewed.id, tabId) || !stillCurrent()) return;
         connectionMutation = 'Connecting…';
+        reconnecting = reviewed;
         const connected = await api.activateConnection(reviewed.id);
+        reconnecting = null;
         if (!sameConnectionSettings(connected, reviewed)) throw new Error('Connection settings changed. Run again to review the current connection.');
         if (!stillCurrent()) return;
         connectedIds = new Set([...connectedIds, connected.id]);
@@ -1377,18 +1395,23 @@
         await loadConnections();
         if (!stillCurrent(connectionId)) return;
       }
-    } catch (error) { flash(errorMessage(error), true); return; }
-    finally { queryPreparing = false; connectionMutation = null; }
+    } catch (error) {
+      if (activeTab === tabId && !closingWorkspace) {
+        setStatus('');
+        const failure = normalizeAppError(error);
+        patchTab(tabId, { error: reconnecting ? connectBeforeRunError(failure, reconnecting.name) : failure });
+      }
+      return;
+    } finally { queryPreparing = false; connectionMutation = null; }
     if (!connectionId) return;
     const op = beginOperation('query', connectionId);
     const timingStart = performance.now();
     let target: ExecutionTarget = { sql: sql.trim(), start: 0, end: sql.length };
-    statusFlash = 'Running query...';
-    statusTiming = null;
+    setStatus('');
     try {
       target = reviewedTarget ?? (editor ? await editor.getExecutionTarget(api.splitSql) : target);
       if (!target.sql.trim()) throw new Error('No query to execute.');
-      if (op.cancelling) { flash('Query cancelled before execution.'); return; }
+      if (op.cancelling) { setStatus('Query cancelled before execution.'); return; }
       patchTab(op.tabId, { error: null });
       void loadConnectionStats();
       const invokeStart = performance.now();
@@ -1404,7 +1427,7 @@
       const summary = next.commitFeedback
         ? `${commitFeedbackLabel(next.commitFeedback)} · ${next.durationMs} ms`
         : `Loaded ${next.rowCount}${next.hasMore ? '+' : ''} ${next.rowCount === 1 ? 'row' : 'rows'} in ${next.durationMs} ms.`;
-      flash(`${op.cancelling ? 'Query completed before cancellation. ' : ''}${summary}`, next.commitFeedback?.outcome === 'interrupted', {
+      setStatus(`${op.cancelling ? 'Query completed before cancellation. ' : ''}${summary}`, {
         result: next, connectionName: session.connectionName, executedAt: session.executedAt, batch: false,
         client: { targetMs: invokeStart - timingStart, invokeMs: invokeEnd - invokeStart, uiMs: uiEnd - invokeEnd, totalMs: uiEnd - timingStart }
       });
@@ -1412,11 +1435,13 @@
       if (!isCurrentOperation(op)) return;
       const normalized = normalizeAppError(error);
       if (normalized.code === '57014') {
-        flash('Query cancelled.');
+        setStatus('Query cancelled.');
+      } else if (normalized.connectionFailure === 'connect') {
+        const connectionName = connections.find(connection => connection.id === op.connectionId)?.name ?? 'the database';
+        patchTab(op.tabId, { error: connectBeforeRunError(normalized, connectionName) });
       } else {
         patchTab(op.tabId, resultPatch(null, normalized));
         if (normalized.position && activeTab === op.tabId) editorRef?.markError(target.start + normalized.position - 1, normalized.message);
-        flash(normalized.message, true);
       }
     } finally {
       finishOperation(op);
@@ -1429,8 +1454,6 @@
     if (op.kind === 'explain') { await explainWorkflow.cancel(); return; }
     op.cancelling = true;
     operation = op;
-    statusFlash = 'Cancelling…';
-    statusTiming = null;
     try {
       await api.cancelQuery(op.token);
     } catch (error) {
@@ -1443,8 +1466,7 @@
     if (pendingChanges.length) { flash('Apply or discard staged edits before loading more rows.'); return; }
     const session = { ...resultSession, data: result };
     const op = beginOperation('load', tabConnectionId);
-    statusFlash = 'Loading more rows…';
-    statusTiming = null;
+    setStatus('');
     try {
       const invokeStart = performance.now();
       const next = await connectionTester.query(op.connectionId, () => api.executeQuery(session.execution.sql, op.token, session.data.rows.length, PAGE_SIZE, session.connectionId!, true));
@@ -1497,8 +1519,7 @@
 
   async function copyConnection(connection: ConnectionRecord) {
     try {
-      const reference = serializeConnectionReference(connection);
-      await copyText(reference);
+      await copyText(() => serializeConnectionReference(connection), 'Copy connection reference', connection.name);
       flash(`${connection.name} copied. Paste in the connection list to duplicate.`);
     } catch (error) {
       flash(`Could not copy connection: ${errorMessage(error)}`, true);
@@ -1538,7 +1559,7 @@
     testingConnection = true;
     modalFeedback = 'Testing connection...';
     try {
-      await withTimeout(api.testConnection(connectionForm), connectionTestTimeout(connectionForm.options), 'Connection test timed out.');
+      await probeConnection(connectionForm);
       modalFeedback = 'Connection test succeeded.';
     } catch (error) {
       modalFeedback = errorMessage(error);
@@ -1625,17 +1646,28 @@
     }
   }
 
+  async function probeConnection(connection: ConnectionInput, automatic = false) {
+    const title = automatic ? 'Check connection automatically' : 'Check connection';
+    const finish = startActivity('connection', title, connectionLabels[connection.id ?? ''] ?? (connection.name || 'Unsaved connection'));
+    try {
+      await withTimeout(api.testConnection(connection), connectionTestTimeout(connection.options), 'Connection test timed out.');
+      finish('completed');
+    } catch (error) {
+      finish('failed', errorMessage(error));
+      throw error;
+    }
+  }
+
   function testSavedConnection(connection: ConnectionRecord, automatic = false) {
     const id = connection.id;
     // A routine check on a healthy connection shouldn't re-reflect an empty database.
     const retrySchema = !automatic || connectionTests[id]?.status !== 'success';
-    return connectionTester.test(id, () => withTimeout(
-      api.testConnection(connection), connectionTestTimeout(connection.options), 'Connection test timed out.'
-    ), retrySchema ? () => retryMissingSchema(id) : undefined);
+    return connectionTester.test(id, () => probeConnection(connection, automatic),
+      retrySchema ? () => retryMissingSchema(id) : undefined);
   }
 
   function testCurrentConnection() {
-    if (activeConnection && !connectionMutation && operation?.connectionId !== activeConnection.id) void testSavedConnection(activeConnection);
+    if (statusConnection && !connectionMutation && !operation) void testSavedConnection(statusConnection);
   }
 
   async function disconnectConnection(id: string) {
@@ -1838,10 +1870,14 @@
     const request = ++schemaRequest;
     schemaLoading = true;
     schemaError = '';
+    const finish = startActivity('schema', 'Load schema', connectionLabels[connectionId]);
     try {
       const tree = await api.introspectSchema(connectionId);
+      const count = tree.schemas.length;
+      finish('completed', `${count} schema ${count === 1 ? 'object' : 'objects'}`);
       if (request === schemaRequest && connectionId === tabConnectionId) schemaItems = tree.schemas;
     } catch (error) {
+      finish('failed', errorMessage(error));
       if (request === schemaRequest && connectionId === tabConnectionId) schemaError = errorMessage(error);
     } finally {
       if (request === schemaRequest) {
@@ -1878,10 +1914,52 @@
 
   async function copyHistorySql(entry: HistoryEntry) {
     try {
-      await copyText(entry.query);
+      await copyText(entry.query, 'Copy SQL from history');
       flash('SQL copied to clipboard.');
     } catch (error) {
       flash(`Could not copy SQL: ${errorMessage(error)}`, true);
+    }
+  }
+
+  async function copyActivity(text: string) {
+    try {
+      await copyText(text, 'Copy activity log');
+      flash('Log copied to clipboard.');
+    } catch (error) {
+      flash(`Could not copy log. ${errorMessage(error)}`, true);
+    }
+  }
+
+  function executionLogText(entry: HistoryEntry) {
+    return formatExecutionLog(entry, connectionLabels[entry.connectionId ?? ''] ?? 'Unavailable connection');
+  }
+
+  function copyHistoryLog(entry: HistoryEntry) {
+    return copyActivity(executionLogText(entry));
+  }
+
+  async function copyResultLog(ids: number[]) {
+    try {
+      const entries = await api.historyEntries(ids);
+      if (entries.length !== ids.length) throw new Error('Some statements are no longer in history.');
+      await copyActivity(entries.map(executionLogText).join('\n\n'));
+    } catch (error) {
+      flash(`Could not open the execution log. ${errorMessage(error)}`, true);
+    }
+  }
+
+  async function copyTransactionLog(transaction: HistoryTransaction) {
+    try {
+      const entries: HistoryEntry[] = [];
+      while (entries.length < transaction.statementCount) {
+        const page = await api.historyTransactionPage(transaction.id, entries.length, Math.min(200, transaction.statementCount - entries.length));
+        if (!page.entries.length) break;
+        entries.push(...page.entries);
+      }
+      if (!entries.length) throw new Error('This transaction has no statements in history.');
+      await copyActivity(entries.map(executionLogText).join('\n\n'));
+    } catch (error) {
+      flash(`Could not open the transaction log. ${errorMessage(error)}`, true);
     }
   }
 
@@ -1956,9 +2034,10 @@
       flash('No exportable data.');
       return;
     }
+    const source = result;
     try {
-      const text = serializeRows(result, format);
-      await copyText(text);
+      await copyText(() => serializeRows(source, format), `Copy results as ${format.toUpperCase()}`,
+        `${source.rows.length} ${source.rows.length === 1 ? 'row' : 'rows'}`);
       flash(`${format.toUpperCase()} copied to clipboard.`);
     } catch (error) {
       flash(`Copy failed: ${errorMessage(error)}`);
@@ -2118,14 +2197,26 @@
     return { ...appError, message: appError?.message ?? errorMessage(error) };
   }
 
-  function flash(message: string, isError = false, timings: QueryTimingDetails | null = null) {
+  function connectBeforeRunError(error: AppError, connectionName: string): AppError {
+    return {
+      ...error,
+      message: `Could not connect to ${connectionName}. Query was not sent.`,
+      detail: [error.message, error.detail].filter(Boolean).join('\n')
+    };
+  }
+
+  function setStatus(message: string, timings: QueryTimingDetails | null = null) {
     statusFlash = message;
     statusTiming = timings;
+  }
+
+  function flash(message: string, isError = false) {
+    setStatus(message);
     toastError = isError;
-    toastVisible = true;
+    toastMessage = message;
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => {
-      toastVisible = false;
+      toastMessage = '';
       toastTimer = null;
     }, 3600);
   }
@@ -2218,21 +2309,22 @@
 <main class="app-shell" class:native-titlebar={nativeTitlebar} inert={closingWorkspace || Boolean(tabCloseTask) || queryPreparing || Boolean(connectionMutation)} aria-busy={Boolean(tabCloseTask) || queryPreparing || Boolean(connectionMutation)}>
   <header class="toolbar" data-tauri-drag-region={nativeTitlebar ? 'deep' : undefined}>
     <div class="brand" aria-label="catabase">
-      <Cat mood={running ? 'prompt' : queryError ? 'error' : !activeConnection || result?.rowCount === 0 ? 'asleep' : 'awake'} />
+      <Cat mood={activeConnection ? 'awake' : 'asleep'} animate={false} />
       <span class="wordmark" aria-hidden="true"><b>CAT</b>ABASE<i></i></span>
     </div>
     {#if updateState.update}
       <button class="update-badge" title={`Catabase ${updateState.update.version} is available`} on:click={openAppUpdates}><Icon name="download" size={12} /><span>Update available</span></button>
     {/if}
     <button class="workspace-search" aria-label="Search tables, queries, history, commands" title="Search workspace (Cmd/Ctrl+K)" on:click={() => picker = 'commands'}><Icon name="search" size={14} /><span>Search tables, queries, history, commands</span><kbd>⌘K</kbd></button>
-    {#if operation}<button class="operation-status" on:click={() => switchTab(operation!.tabId)}>{operation.cancelling ? 'Cancelling' : operation.kind === 'query' ? 'Running' : operation.kind === 'load' ? 'Loading rows' : operation.kind === 'apply' ? 'Applying edits' : operation.kind === 'explain' ? 'Explaining' : 'Exporting'} · {runningDuration}</button>{/if}
+    {#if operation}<button class="operation-status" title="Go to the tab with this operation" on:click={() => switchTab(operation!.tabId)}>{operationText}</button>{/if}
     <ConnectionPill
       switcher
       activity={operation?.connectionId === tabConnectionId ? operation.cancelling ? 'cancelling' : 'running' : null}
       environment={connectionAppearance.environment}
-      connection={activeConnection}
+      connection={statusConnection}
+      online={Boolean(activeConnection)}
       connectionLocked={focusedConnectionLocked} {lockedConnectionName}
-      state={activeConnection ? connectionTests[activeConnection.id] ?? null : null}
+      state={tabConnectionTest}
       now={nowMs}
       disabled={running || Boolean(connectionMutation)}
       onTest={testCurrentConnection}
@@ -2264,6 +2356,13 @@
         data-tooltip="History"
         on:click={() => selectSidebar('history')}
       ><Icon name="history" /></button>
+      <button
+        class:active={sidebar === 'activity' && sidebarOpen}
+        aria-label="Activity"
+        aria-pressed={sidebar === 'activity' && sidebarOpen}
+        data-tooltip="Activity"
+        on:click={() => selectSidebar('activity')}
+      ><Icon name="activity" /></button>
       <button
         class:active={sidebar === 'tabs' && sidebarOpen}
         aria-label="Tabs"
@@ -2395,12 +2494,14 @@
           {/if}
           {#each groupHistory(history) as group (group.key)}
             {#if group.transaction}
-              <HistoryTransactionGroup transaction={group.transaction} revision={historyRevision} {connections} connectionId={group.entries[0].connectionId} matches={group.entries} searching={Boolean(historySearch.trim())} onCopy={copyHistorySql} onOpen={openHistory} onDelete={deleteHistory} />
+              <HistoryTransactionGroup transaction={group.transaction} revision={historyRevision} {connections} connectionId={group.entries[0].connectionId} matches={group.entries} searching={Boolean(historySearch.trim())} onCopy={copyHistorySql} onCopyLog={copyHistoryLog} onCopyTransaction={copyTransactionLog} onOpen={openHistory} onDelete={deleteHistory} />
             {:else}
-              <HistoryEntryCard entry={group.entries[0]} {connections} onCopy={copyHistorySql} onOpen={openHistory} onDelete={deleteHistory} />
+              <HistoryEntryCard entry={group.entries[0]} {connections} onCopy={copyHistorySql} onCopyLog={copyHistoryLog} onOpen={openHistory} onDelete={deleteHistory} />
             {/if}
           {/each}
           {#if history.length < historyTotal}<button class="history-more" disabled={historyLoading} on:click={() => refreshHistory(true)}>{historyLoading ? 'Loading…' : `Load more (${history.length} of ${historyTotal})`}</button>{/if}
+        {:else if sidebar === 'activity'}
+          <ActivityPanel {historyRevision} {connectionLabels} onOpen={openHistory} onCopy={copyActivity} />
         {:else if sidebar === 'tabs'}
           <TabsPanel tabs={tabs.map(tab => tab.id === activeTab ? { ...tab, sql, connectionId: tabConnectionId } : tab)} {archivedTabs} {connections} activeId={activeTab} onSelect={switchTab} onReopen={reopenTab} onNew={() => newQuery()} />
         {:else}
@@ -2479,7 +2580,9 @@
             connectionName={connections.find((connection) => connection.id === association)?.name ?? (association ? 'Unavailable connection' : 'No connection')}
             connectionColor={tabAppearance.color} hasConnection={Boolean(association)} connectionLocked={Boolean(tab.connectionLocked)}
             lockDisabled={running || Boolean(connectionMutation)} onToggleConnectionLock={() => toggleConnectionLock(tab.id)}
-            running={operation?.tabId === tab.id} closeDisabled={operation?.tabId === tab.id}
+            running={operation?.tabId === tab.id}
+            failed={tab.kind === 'query' && tab.id !== activeTab && operation?.tabId !== tab.id && Boolean(tab.error)}
+            closeDisabled={operation?.tabId === tab.id}
             pending={Boolean((tab.id === activeTab ? pendingChanges : tab.pendingChanges).length)}
             renaming={renamingTab === tab.id} {renameValue}
             dragging={draggingTab === tab.id} dropSide={tabDrop?.id === tab.id ? tabDrop.side : null}
@@ -2508,6 +2611,14 @@
           <div class="tx-banner">
             <strong>Transaction open</strong>
             <span title={txStatus.startedAt ? `Started ${formatHistoryTime(txStatus.startedAt)}` : undefined}>{transactionDuration}</span>
+            {#if txStatus.rowActivity}
+              {@const { inserted, updated, deleted, tables } = txStatus.rowActivity}
+              <span role="status" title="PostgreSQL row operations, including work rolled back to a savepoint">
+                {inserted.toLocaleString()} inserted · {updated.toLocaleString()} updated · {deleted.toLocaleString()} deleted · {tables.toLocaleString()} {tables === 1 ? 'table' : 'tables'}
+              </span>
+            {:else if txStatus.rowActivity === null}
+              <span>Row counts unavailable</span>
+            {/if}
             <button disabled={running || Boolean(connectionMutation)} on:click={commitTransaction}>Commit</button>
             <button disabled={running || Boolean(connectionMutation)} on:click={rollbackTransaction}>Rollback</button>
           </div>
@@ -2551,12 +2662,12 @@
         <div class="results-head">
           <div class="results-title">
             <strong>Results</strong>
-            {#if operation?.tabId === activeTab}
-              <span class="running-state"><span class="spinner"></span> {operation.cancelling ? 'Cancelling…' : operation.kind === 'load' ? 'Loading' : 'Running'} {runningDuration}</span>
+            {#if activeOperation}
+              <span class="running-state"><span class="operation-dot" aria-hidden="true"></span>{operationText}</span>
             {:else if queryError}
-              <span>Failed{historyContext ? ` · ${historyContext.durationMs} ms` : ''}</span>
+              <span class="failed-state">Failed{historyContext ? ` · ${historyContext.durationMs} ms` : ''}</span>
             {:else if result}
-              <span>
+              <span class:failed-state={result.commitFeedback?.outcome === 'interrupted'}>
                 {#if !resultCommitLabel || (result.columns.length && result.commitFeedback?.affectedRows === null)}
                   {result.rowCount}{result.hasMore ? '+' : ''} {result.rowCount === 1 ? 'row' : 'rows'} ·
                 {/if}
@@ -2569,8 +2680,8 @@
             {/if}
           </div>
           <div class="results-actions">
-            <ActionMenu label="Export" ariaLabel="Export results" disabled={!result?.rows.length} items={exportItems} onSelect={handleExport} />
-            {#if editMode}
+            <ActionMenu label="Export" ariaLabel="Export results" disabled={Boolean(queryError) || !result?.rows.length} items={exportItems} onSelect={handleExport} />
+            {#if editMode && !queryError}
               <button disabled={!pendingChanges.length || running || Boolean(connectionMutation)} on:click={previewUpdates}>Review {pendingChanges.length} {pendingChanges.length === 1 ? 'edit' : 'edits'}</button>
               <button disabled={running || Boolean(connectionMutation)} on:click={discardUpdates}>{pendingChanges.length ? 'Discard' : 'Cancel editing'}</button>
             {:else}
@@ -2578,16 +2689,22 @@
             {/if}
           </div>
         </div>
-        {#if resultContext}
+        {#if resultContext && (!queryError || historyContext)}
           <div class="result-context">
             <span>{resultContext.connectionName}</span>
             <time title={resultContext.executedAt}>{formatHistoryTime(resultContext.executedAt)}</time>
             {#if resultContext.snapshot}<span class="snapshot-badge">History snapshot · read only</span>{/if}
             {#if !resultContext.snapshot && resultContext.connectionId !== tabConnectionId}<span class="context-warning">Different connection · run the query to refresh</span>{/if}
-            <details><summary>Executed SQL</summary><pre>{resultContext.execution.sql}</pre></details>
+            <details>
+              <summary>Executed SQL</summary>
+              <pre>{resultContext.execution.sql}</pre>
+              {#if resultContext.historyEntryIds?.length}
+                <button on:click={() => copyResultLog(resultContext.historyEntryIds!)}><Icon name="copy" size={14} /> Copy execution log</button>
+              {/if}
+            </details>
           </div>
         {/if}
-        {#if editMode}
+        {#if editMode && !queryError}
           <div class="edit-bar">
             {pendingChanges.length} pending {pendingChanges.length === 1 ? 'change' : 'changes'}.
             {#if detectEditTarget()}
@@ -2597,12 +2714,12 @@
             {/if}
           </div>
         {/if}
-        {#if queryError || !result?.rows.length}
+        {#if (queryError || !result?.rows.length) && !(activeOperation?.kind === 'query' && !result)}
           <div class="empty-state results-empty">
-            <Cat mood={queryError ? 'error' : 'asleep'} size={52} muted />
+            <Cat mood={queryError ? 'error' : 'asleep'} size={52} muted animate={false} />
             {#if queryError}
               <strong>Query failed</strong>
-              <div class="query-error" data-selectable-text>
+              <div class="query-error" role="alert" data-selectable-text>
                 <strong>{queryError.message}</strong>
                 {#if queryError.detail}<span>Detail: {queryError.detail}</span>{/if}
                 {#if queryError.hint}<span>Hint: {queryError.hint}</span>{/if}
@@ -2612,21 +2729,21 @@
             {:else}
               <strong>{result ? result.columns.length ? 'No rows returned' : 'Statement completed' : tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
             {/if}
-            {#if tabKind !== 'query' && (!result || queryError)}
+            {#if queryError && result}
+              <button on:click={() => patchTab(activeTab, { error: null })}>Show previous results</button>
+            {:else if tabKind !== 'query' && (!result || queryError)}
               <button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>
             {:else if !result && !queryError && tabKind === 'query'}
               <p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>
             {/if}
           </div>
-        {:else}
+        {:else if result?.rows.length}
           {#key `${activeTab}:${resultSession?.executedAt}`}
             <ResultsGrid {result} {editableColumns} {editDisabledReason} schemaItems={resultSession?.connectionId === tabConnectionId ? schemaItems : []} {canLoadMore} resultContext={`${activeTab}:${resultSession?.executedAt ?? ''}`} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEditMany={updateCells} onForeignKeyLookup={lookupForeignKey} onCancelLookup={(token) => { void api.cancelQuery(token).catch(() => {}); }} onMessage={flash} />
           {/key}
           <footer class="results-foot">
             <span>{result.rows.length} loaded {result.hasMore ? '· more available' : ''}</span>
-            {#if operation?.tabId === activeTab && operation.kind === 'load'}
-              <span class="running-state" role="status"><span class="spinner"></span> Loading next {PAGE_SIZE} rows…</span>
-            {:else if result.autoLimited && result.hasMore && resultUsable}
+            {#if activeOperation?.kind !== 'load' && result.autoLimited && result.hasMore && resultUsable}
               <span>{txStatus.active ? 'Commit or roll back to load more' : pendingChanges.length ? 'Apply or discard edits to load more' : 'Scroll down to load more'}</span>
             {/if}
           </footer>
@@ -2636,12 +2753,12 @@
   </section>
 
   <footer class="status-bar">
-    <ConnectionPill connection={activeConnection} connectionLocked={focusedConnectionLocked} {lockedConnectionName} state={activeConnection ? connectionTests[activeConnection.id] ?? null : null} activity={operation?.connectionId === tabConnectionId ? operation.cancelling ? 'cancelling' : 'running' : null} now={nowMs} compact disabled={Boolean(connectionMutation)} onTest={testCurrentConnection} onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }} />
+    <ConnectionPill connection={statusConnection} online={Boolean(activeConnection)} connectionLocked={focusedConnectionLocked} {lockedConnectionName} state={tabConnectionTest} activity={operation?.connectionId === tabConnectionId ? operation.cancelling ? 'cancelling' : 'running' : null} now={nowMs} compact disabled={running || Boolean(connectionMutation)} onTest={testCurrentConnection} onChoose={() => { sidebar = 'connections'; sidebarOpen = true; }} />
     <CommitModeSelect compact mode={settings.commitMode} disabled={!workspaceLoaded || running || Boolean(connectionMutation) || closingWorkspace} onChange={setCommitMode} />
     {#if activeConnection}<button class="status-link" tabindex="-1" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
     <button class="status-link" tabindex="-1" title="Open schema browser" on:click={() => { sidebar = 'schema'; sidebarOpen = true; }}>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : 'Schema'}</button>
     <span class="draft-status">{!workspaceLoaded ? 'restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'saving drafts…' : draftStatus === 'pending' ? 'saving drafts…' : draftStatus === 'error' ? 'draft save failed' : 'drafts saved'}</span>
-    {#if running}<span>Running {runningDuration}</span>{/if}
+    {#if operation}<span class="footer-operation">{operationText}</span>{/if}
     <span class="cursor-position">Ln {cursorLine}, Col {cursorColumn}</span>
     {#if statusTiming}
       <button class="status-flash status-timing" tabindex="-1" title="Show query timing breakdown" aria-haspopup="dialog" on:click={() => (timingDetails = statusTiming)}>{statusFlash}</button>
@@ -2688,11 +2805,11 @@
   <QueryTimingDialog details={timingDetails} onClose={() => (timingDetails = null)} />
 {/if}
 
-{#if toastVisible}
+{#if toastMessage}
   <div class="toast" class:error-toast={toastError} role="status">
     <span class="toast-icon"><Icon name={toastError ? 'close' : 'check'} size={15} /></span>
-    <span>{statusFlash}</span>
-    <button aria-label="Dismiss message" on:click={() => (toastVisible = false)}><Icon name="close" size={14} /></button>
+    <span>{toastMessage}</span>
+    <button aria-label="Dismiss message" on:click={() => (toastMessage = '')}><Icon name="close" size={14} /></button>
   </div>
 {/if}
 

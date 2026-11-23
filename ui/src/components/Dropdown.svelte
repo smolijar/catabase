@@ -15,6 +15,7 @@
   export let compact = false;
   export let menuMode = false;
   export let iconOnly = false;
+  export let triggerIcon: 'ellipsis' | 'copy' = 'ellipsis';
   export let hideTrigger = false;
   export let triggerLabel = '';
   export let onSelect: (value: string) => void = () => {};
@@ -295,7 +296,7 @@
       on:contextmenu={handleTriggerContextMenu}
     >
       {#if iconOnly}
-        <Icon name="ellipsis" size={18} />
+        <Icon name={triggerIcon} size={triggerIcon === 'copy' ? 14 : 18} />
       {:else}
         <span class="dropdown-label">{label}</span>
         {#if unavailable}<span class="unavailable-hint">Unavailable</span>{/if}

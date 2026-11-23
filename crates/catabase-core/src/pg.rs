@@ -181,7 +181,10 @@ pub async fn test_connection(fields: &ConnectionFields) -> Result<(), CoreError>
 
 pub async fn checkout_pool_client(pool: &PgPool) -> Result<PooledPgClient, CoreError> {
     pool.get().await.map_err(|error| match error {
-        deadpool_postgres::PoolError::Backend(error) => CoreError::Postgres(error),
+        deadpool_postgres::PoolError::Backend(_)
+        | deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Create) => {
+            CoreError::PostgresConnect(error)
+        }
         error => CoreError::message(format!("postgres pool error: {error}")),
     })
 }

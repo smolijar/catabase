@@ -44,6 +44,7 @@
             return { entries: found, total: found.length };
           }
           case 'history_transaction_page': return { entries: entries.filter(entry => entry.transaction?.id === args.id), total: 1 };
+          case 'history_entries': return args.ids.flatMap(id => entries.filter(entry => entry.id === id));
           case 'history_delete': entries = entries.filter(entry => entry.id !== args.id); return;
           case 'history_get_result': return { result: { columns: [{ name: 'answer', typeOid: 23, typeName: 'int4', generated: false, primaryKey: false }], rows: [{ answer: 42 }], rowCount: 1, durationMs: 12, autoLimited: false, hasMore: false } };
           case 'execute_query':

@@ -25,13 +25,31 @@ before(async () => {
 after(async () => { await server?.close(); });
 
 test('a failed connection keeps its name, shows the error in a red pill and remains retryable', () => {
-  const html = renderPill({ status: 'error', message: 'Connection refused', checkedAt: 12345 });
+  const html = renderPill({ status: 'error', origin: 'test', message: 'Connection refused', checkedAt: 12345 });
   assert.match(html, /connection-chip[^\"]*failed/);
   assert.match(html, /zenbase docker/);
   assert.match(html, /role="status">Connection refused/);
   assert.match(html, /Click to test again/);
   assert.doesNotMatch(html, / disabled/);
   assert.doesNotMatch(html, /connection-chip[^\"]*connected/);
+});
+
+test('a connection lost during a run reports Disconnected without repeating the query error', () => {
+  for (const compact of [false, true]) {
+    const html = renderPill({ status: 'error', origin: 'query', message: 'Connection closed by peer', checkedAt: 12345 }, compact);
+    assert.match(html, /class="connection-name[^"]*">Disconnected/);
+    assert.doesNotMatch(html, /Connection closed by peer/);
+    assert.doesNotMatch(html, /connection-chip[^"]*connected/);
+  }
+});
+
+test('the navbar keeps the manual test error and retry target after disconnecting', () => {
+  const state = { status: 'error', origin: 'test', message: 'Connection refused', checkedAt: 12345 } as const;
+  const html = renderPill(state, false, 12345, { online: false });
+  assert.match(html, /class="connection-name[^"]*">Disconnected/);
+  assert.match(html, /role="status">zenbase docker: Connection refused/);
+  assert.match(html, /Click to test again/);
+  assert.doesNotMatch(renderPill(state, true, 12345, { online: false }), /role="status">zenbase docker/);
 });
 
 test('testing displays progress and disables duplicate clicks', () => {
@@ -42,15 +60,18 @@ test('testing displays progress and disables duplicate clicks', () => {
   assert.match(html, /role="status">Testing…/);
 });
 
-test('query activity is Running or Cancelling, never Testing, in both locations', () => {
+test('both connection pills show query activity with their status dot', () => {
   for (const compact of [false, true]) {
     const running = renderPill({ status: 'running' }, compact);
-    assert.match(running, /role="status">Running…/);
+    assert.match(running, /connection-chip[^"]*running/);
+    assert.match(running, /aria-label="Running on zenbase docker"/);
     assert.match(running, /aria-busy="true"/);
     assert.match(running, / disabled/);
+    assert.match(running, /connection-message[^>]*>Running…/);
     assert.doesNotMatch(running, /Testing/);
     const cancelling = renderPill({ status: 'testing' }, compact, 12345, { activity: 'cancelling' });
-    assert.match(cancelling, /role="status">Cancelling…/);
+    assert.match(cancelling, /aria-label="Cancelling on zenbase docker"/);
+    assert.match(cancelling, /connection-message[^>]*>Cancelling…/);
     assert.doesNotMatch(cancelling, /Testing/);
   }
 });
@@ -71,7 +92,7 @@ test('only successful tests show green; selecting an untested connection is neut
 });
 
 test('database errors are escaped, not treated as markup or instructions', () => {
-  const html = renderPill({ status: 'error', message: '<script>alert("bad")</script>', checkedAt: 12345 });
+  const html = renderPill({ status: 'error', origin: 'test', message: '<script>alert("bad")</script>', checkedAt: 12345 });
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /&lt;script>/);
 });
@@ -84,7 +105,7 @@ test('navbar and compact status-bar pills share stale, error and checking semant
     assert.match(stale, /over one minute old/);
     assert.doesNotMatch(stale, /connection-chip[^\"]*connected/);
     assert.doesNotMatch(stale, / disabled/);
-    const failed = renderPill({ status: 'error', message: 'Connection refused', checkedAt: 12345 }, compact);
+    const failed = renderPill({ status: 'error', origin: 'test', message: 'Connection refused', checkedAt: 12345 }, compact);
     assert.match(failed, /connection-chip[^\"]*failed/);
     assert.match(failed, /Connection refused/);
     assert.match(renderPill({ status: 'testing' }, compact), /aria-busy="true"/);

@@ -300,8 +300,11 @@
 
   async function copySelection() {
     if (!anchor || !focus) return;
+    const start = anchor;
+    const end = focus;
     try {
-      await copyText(selectionText(rows, result.columns, anchor, focus, result.jsonValuesAsText));
+      await copyText(() => selectionText(rows, result.columns, start, end, result.jsonValuesAsText),
+        'Copy result selection', `${selectedCount} ${selectedCount === 1 ? 'cell' : 'cells'}`);
       onMessage(`${selectedCount === 1 ? 'Cell' : `${selectedCount} cells`} copied.`);
     } catch (error) {
       onMessage(`Copy failed: ${error instanceof Error ? error.message : String(error)}`);

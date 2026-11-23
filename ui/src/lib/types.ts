@@ -5,6 +5,7 @@ export interface AppError {
   hint?: string | null;
   code?: string | null;
   position?: number | null;
+  connectionFailure?: 'connect' | 'closed' | null;
 }
 
 export interface ConnectionFields {
@@ -81,6 +82,7 @@ export interface QueryResult {
   /** Absent on results saved before timing instrumentation was added. */
   timings?: QueryTimings;
   commitFeedback?: CommitFeedback;
+  historyEntryIds?: number[];
   autoLimited: boolean;
   hasMore: boolean;
   /** New results preserve JSON/JSONB as raw text; older history contains decoded values. */
@@ -138,6 +140,7 @@ export interface HistoryEntry {
   errorMessage?: string | null;
   hasResult: boolean;
   executedAt: string;
+  startedAt?: string | null;
   queryHash: string;
   resultHash?: string | null;
   querySize: number;
@@ -247,6 +250,7 @@ export interface TxStatus {
   automatic?: boolean;
   startedAt?: string | null;
   transactionId?: string | null;
+  rowActivity?: { inserted: number; updated: number; deleted: number; tables: number } | null;
   completion?: TxCompletion;
 }
 

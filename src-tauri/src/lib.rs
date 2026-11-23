@@ -21,12 +21,14 @@ use catabase_core::{
     HistoryStats, HistoryStorageStats, PgClient, PgErrorInfo, PgPool, PooledPgClient,
     QueryCancellation, QueryResult, ReflectionCache, RowUpdate, SchemaTree, Settings,
     StatementHistory, StatementKind, StatementRange, Storage, SupermavenClient,
-    SupermavenCompletion, SupermavenRequest, SupermavenStatus,
-    apply_row_updates_observed as apply_rows, build_connection_url as build_url,
-    checkout_pool_client, classify_statement, connection_stats as load_connection_stats,
-    create_pool, execute_on_client_observed, get_ddl_on_client as load_ddl,
-    lookup_foreign_key_values as lookup_fk_values, parse_connection_url as parse_url,
-    requires_transaction, split_editor_statements, split_statements, sql::row_change_verb,
+    SupermavenCompletion, SupermavenRequest, SupermavenStatus, TransactionActivity,
+    TransactionActivityTracker, apply_row_updates_observed as apply_rows,
+    build_connection_url as build_url, checkout_pool_client, classify_statement,
+    connection_stats as load_connection_stats, create_pool, execute_on_client_observed,
+    get_ddl_on_client as load_ddl, lookup_foreign_key_values as lookup_fk_values,
+    parse_connection_url as parse_url, requires_transaction, split_editor_statements,
+    split_statements,
+    sql::{row_change_verb, transaction_activity_scope},
     test_connection as test_pg_connection, validate_transaction_sql,
 };
 use serde::{Deserialize, Serialize};
@@ -62,6 +64,7 @@ struct TxSession {
     started_at: String,
     reflection: Arc<ReflectionCache>,
     automatic: bool,
+    activity: TransactionActivityTracker,
 }
 
 struct CancelEntry {
@@ -95,6 +98,13 @@ struct QueryRun<'a> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+enum ConnectionFailure {
+    Connect,
+    Closed,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppError {
     message: String,
     severity: Option<String>,
@@ -102,6 +112,7 @@ struct AppError {
     hint: Option<String>,
     code: Option<String>,
     position: Option<usize>,
+    connection_failure: Option<ConnectionFailure>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -111,6 +122,7 @@ struct TxStatus {
     automatic: bool,
     started_at: Option<String>,
     transaction_id: Option<String>,
+    row_activity: Option<TransactionActivity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completion: Option<TxCompletion>,
 }
@@ -147,6 +159,8 @@ struct QueryExecution {
     result: QueryResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     commit_feedback: Option<CommitFeedback>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    history_entry_ids: Vec<i64>,
 }
 
 impl From<QueryResult> for QueryExecution {
@@ -154,6 +168,7 @@ impl From<QueryResult> for QueryExecution {
         Self {
             result,
             commit_feedback: None,
+            history_entry_ids: Vec::new(),
         }
     }
 }
@@ -168,6 +183,7 @@ impl QueryExecution {
         let affected_rows = row_verb.map(|_| result.row_count);
         Self {
             result,
+            history_entry_ids: Vec::new(),
             commit_feedback: Some(CommitFeedback {
                 outcome,
                 transaction_id,
@@ -220,6 +236,17 @@ struct HistoryResult {
 
 impl From<CoreError> for AppError {
     fn from(error: CoreError) -> Self {
+        let connection_failure = match &error {
+            CoreError::PostgresConnect(_) => Some(ConnectionFailure::Connect),
+            CoreError::Postgres(error)
+                if error.is_closed()
+                    || std::error::Error::source(error)
+                        .is_some_and(|cause| cause.is::<std::io::Error>()) =>
+            {
+                Some(ConnectionFailure::Closed)
+            }
+            _ => None,
+        };
         if let Some(PgErrorInfo {
             message,
             severity,
@@ -236,6 +263,7 @@ impl From<CoreError> for AppError {
                 hint,
                 code,
                 position,
+                connection_failure,
             };
         }
 
@@ -246,6 +274,7 @@ impl From<CoreError> for AppError {
             hint: None,
             code: None,
             position: None,
+            connection_failure,
         }
     }
 }
@@ -512,6 +541,7 @@ async fn execute_query(
 
         match result {
             Ok(mut execution) => {
+                execution.history_entry_ids = history.take_saved_ids();
                 let total_ms = command_start.elapsed().as_secs_f64() * 1000.0;
                 let history_ms = history.save_time_ms();
                 if let Some(timings) = execution.result.timings.as_mut() {
@@ -603,31 +633,55 @@ async fn apply_row_updates(
             *tx = Some(session);
             let _ = app.emit("tx-changed", transaction_status(tx.as_ref()));
         }
-        if let Some(session) = tx.as_ref() {
+        if let Some(session) = tx.as_mut() {
             check_transaction_connection(&session.connection_id, &active.id)?;
             let transaction_id = session.history_id.clone();
             history.set_transaction(Some(transaction_id.clone()));
-            let result = cancellation
-                .run(
-                    &session.client,
-                    session.ssl,
-                    apply_rows(
-                        &session.client,
-                        &updates,
-                        true,
-                        cancellation.flag(),
-                        Some(&history),
-                    ),
-                )
-                .await;
+            let before = if (1..=1000).contains(&updates.len()) {
+                session
+                    .activity
+                    .before_write(&session.client, session.ssl, &cancellation, false)
+                    .await
+            } else {
+                Ok(())
+            };
+            let result = match before {
+                Ok(()) => {
+                    cancellation
+                        .run(
+                            &session.client,
+                            session.ssl,
+                            apply_rows(
+                                &session.client,
+                                &updates,
+                                true,
+                                cancellation.flag(),
+                                Some(&history),
+                            ),
+                        )
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            let counts = if result.is_ok() && !session.client.is_closed() {
+                session
+                    .activity
+                    .after_write(&session.client, session.ssl, &cancellation)
+                    .await
+            } else {
+                Ok(())
+            };
             state.cancels.lock().await.remove(&query_token);
             if let Err(error) = &result {
                 history.interrupted(error);
             }
-            let interrupted = must_discard(&result) || session.client.is_closed();
+            let interrupted =
+                must_discard(&result) || counts.is_err() || session.client.is_closed();
             if interrupted {
                 discard_transaction(&app, &state, &mut tx);
                 invalidate_pool_reflection(&state, &active.id).await;
+            } else if result.is_ok() {
+                let _ = app.emit("tx-changed", transaction_status(tx.as_ref()));
             }
             result
                 .map(|result| {
@@ -871,6 +925,14 @@ async fn history_transaction_page(
 }
 
 #[tauri::command]
+async fn history_entries(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+) -> Result<Vec<catabase_core::HistoryEntry>, AppError> {
+    state.storage.history_entries(&ids).map_err(Into::into)
+}
+
+#[tauri::command]
 async fn history_stats(state: State<'_, AppState>) -> Result<HistoryStats, AppError> {
     state.storage.history_stats().map_err(Into::into)
 }
@@ -1051,6 +1113,7 @@ async fn begin_transaction_session(
                 started_at: chrono::Utc::now().to_rfc3339(),
                 reflection,
                 automatic,
+                activity: TransactionActivityTracker::default(),
             },
             result,
         )),
@@ -1166,23 +1229,55 @@ async fn run_query_with_state(
                 // without trying to acquire the lock we already hold.
                 let _ = app.emit("tx-changed", transaction_status(tx.as_ref()));
             }
-            if let Some(session) = tx.as_ref() {
+            if let Some(session) = tx.as_mut() {
                 check_transaction_connection(&session.connection_id, &run.active.id)?;
                 let transaction_id = session.history_id.clone();
                 run.history.set_transaction(Some(transaction_id.clone()));
-                let result = execute_with_cancel(
-                    state,
-                    run.history,
-                    &session.client,
-                    &session.reflection,
-                    session.ssl,
-                    run.sql,
-                    run.query_token,
-                    run.offset,
-                    run.page_size,
-                )
-                .await;
-                let interrupted = must_discard(&result) || session.client.is_closed();
+                let (may_write, sets_transaction) = if needs_transaction {
+                    transaction_activity_scope(run.sql)
+                } else {
+                    (false, false)
+                };
+                let before = if may_write {
+                    session
+                        .activity
+                        .before_write(
+                            &session.client,
+                            session.ssl,
+                            &cancellation,
+                            sets_transaction,
+                        )
+                        .await
+                } else {
+                    Ok(())
+                };
+                let result = match before {
+                    Ok(()) => {
+                        execute_with_cancel(
+                            state,
+                            run.history,
+                            &session.client,
+                            &session.reflection,
+                            session.ssl,
+                            run.sql,
+                            run.query_token,
+                            run.offset,
+                            run.page_size,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                let counts = if may_write && result.is_ok() && !session.client.is_closed() {
+                    session
+                        .activity
+                        .after_write(&session.client, session.ssl, &cancellation)
+                        .await
+                } else {
+                    Ok(())
+                };
+                let interrupted =
+                    must_discard(&result) || counts.is_err() || session.client.is_closed();
                 if interrupted {
                     discard_transaction(app, state, &mut tx);
                     invalidate_pool_reflection(state, &run.active.id).await;
@@ -1694,6 +1789,7 @@ fn transaction_status(tx: Option<&TxSession>) -> TxStatus {
         automatic: tx.is_some_and(|session| session.automatic),
         started_at,
         transaction_id: tx.map(|session| session.history_id.clone()),
+        row_activity: tx.and_then(|session| session.activity.totals()),
         completion: None,
     }
 }
@@ -1839,6 +1935,7 @@ pub fn run() {
             history_get_result,
             history_page,
             history_transaction_page,
+            history_entries,
             history_purge,
             history_stats,
             history_storage_stats,

@@ -17,7 +17,7 @@ before(async () => {
   const { render } = await server.ssrLoadModule('svelte/server');
   renderCard = (entry, grouped = false) => render(Card, { props: {
     entry: { id: 1, query: 'select 1', durationMs: 1, executedAt: '2026-10-27', querySize: 8, executionSize: 10, ...entry },
-    grouped, connections: [], onCopy() {}, onOpen() {}, onDelete() {}
+    grouped, connections: [], onCopy() {}, onCopyLog() {}, onOpen() {}, onDelete() {}
   } }).body;
 });
 
@@ -39,11 +39,12 @@ test('Open is available for successful snapshots and SQL-only executions', () =>
   }
 });
 
-test('compact entries expose only copy-preview, open and delete buttons with accessible labels', () => {
+test('compact entries expose direct SQL copy, the copy menu, open and delete', () => {
   for (const grouped of [false, true]) {
     const html = renderCard({ query: 'select 1;\nselect 2;', rowCount: 2, queryReferences: 3 }, grouped);
-    assert.equal((html.match(/<button\b/g) ?? []).length, 3);
+    assert.equal((html.match(/<button\b/g) ?? []).length, 4);
     assert.match(html, /aria-label="Copy SQL"/);
+    assert.match(html, /aria-label="Copy from history"/);
     assert.match(html, /title="Copy SQL\nselect 1;\nselect 2;"/);
     assert.match(html, /aria-label="Open"/);
     assert.match(html, /aria-label="Delete history entry"/);

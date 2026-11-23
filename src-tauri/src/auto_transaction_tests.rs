@@ -503,6 +503,98 @@ async fn commit_modes_route_reads_writes_and_existing_sessions() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE for the saved zenbase docker connection"]
+async fn transaction_activity_counts_row_operations_across_tables() -> Result<(), Box<dyn Error>> {
+    let (active, pool) = fixture_pool().await?;
+    let client = checkout_pool_client(&pool).await?;
+    client
+        .batch_execute(
+            "CREATE TEMP TABLE catabase_transaction_activity_other (id int, value int);
+         INSERT INTO pg_temp.catabase_auto_transaction_probe VALUES (2, 20, 'prior transaction')",
+        )
+        .await?;
+    drop(client);
+
+    let storage = Storage::in_memory()?;
+    let notify = |saved: Result<(), CoreError>| saved.unwrap();
+    let history = StatementHistory::new(&storage, &active.id, &notify);
+    let reflection = ReflectionCache::default();
+    let run = query_run(&history, &active, &pool, &reflection, "BEGIN");
+    let cancellation = QueryCancellation::default();
+    let (mut session, _) =
+        begin_transaction_session(&storage, &run, "BEGIN", false, &cancellation).await?;
+    session
+        .client
+        .batch_execute(
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ; SET LOCAL statement_timeout = '3s'",
+        )
+        .await?;
+    session
+        .activity
+        .before_write(&session.client, session.ssl, &cancellation, false)
+        .await?;
+    execute_held(
+        &session, &history, &cancellation,
+        "WITH changed AS (
+           UPDATE pg_temp.catabase_auto_transaction_probe SET value = 21 WHERE id = 1 RETURNING id, value
+         ) INSERT INTO pg_temp.catabase_transaction_activity_other SELECT id, value FROM changed",
+    ).await?;
+    session
+        .activity
+        .after_write(&session.client, session.ssl, &cancellation)
+        .await?;
+    assert_eq!(
+        session.activity.totals(),
+        Some(TransactionActivity {
+            inserted: 1,
+            updated: 1,
+            deleted: 0,
+            tables: 2,
+        })
+    );
+
+    session
+        .client
+        .batch_execute(
+            "DELETE FROM pg_temp.catabase_auto_transaction_probe WHERE id = 2;
+         SAVEPOINT undo_delete;
+         DELETE FROM pg_temp.catabase_transaction_activity_other;
+         ROLLBACK TO SAVEPOINT undo_delete",
+        )
+        .await?;
+    session
+        .activity
+        .after_write(&session.client, session.ssl, &cancellation)
+        .await?;
+    assert_eq!(
+        session.activity.totals(),
+        Some(TransactionActivity {
+            inserted: 1,
+            updated: 1,
+            deleted: 2,
+            tables: 2,
+        })
+    );
+    let still_present: i64 = session
+        .client
+        .query_one(
+            "SELECT count(*) FROM pg_temp.catabase_transaction_activity_other",
+            &[],
+        )
+        .await?
+        .get(0);
+    assert_eq!(still_present, 1);
+    let timeout: String = session
+        .client
+        .query_one("SHOW statement_timeout", &[])
+        .await?
+        .get(0);
+    assert_eq!(timeout, "3s");
+    execute_transaction_end(&session, "ROLLBACK", &history, &cancellation).await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE for the saved zenbase docker connection"]
 async fn commit_errors_distinguish_rollback_from_a_failed_open_transaction()
 -> Result<(), Box<dyn Error>> {
     let (active, pool) = fixture_pool().await?;

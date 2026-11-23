@@ -18,6 +18,7 @@
   export let active = false;
   export let readonly = false;
   export let running = false;
+  export let failed = false;
   export let pending = false;
   export let closeDisabled = false;
   export let renaming = false;
@@ -126,7 +127,8 @@
       on:copy={handleCopy}
       on:paste={handlePaste}
     >
-      {#if running}<span class="spinner"></span>{/if}
+      {#if running}<span class="operation-dot" role="img" aria-label="Operation running"></span>
+      {:else if failed}<span class="tab-error" role="img" aria-label="Query failed" title="Query failed"></span>{/if}
       {#if connectionLocked}<span class="tab-lock" role="img" aria-label={`Connection locked to ${connectionName}. Right-click tab to unlock.`}><Icon name="lock" size={12} /></span>{/if}
       <span class="tab-title">{title}</span>{#if pending}<span class="pending-dot" title="Staged edits">•</span>{/if}
       {#if readonly}<small>read only</small>{/if}

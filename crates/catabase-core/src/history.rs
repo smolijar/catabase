@@ -5,6 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{DateTime, Utc};
+
 use crate::{CoreError, NewHistoryEntry, QueryResult, Storage};
 
 pub trait StatementObserver: Send + Sync {
@@ -23,9 +25,16 @@ pub struct StatementHistory<'a> {
 #[derive(Default)]
 struct RecordingState {
     transaction_id: Option<String>,
-    pending: Option<(String, Instant)>,
+    pending: Option<PendingStatement>,
     recorded: usize,
+    saved_ids: Vec<i64>,
     save_time: Duration,
+}
+
+struct PendingStatement {
+    sql: String,
+    start: Instant,
+    started_at: DateTime<Utc>,
 }
 
 impl<'a> StatementHistory<'a> {
@@ -63,13 +72,22 @@ impl<'a> StatementHistory<'a> {
         self.state.lock().unwrap().save_time.as_secs_f64() * 1000.0
     }
 
+    pub fn take_saved_ids(&self) -> Vec<i64> {
+        std::mem::take(&mut self.state.lock().unwrap().saved_ids)
+    }
+
     /// A bounded cancellation can drop the execution future before its normal
     /// completion hook. Save the in-flight statement, but never invent entries
     /// for the remaining, unexecuted statements in a batch.
     pub fn interrupted(&self, error: &CoreError) {
         let pending = self.state.lock().unwrap().pending.take();
-        if let Some((sql, start)) = pending {
-            self.finished(&sql, Err(error), start.elapsed().as_millis());
+        if let Some(pending) = pending {
+            self.record(
+                &pending.sql,
+                Err(error),
+                pending.start.elapsed().as_millis(),
+                Some(pending.started_at),
+            );
         }
     }
 
@@ -79,17 +97,13 @@ impl<'a> StatementHistory<'a> {
             self.finished(sql, Err(error), 0);
         }
     }
-}
-
-impl StatementObserver for StatementHistory<'_> {
-    fn started(&self, sql: &str) {
-        if let Some(observer) = self.observer {
-            observer.started(sql);
-        }
-        self.state.lock().unwrap().pending = Some((sql.to_owned(), Instant::now()));
-    }
-
-    fn finished(&self, sql: &str, result: Result<&QueryResult, &CoreError>, duration_ms: u128) {
+    fn record(
+        &self,
+        sql: &str,
+        result: Result<&QueryResult, &CoreError>,
+        duration_ms: u128,
+        started_at: Option<DateTime<Utc>>,
+    ) {
         if let Some(observer) = self.observer {
             observer.finished(sql, result, duration_ms);
         }
@@ -99,12 +113,14 @@ impl StatementObserver for StatementHistory<'_> {
             Ok(result) => self.storage.insert_transaction_query_history(
                 Some(self.connection_id.to_owned()),
                 state.transaction_id.clone(),
+                started_at,
                 sql.to_owned(),
                 result,
             ),
             Err(error) => self.storage.insert_history(NewHistoryEntry {
                 connection_id: Some(self.connection_id.to_owned()),
                 transaction_id: state.transaction_id.clone(),
+                started_at,
                 query: sql.to_owned(),
                 duration_ms,
                 row_count: None,
@@ -118,11 +134,38 @@ impl StatementObserver for StatementHistory<'_> {
                 result_json: None,
             }),
         };
-        state.pending = None;
         state.recorded += 1;
+        if let Ok(id) = &saved {
+            state.saved_ids.push(*id);
+        }
         state.save_time += start.elapsed();
         drop(state);
         (self.notify)(saved.map(|_| ()));
+    }
+}
+
+impl StatementObserver for StatementHistory<'_> {
+    fn started(&self, sql: &str) {
+        let pending = PendingStatement {
+            sql: sql.to_owned(),
+            start: Instant::now(),
+            started_at: Utc::now(),
+        };
+        if let Some(observer) = self.observer {
+            observer.started(sql);
+        }
+        self.state.lock().unwrap().pending = Some(pending);
+    }
+
+    fn finished(&self, sql: &str, result: Result<&QueryResult, &CoreError>, duration_ms: u128) {
+        let started_at = self
+            .state
+            .lock()
+            .unwrap()
+            .pending
+            .take()
+            .map(|pending| pending.started_at);
+        self.record(sql, result, duration_ms, started_at);
     }
 }
 
@@ -159,6 +202,20 @@ mod tests {
         storage.finish_history_transaction(&id, "finished").unwrap();
         assert_eq!(notifications.load(Ordering::Relaxed), 5);
         assert_eq!(storage.history_storage_stats().unwrap().unique_results, 1);
+        let ids = history.take_saved_ids();
+        let run = storage.history_entries(&ids).unwrap();
+        assert_eq!(run.iter().map(|entry| entry.id).collect::<Vec<_>>(), ids);
+        assert_eq!(
+            run.iter()
+                .map(|entry| entry.query.as_str())
+                .collect::<Vec<_>>(),
+            ["BEGIN", "SELECT 1", "UPDATE t SET n = 1", "SELECT 1", "END"]
+        );
+        for entry in &run {
+            let start = DateTime::parse_from_rfc3339(entry.started_at.as_deref().unwrap()).unwrap();
+            let end = DateTime::parse_from_rfc3339(&entry.executed_at).unwrap();
+            assert!(start <= end);
+        }
         let page = storage.history_transaction_page(&id, 1, 2).unwrap();
         assert_eq!(page.total, 5);
         assert_eq!(page.entries.len(), 2);

@@ -22,7 +22,7 @@
   let linkError = '';
   $: elapsed = formatRunningDuration(state.stageStartedAt, now);
   async function copy(value: string, label: string) {
-    try { await copyText(value); copyStatus = `${label} copied`; }
+    try { await copyText(value, `Copy ${label.toLowerCase()}`); copyStatus = `${label} copied`; }
     catch { copyStatus = `Could not copy ${label.toLowerCase()}`; }
   }
   async function openLink(url: string) {

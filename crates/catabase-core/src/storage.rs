@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -185,6 +185,7 @@ pub struct NewHistoryEntry {
     pub connection_id: Option<String>,
     #[serde(default)]
     pub transaction_id: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
     pub query: String,
     pub duration_ms: u128,
     pub row_count: Option<usize>,
@@ -206,6 +207,7 @@ pub struct HistoryEntry {
     pub error_message: Option<String>,
     pub has_result: bool,
     pub executed_at: String,
+    pub started_at: Option<String>,
     pub query_hash: String,
     pub result_hash: Option<String>,
     pub query_size: i64,
@@ -605,12 +607,13 @@ impl Storage {
     }
 
     pub fn insert_history(&self, entry: NewHistoryEntry) -> Result<i64, CoreError> {
+        let finished_at = Utc::now();
         let snapshot = entry
             .result_json
             .as_ref()
             .map(history_snapshot)
             .transpose()?;
-        self.insert_history_snapshot(entry, snapshot)
+        self.insert_history_snapshot(entry, snapshot, finished_at)
     }
 
     /// Successful query history borrows the result instead of cloning it into
@@ -621,16 +624,18 @@ impl Storage {
         query: String,
         result: &QueryResult,
     ) -> Result<i64, CoreError> {
-        self.insert_transaction_query_history(connection_id, None, query, result)
+        self.insert_transaction_query_history(connection_id, None, None, query, result)
     }
 
     pub fn insert_transaction_query_history(
         &self,
         connection_id: Option<String>,
         transaction_id: Option<String>,
+        started_at: Option<DateTime<Utc>>,
         query: String,
         result: &QueryResult,
     ) -> Result<i64, CoreError> {
+        let finished_at = Utc::now();
         let mut remaining = RESULT_JSON_CAP_BYTES;
         let snapshot = if result
             .rows
@@ -645,6 +650,7 @@ impl Storage {
             NewHistoryEntry {
                 connection_id,
                 transaction_id,
+                started_at,
                 query,
                 duration_ms: result.duration_ms,
                 row_count: Some(result.row_count),
@@ -653,6 +659,7 @@ impl Storage {
                 result_json: None,
             },
             Some(snapshot),
+            finished_at,
         )
     }
 
@@ -660,6 +667,7 @@ impl Storage {
         &self,
         entry: NewHistoryEntry,
         snapshot: Option<HistorySnapshot>,
+        finished_at: DateTime<Utc>,
     ) -> Result<i64, CoreError> {
         let snapshot = snapshot
             .and_then(|snapshot| snapshot.json)
@@ -671,8 +679,8 @@ impl Storage {
         tx.execute(
             "INSERT INTO query_history (
                 connection_id, query_hash, duration_ms, row_count, result_hash, is_error,
-                error_message, result_metadata, executed_at, transaction_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                error_message, result_metadata, executed_at, transaction_id, started_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 entry.connection_id,
                 query_hash,
@@ -684,8 +692,9 @@ impl Storage {
                 snapshot
                     .as_ref()
                     .and_then(|snapshot| snapshot.metadata.as_ref()),
-                Utc::now().to_rfc3339(),
+                finished_at.to_rfc3339(),
                 entry.transaction_id,
+                entry.started_at.map(|start| start.to_rfc3339()),
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -790,6 +799,18 @@ impl Storage {
         };
 
         Ok(HistoryPage { entries, total })
+    }
+
+    pub fn history_entries(&self, ids: &[i64]) -> Result<Vec<HistoryEntry>, CoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(&format!("{} WHERE h.id = ?1", history_select()))?;
+        let mut entries = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(entry) = stmt.query_row([id], row_to_history).optional()? {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
     }
 
     pub fn history_stats(&self) -> Result<HistoryStats, CoreError> {
@@ -970,6 +991,7 @@ impl From<&ConnectionInput> for ConnectionFields {
 // SQLite record/page overhead. Actual history table/index pages come from dbstat.
 const HISTORY_EXECUTION_SIZE: &str = "24 + 1 + length(CAST(h.query_hash AS BLOB)) +
     COALESCE(length(CAST(h.result_hash AS BLOB)), 0) + length(CAST(h.executed_at AS BLOB)) +
+    COALESCE(length(CAST(h.started_at AS BLOB)), 0) +
     COALESCE(length(CAST(h.connection_id AS BLOB)), 0) + COALESCE(length(CAST(h.error_message AS BLOB)), 0) +
     COALESCE(length(CAST(h.result_metadata AS BLOB)), 0) + COALESCE(length(CAST(h.transaction_id AS BLOB)), 0)";
 
@@ -979,7 +1001,7 @@ fn history_select() -> String {
         q.byte_size, {HISTORY_EXECUTION_SIZE},
         (SELECT COUNT(*) FROM query_history WHERE query_hash = h.query_hash),
         (SELECT COUNT(*) FROM query_history WHERE result_hash = h.result_hash),
-        t.id, t.kind, t.status, (SELECT COUNT(*) FROM query_history WHERE transaction_id = t.id)
+        t.id, t.kind, t.status, (SELECT COUNT(*) FROM query_history WHERE transaction_id = t.id), h.started_at
         FROM query_history h JOIN history_queries q ON q.hash = h.query_hash
         LEFT JOIN history_results r ON r.hash = h.result_hash
         LEFT JOIN history_transactions t ON t.id = h.transaction_id")
@@ -1045,14 +1067,15 @@ fn migrate_history(conn: &mut Connection) -> Result<(), CoreError> {
         )?;
         tx.execute("INSERT INTO sqlite_sequence(name, seq) SELECT 'query_history', ?1 WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'query_history')", params![high_water])?;
     }
-    let has_transaction_id = tx
+    let history_columns = tx
         .prepare("PRAGMA table_info(query_history)")?
         .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?
-        .iter()
-        .any(|name| name == "transaction_id");
-    if !has_transaction_id {
+        .collect::<Result<Vec<_>, _>>()?;
+    if !history_columns.iter().any(|name| name == "transaction_id") {
         tx.execute_batch("ALTER TABLE query_history ADD COLUMN transaction_id TEXT;")?;
+    }
+    if !history_columns.iter().any(|name| name == "started_at") {
+        tx.execute_batch("ALTER TABLE query_history ADD COLUMN started_at TEXT;")?;
     }
     tx.execute_batch("CREATE TABLE IF NOT EXISTS history_transactions (id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_history_transaction ON query_history(transaction_id, id);")?;
@@ -1124,6 +1147,7 @@ fn row_to_history(row: &rusqlite::Row<'_>) -> Result<HistoryEntry, rusqlite::Err
         error_message: row.get(7)?,
         has_result: row.get::<_, i64>(8)? == 1,
         executed_at: row.get(9)?,
+        started_at: row.get(20)?,
         query_hash: row.get(10)?,
         result_hash: row.get(11)?,
         query_size: row.get(12)?,
@@ -1231,6 +1255,7 @@ mod tests {
         NewHistoryEntry {
             connection_id: Some("docker".into()),
             transaction_id: None,
+            started_at: None,
             query: query.into(),
             duration_ms: ms,
             row_count: Some(1),
@@ -1255,7 +1280,16 @@ mod tests {
             .result_hash
             .clone();
         // Recreate the exact pre-feature shape on a disposable test database.
-        storage.lock().unwrap().execute_batch("DROP INDEX idx_history_transaction; ALTER TABLE query_history DROP COLUMN transaction_id; DROP TABLE history_transactions;").unwrap();
+        storage
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "DROP INDEX idx_history_transaction;
+             ALTER TABLE query_history DROP COLUMN transaction_id;
+             ALTER TABLE query_history DROP COLUMN started_at;
+             DROP TABLE history_transactions;",
+            )
+            .unwrap();
         drop(storage);
         for _ in 0..2 {
             let reopened = Storage::open(&path).unwrap();
@@ -1264,6 +1298,7 @@ mod tests {
             assert_eq!(page.entries[0].id, id);
             assert_eq!(page.entries[0].result_hash, hash);
             assert!(page.entries[0].transaction.is_none());
+            assert!(page.entries[0].started_at.is_none());
             assert_eq!(reopened.history_result(id).unwrap(), result);
         }
     }
@@ -1576,6 +1611,7 @@ mod tests {
             .insert_history(NewHistoryEntry {
                 connection_id: None,
                 transaction_id: None,
+                started_at: None,
                 query: "select 1".to_string(),
                 duration_ms: 4,
                 row_count: Some(1),
@@ -1619,6 +1655,7 @@ mod tests {
             .insert_history(NewHistoryEntry {
                 connection_id: None,
                 transaction_id: None,
+                started_at: None,
                 query: "select body".into(),
                 duration_ms: 42,
                 row_count: Some(1),

@@ -79,6 +79,8 @@ Changing modes takes effect on the next transaction. For commands such as `VACUU
 
 You can also run `BEGIN`, `COMMIT`/`END` and `ROLLBACK` in the editor. The transaction banner shows elapsed time and offers **Commit** and **Rollback**. Results show whether writes have committed or are pending. History records statements as they finish, including transaction commands and reviewed edits. Entries from the same transaction can be expanded as a group. Groups opened by Smart commit use that label.
 
+The banner totals row inserts, updates and deletes reported by PostgreSQL and counts the tables involved. Totals refresh after each completed write and include operations undone by a savepoint rollback.
+
 Cancel sends PostgreSQL's cancellation signal. An unresponsive connection is closed rather than returned to the pool. If the app cannot confirm cancellation, it reports an unknown write/commit outcome; check the database before retrying that operation.
 
 ## Results and cell editing
@@ -132,6 +134,10 @@ Closing an editable tab saves it under **Tabs → Closed** without confirmation.
 ## History and local data
 
 History records individual completed statements and errors, including statements inside manual transactions and reviewed cell updates. Transaction groups can be expanded. **Open** displays the saved SQL and result/error without running it. Click the SQL preview to copy it; **Delete** removes the entry. **Open in new query tab** makes an editable copy.
+
+Use the copy menu in History or expand **Executed SQL** under a result to copy an execution log. It includes the timestamp, connection, SQL sent to PostgreSQL, row count or error, and duration. Copying a transaction includes its statements in execution order. Older entries show the saved completion time. New entries also record when the statement started.
+
+**Activity** in the workspace navigation shows the latest 50 SQL entries alongside recent clipboard writes, connection checks and schema loads. The newest entries appear at the bottom. Scroll up to review earlier entries and use the filter below the log to choose a category. Select and copy the text for one line per entry, or use **Copy log** to copy the visible activity. Use **Clear log** to start a fresh Activity view for all categories. Earlier SQL and saved results remain available in **History**. Select an entry’s category label for its actions. Clipboard entries record the operation and its outcome. Catabase keeps the most recent 200 app activity entries on this device.
 
 New entries show the SQL sent to PostgreSQL, including any automatic `LIMIT` and `OFFSET` clauses. Earlier entries keep the SQL recorded at the time.
 

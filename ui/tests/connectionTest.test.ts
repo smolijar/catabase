@@ -27,7 +27,7 @@ test('testing starts immediately, reports failure, and a retry clears the error 
   assert.deepEqual(tester.states.get('zenbase'), { status: 'testing' });
   first.reject(new Error('Connection refused'));
   await result;
-  assert.deepEqual(tester.states.get('zenbase'), { status: 'error', message: 'Connection refused', checkedAt: 12345 });
+  assert.deepEqual(tester.states.get('zenbase'), { status: 'error', origin: 'test', message: 'Connection refused', checkedAt: 12345 });
 
   const retry = deferred();
   const retried = tester.test('zenbase', () => retry.promise);
@@ -92,7 +92,7 @@ test('late results stay scoped to their connection rather than another visible t
   await b;
   first.reject(new Error('First connection failed'));
   await a;
-  assert.deepEqual(tester.states.get('first'), { status: 'error', message: 'First connection failed', checkedAt: 12345 });
+  assert.deepEqual(tester.states.get('first'), { status: 'error', origin: 'test', message: 'First connection failed', checkedAt: 12345 });
   assert.deepEqual(tester.states.get('second'), { status: 'success', checkedAt: 12345 });
 });
 
@@ -121,7 +121,7 @@ test('deleting a connection prevents its late success from restoring a health in
 test('synchronous probe failures also become retryable error states', async () => {
   const tester = harness();
   await tester.test('zenbase', () => { throw new Error('Connection test timed out.'); });
-  assert.deepEqual(tester.states.get('zenbase'), { status: 'error', message: 'Connection test timed out.', checkedAt: 12345 });
+  assert.deepEqual(tester.states.get('zenbase'), { status: 'error', origin: 'test', message: 'Connection test timed out.', checkedAt: 12345 });
   await tester.test('zenbase', () => Promise.resolve());
   assert.deepEqual(tester.states.get('zenbase'), { status: 'success', checkedAt: 12345 });
 });
@@ -129,7 +129,7 @@ test('synchronous probe failures also become retryable error states', async () =
 test('checks turn stale at one minute while testing/untested states stay distinct', () => {
   assert.equal(connectionHealth(null, 999999), 'unknown');
   assert.equal(connectionHealth({ status: 'testing' }, 999999), 'testing');
-  for (const state of [{ status: 'success', checkedAt: 1000 }, { status: 'error', message: 'offline', checkedAt: 1000 }] as const) {
+  for (const state of [{ status: 'success', checkedAt: 1000 }, { status: 'error', origin: 'test', message: 'offline', checkedAt: 1000 }] as const) {
     assert.equal(connectionHealth(state, 60999), state.status);
     assert.equal(connectionHealth(state, 61000), 'stale');
   }
@@ -158,10 +158,10 @@ test('SQL errors and cancellations keep health green; transport/authentication f
     await assert.rejects(tester.query('zenbase', async () => { throw error; }));
     assert.equal(tester.states.get('zenbase')?.status, 'success');
   }
-  for (const error of [{ code: '08006', severity: 'ERROR', message: 'Disconnected' }, { code: '28P01', severity: 'FATAL', message: 'Bad password' }, new Error('Connection refused')]) {
+  for (const error of [{ code: '08006', severity: 'ERROR', message: 'Disconnected' }, { code: '28P01', severity: 'FATAL', message: 'Bad password' }, { connectionFailure: 'connect', message: 'Timeout opening database session' }, { connectionFailure: 'closed', message: 'Socket ended' }, new Error('Connection refused')]) {
     assert.equal(queryReachedServer(error), false);
     await assert.rejects(tester.query('zenbase', async () => { throw error; }));
-    assert.equal(tester.states.get('zenbase')?.status, 'error');
+    assert.deepEqual(tester.states.get('zenbase'), { status: 'error', origin: 'query', message: error.message, checkedAt: 12345 });
   }
 });
 
@@ -181,10 +181,16 @@ test('a newer query supersedes a pending check; deletion invalidates pending que
   assert.equal(tester.states.get('zenbase'), null);
 });
 
-test('local Explain validation and pre-server cancellation preserve settled health and its age', async () => {
+test('local validation, including a repeated BEGIN, preserves settled health and its age', async () => {
   let now = 1000;
   const tester = harness(() => now);
-  for (const error of [{ code: 'CATABASE_EXPLAIN_INPUT', message: 'Invalid preamble' }, { code: '57014', severity: null, message: 'Cancelled' }, { code: '57014', message: 'Cancelled' }]) {
+  for (const error of [
+    { message: 'Transaction already active', severity: null, code: null, connectionFailure: null },
+    { message: 'The saved connection \"connection refused\" is unavailable.', connectionFailure: null },
+    { code: 'CATABASE_EXPLAIN_INPUT', message: 'Invalid preamble' },
+    { code: '57014', severity: null, message: 'Cancelled' },
+    { code: '57014', message: 'Cancelled' }
+  ]) {
     await assert.rejects(tester.query('unknown', async () => { throw error; }));
     assert.equal(tester.states.get('unknown'), null);
     now = 1000;
@@ -195,8 +201,16 @@ test('local Explain validation and pre-server cancellation preserve settled heal
     assert.deepEqual(tester.states.get('healthy'), { status: 'success', checkedAt: 1000 });
     assert.equal(connectionHealth(tester.states.get('healthy')!, now), 'stale');
     await assert.rejects(tester.query('offline', async () => { throw error; }));
-    assert.deepEqual(tester.states.get('offline'), { status: 'error', message: 'Connection refused', checkedAt: 1000 });
+    assert.deepEqual(tester.states.get('offline'), { status: 'error', origin: 'test', message: 'Connection refused', checkedAt: 1000 });
   }
+});
+
+test('a PostgreSQL error can mention a failed connection and still prove this session responded', async () => {
+  const error = { code: 'P0001', severity: 'ERROR', message: 'connection refused by a downstream service' };
+  const tester = harness();
+  assert.equal(queryLostConnection(error), false);
+  await assert.rejects(tester.query('zenbase', async () => { throw error; }));
+  assert.deepEqual(tester.states.get('zenbase'), { status: 'success', checkedAt: 12345 });
 });
 
 test('neutral query errors never restore a superseded running or testing state', async () => {

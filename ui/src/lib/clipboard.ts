@@ -1,4 +1,5 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { startActivity } from './activity';
 
 export async function readClipboardText(): Promise<string> {
   try {
@@ -11,11 +12,21 @@ export async function readClipboardText(): Promise<string> {
   }
 }
 
-export async function copyText(text: string): Promise<void> {
+export async function copyText(content: string | (() => string), title = 'Copy to clipboard', subject?: string): Promise<void> {
+  const finish = startActivity('clipboard', title, subject);
+  let attempt = 'Prepare clipboard text';
   try {
-    await invoke<void>('clipboard_write_text', { text });
+    const text = typeof content === 'function' ? content() : content;
+    attempt = 'Write to clipboard';
+    try {
+      await invoke<void>('clipboard_write_text', { text });
+    } catch (error) {
+      if (isTauri()) throw error;
+      await navigator.clipboard.writeText(text);
+    }
+    finish('completed');
   } catch (error) {
-    if (isTauri()) throw error;
-    await navigator.clipboard.writeText(text);
+    finish('failed', attempt);
+    throw error;
   }
 }

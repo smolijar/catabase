@@ -2,6 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { formatRunningDuration } from '../src/lib/status.ts';
 
+test('operation progress changes only when a whole second has elapsed', () => {
+  const startedAt = 10_000;
+  assert.deepEqual([10_000, 10_999, 11_000, 11_999, 12_000].map((now) => (
+    formatRunningDuration(startedAt, now, 'seconds')
+  )), ['0s', '0s', '1s', '1s', '2s']);
+});
+
 test('running duration advances from the operation start as clock ticks arrive', () => {
   const startedAt = 10_000;
   assert.deepEqual([10_000, 10_100, 11_200, 75_400].map((now) => formatRunningDuration(startedAt, now)), ['0.0s', '0.1s', '1.2s', '65.4s']);

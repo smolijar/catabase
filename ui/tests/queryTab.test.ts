@@ -35,11 +35,16 @@ test('tabs expose context actions without adding another visible menu button', (
   assert.doesNotMatch(html, /dropdown-trigger/);
 });
 
-test('running tabs cannot be closed and keep their progress indicator', () => {
+test('running tabs cannot be closed and show their activity dot alongside staged edits', () => {
   const html = renderTab({ running: true, closeDisabled: true, pending: true });
   assert.match(html, /aria-label="Close My query" disabled/);
-  assert.match(html, /spinner/);
+  assert.match(html, /class="operation-dot" role="img" aria-label="Operation running"/);
   assert.match(html, /Staged edits/);
+});
+
+test('tabs can show a steady failure indicator for a query that finished in the background', () => {
+  assert.match(renderTab({ failed: true }), /class="tab-error" role="img" aria-label="Query failed"/);
+  assert.doesNotMatch(renderTab(), /tab-error/);
 });
 
 test('rename is still an input without a confirm button; reference tabs keep their read-only label', () => {

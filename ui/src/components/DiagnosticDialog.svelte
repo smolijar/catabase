@@ -20,14 +20,14 @@
   $: draft = issueDraft(title, fullBody);
 
   async function copy() {
-    try { await copyText(copyableReport(title, fullBody)); status = 'Report copied.'; failed = false; }
+    try { await copyText(() => copyableReport(title, fullBody), 'Copy diagnostic report'); status = 'Report copied.'; failed = false; }
     catch (error) { status = `Could not copy. Select the report text to copy it manually. ${errorMessage(error)}`; failed = true; }
   }
 
   async function openIssue() {
     busy = true;
     try {
-      if (draft.copyRequired) await copyText(copyableReport(title, fullBody));
+      if (draft.copyRequired) await copyText(() => copyableReport(title, fullBody), 'Copy diagnostic report');
       await api.openDiagnosticIssue(draft.title, draft.body);
       status = draft.copyRequired ? 'GitHub opened. Paste the copied report, then review and submit.' : 'GitHub opened. Review the draft there before submitting.';
       failed = false;

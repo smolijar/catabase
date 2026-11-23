@@ -38,7 +38,7 @@ test('failed history opens exact SQL and its saved error in a read-only tab with
   assert.deepEqual(tab.historyContext, {
     execution: { sql: failedHistory.query, start: 0, end: failedHistory.query.length },
     connectionId: 'docker', connectionName: 'zenbase docker',
-    executedAt: failedHistory.executedAt, durationMs: 12, snapshot: true
+    executedAt: failedHistory.executedAt, historyEntryIds: [failedHistory.id], durationMs: 12, snapshot: true
   });
   assert.deepEqual(tab.pendingChanges, []);
   assert.equal(tab.editMode, false);

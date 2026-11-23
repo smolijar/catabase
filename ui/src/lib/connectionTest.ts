@@ -1,8 +1,10 @@
+import type { AppError } from './types';
+
 export type ConnectionTestState =
   | { status: 'testing' }
   | { status: 'running' }
   | { status: 'success'; checkedAt: number }
-  | { status: 'error'; message: string; checkedAt: number };
+  | { status: 'error'; origin: 'test' | 'query'; message: string; checkedAt: number };
 
 export function connectionHealth(state: ConnectionTestState | null, now = Date.now()) {
   if (!state) return 'unknown';
@@ -19,9 +21,12 @@ export function queryReachedServer(error: unknown): boolean {
 }
 
 export function queryLostConnection(error: unknown): boolean {
-  const { code, severity, message } = (error ?? {}) as { code?: string; severity?: string; message?: string };
-  return Boolean(code?.startsWith('08') || severity === 'FATAL'
-    || /error connecting to server|error communicating with the server|connection (?:refused|closed|reset|timed out)|authentication failed|server closed|broken pipe|network is unreachable|tls handshake|ssl connection/i.test(message ?? ''));
+  const { code, severity, message, connectionFailure } = (error ?? {}) as Partial<AppError>;
+  if (connectionFailure || code?.startsWith('08') || severity === 'FATAL' || severity === 'PANIC') return true;
+  // Server and local validation messages can contain arbitrary SQL or names.
+  // The fallback only recognizes transport errors without structured diagnostics.
+  return connectionFailure === undefined && !code && !severity
+    && /error connecting to server|error communicating with the server|connection (?:refused|closed|reset|timed out)|authentication failed|server closed|broken pipe|network is unreachable|tls handshake|ssl connection/i.test(message ?? '');
 }
 
 // Tests belong to saved connections, not whichever tab happens to be visible
@@ -56,7 +61,7 @@ export function createConnectionTester(
       },
       (error) => {
         if (requests.get(id) !== request) return;
-        setStatus(id, { status: 'error', message: describeError(error), checkedAt: clock() });
+        setStatus(id, { status: 'error', origin: 'test', message: describeError(error), checkedAt: clock() });
         onConnectionLost?.(id);
       }
     ).finally(() => {
@@ -82,14 +87,15 @@ export function createConnectionTester(
       return result;
     } catch (error) {
       if (requests.get(id) === request) {
-        const { code, severity } = (error ?? {}) as { code?: string; severity?: string | null };
-        // Local validation and cancellation before reaching PostgreSQL tell us
-        // nothing new about connectivity; preserve the last settled check age.
-        const neutral = code === 'CATABASE_EXPLAIN_INPUT' || (code === '57014' && severity == null);
-        setStatus(id, neutral ? settledStates.get(id) ?? null : queryReachedServer(error)
-          ? { status: 'success', checkedAt: clock() }
-          : { status: 'error', message: describeError(error), checkedAt: clock() });
-        if (!neutral && queryLostConnection(error)) onConnectionLost?.(id);
+        if (queryLostConnection(error)) {
+          setStatus(id, { status: 'error', origin: 'query', message: describeError(error), checkedAt: clock() });
+          onConnectionLost?.(id);
+        } else if (queryReachedServer(error)) {
+          setStatus(id, { status: 'success', checkedAt: clock() });
+        } else {
+          // Local errors leave both the last settled check and its age intact.
+          setStatus(id, settledStates.get(id) ?? null);
+        }
       }
       throw error;
     } finally {

@@ -13,6 +13,7 @@ pub mod sql;
 mod sql_safety;
 pub mod storage;
 pub mod supermaven;
+mod transaction_activity;
 
 pub use cancellation::QueryCancellation;
 mod connection_options;
@@ -44,3 +45,4 @@ pub use storage::{
     HistoryStorageStats, NewHistoryEntry, Settings, Storage,
 };
 pub use supermaven::{SupermavenClient, SupermavenCompletion, SupermavenRequest, SupermavenStatus};
+pub use transaction_activity::{TransactionActivity, TransactionActivityTracker};

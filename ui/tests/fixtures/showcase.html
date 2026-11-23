@@ -25,7 +25,11 @@
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_event, id) => listeners.delete(id) };
       const transactionDemo = new URLSearchParams(location.search).get('transaction');
       let commitMode = localStorage.getItem('catabase.demo.commitMode') ?? 'smart';
-      let transaction = { active: transactionDemo === 'auto', automatic: transactionDemo === 'auto', startedAt: transactionDemo === 'auto' ? new Date(Date.now() - 15000).toISOString() : null };
+      let transaction = {
+        active: transactionDemo === 'auto', automatic: transactionDemo === 'auto',
+        startedAt: transactionDemo === 'auto' ? new Date(Date.now() - 15000).toISOString() : null,
+        rowActivity: transactionDemo === 'auto' ? { inserted: 3, updated: 2, deleted: 1, tables: 2 } : null
+      };
       const sql = `select
     id, title, price,
     in_stock, published_on
