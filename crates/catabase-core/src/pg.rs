@@ -910,7 +910,7 @@ fn make_tls_connector() -> MakeRustlsConnect {
     MakeRustlsConnect::new(tls_config)
 }
 
-fn row_to_json(row: &Row) -> Value {
+pub(crate) fn row_to_json(row: &Row) -> Value {
     let mut object = serde_json::Map::new();
     for (index, column) in row.columns().iter().enumerate() {
         object.insert(

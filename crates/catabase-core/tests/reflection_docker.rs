@@ -53,6 +53,7 @@ async fn statement_history_records_manual_transactions_reviewed_edits_and_atomic
     let update = RowUpdate {
         schema: fixture.columns[0].table_schema.clone().unwrap(), table: "catabase_history_probe".into(), key_columns: vec!["id".into()],
         overwrite_changed_cells: false,
+        default_columns: Vec::new(),
         values: json!({"note":"quoted ' \\ $1 value", "tags": ["x,y", "NULL", null], "payload": {"test":"$2'\\"}}).as_object().unwrap().clone(),
         original: fixture.rows[0].as_object().unwrap().clone(),
     };
@@ -664,6 +665,7 @@ async fn arrays_decode_and_edit_losslessly_on_docker() -> Result<(), Box<dyn Err
     let mut update = RowUpdate {
         schema, table: "catabase_array_probe".into(), key_columns: vec!["id".into()],
         overwrite_changed_cells: false,
+        default_columns: Vec::new(),
         values: json!({"tags": r#"[-1:1]={"NULL",NULL,"a,b"}"#, "amounts": r#"{"9007199254740993","0.123456789012345678901"}"#}).as_object().unwrap().clone(),
         original: fixture.rows[0].as_object().unwrap().clone(),
     };
@@ -1167,6 +1169,7 @@ async fn reflected_queries_have_no_metadata_round_trips_and_writes_still_revalid
         table: "catabase_reflection_probe".into(),
         key_columns: vec!["tenant".into(), "id".into()],
         overwrite_changed_cells: false,
+        default_columns: Vec::new(),
         values: json!({"label":"must not write"})
             .as_object()
             .unwrap()

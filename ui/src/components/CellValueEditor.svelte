@@ -6,30 +6,34 @@
   export let column: ColumnMeta;
   export let draft = '';
   export let isNull = false;
+  export let useDefault = false;
   export let pickerOnly = false;
   export let disabled = false;
   export let error = '';
-  export let onChange: () => void = () => {};
-  export let onStage: () => void = () => {};
+  export let onChange: (value: string) => void = () => {};
+  export let onEditValue: () => void = () => {};
   $: kind = cellKind(column);
+  $: valueLabel = useDefault ? 'DEFAULT' : isNull ? 'NULL' : draft || 'empty string';
 </script>
 
 {#if pickerOnly}
-  <div class="picked-row"><span class="value-mode">Value</span><output class="picked-value" class:null-value={isNull} aria-label={isNull ? `Selected SQL NULL for ${column.name}` : `Selected value for ${column.name}`} title={isNull ? 'SQL NULL' : draft}>{isNull ? 'NULL' : draft || 'empty string'}</output></div>
-{:else if isNull}
+  <div class="picked-row"><span class="value-mode">Value</span><output class="picked-value" class:null-value={isNull || useDefault} aria-label={isNull ? `Selected SQL NULL for ${column.name}` : `Selected value for ${column.name}`} title={valueLabel}>{valueLabel}</output></div>
+{:else if isNull || useDefault}
   <div class="value-mode">Value</div>
-  <div class="null-preview">NULL <span>No value will be stored.</span><button type="button" {disabled} on:click={() => { isNull = false; onChange(); }}>Edit value</button></div>
+  <div class="null-preview">{valueLabel} <span>{useDefault ? 'PostgreSQL evaluates the default when you apply the edit.' : 'No value will be stored.'}</span><button type="button" {disabled} on:click={onEditValue}>Edit value</button></div>
 {:else if kind === 'boolean'}
   <div class="value-mode">Value</div>
   <div class="boolean-options" role="group" aria-label="Boolean value">
-    <label class:chosen={draft === 'true'}><input type="radio" bind:group={draft} value="true" {disabled} on:change={onChange} /> true</label>
-    <label class:chosen={draft === 'false'}><input type="radio" bind:group={draft} value="false" {disabled} on:change={onChange} /> false</label>
+    <label class:chosen={draft === 'true'}><input type="radio" name="cell-boolean" checked={draft === 'true'} {disabled} on:change={() => onChange('true')} /> true</label>
+    <label class:chosen={draft === 'false'}><input type="radio" name="cell-boolean" checked={draft === 'false'} {disabled} on:change={() => onChange('false')} /> false</label>
   </div>
 {:else}
   <div class="value-mode">Value</div>
-  <textarea {...literalTextAttributes} aria-label={`New value for ${column.name}`} aria-invalid={Boolean(error)} placeholder={kind === 'array' ? '{"one","two",NULL}' : undefined} bind:value={draft} {disabled} inputmode={kind === 'integer' || kind === 'numeric' ? 'decimal' : 'text'} on:input={onChange} on:keydown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); onStage(); } }}></textarea>
+  <textarea {...literalTextAttributes} aria-label={`New value for ${column.name}`} aria-invalid={Boolean(error)} placeholder={kind === 'array' ? '{"one","two",NULL}' : undefined} value={draft} {disabled} inputmode={kind === 'integer' || kind === 'numeric' ? 'decimal' : 'text'}
+    on:input={(event) => { if (!(event instanceof InputEvent && event.isComposing)) onChange(event.currentTarget.value); }}
+    on:compositionend={(event) => onChange(event.currentTarget.value)}></textarea>
 {/if}
-{#if !pickerOnly && !disabled}<p class="edit-hint">{kind === 'array' ? 'PostgreSQL array: {"one","two",NULL}. {} is empty; NULL is a null element; "NULL" is text. Use Set NULL for a SQL NULL array. Dimensions and numeric precision are preserved.' : kind === 'text' ? 'An empty value is an empty string. Use Set NULL to remove the value.' : kind === 'json' ? 'JSON is validated before staging. JSON null and SQL NULL are distinct.' : kind === 'numeric' || kind === 'integer' ? 'Numbers retain their full precision.' : 'Choose a value, then stage the change.'}</p>{/if}
+{#if !pickerOnly && !disabled && kind !== 'boolean'}<p class="edit-hint">{kind === 'array' ? 'PostgreSQL array: {"one","two",NULL}. {} is empty; NULL is a null element; "NULL" is text. Use Set NULL for a SQL NULL array. Dimensions and numeric precision are preserved.' : kind === 'text' ? 'An empty value is an empty string. Use Set NULL to remove the value.' : kind === 'json' ? 'JSON is validated before staging. JSON null and SQL NULL are distinct.' : 'Numbers retain their full precision.'}</p>{/if}
 
 <style>
   .value-mode { flex-shrink: 0; margin-bottom: 5px; font-size: 11px; color: var(--ink-muted); }

@@ -1,6 +1,7 @@
 import type { ColumnMeta, QueryResult, RowKey, RowUpdate } from './types';
-import type { PendingChange } from './workspace';
+import type { CellEdit, PendingChange } from './workspace';
 import { arrayElementType, parsePgArray } from './pgArray.ts';
+import { sameCellValue } from './resultsGrid.ts';
 
 export interface EditTarget {
   schema: string;
@@ -70,17 +71,44 @@ export function originalEditColumns(target: EditTarget, changes: PendingChange[]
 }
 
 export function buildRowUpdates(target: EditTarget, originalRows: Record<string, unknown>[], changes: PendingChange[], checkOriginalValues = true): RowUpdate[] {
+  const sourceNames = new Map(target.editableColumns.map(column => [column.name, column.sourceName!]));
   return [...new Set(changes.map((change) => change.rowIndex))].map((rowIndex) => {
     const rowChanges = changes.filter((change) => change.rowIndex === rowIndex);
     const guardedColumns = originalEditColumns(target, rowChanges);
     const originalColumns = checkOriginalValues ? guardedColumns : target.keyColumns;
+    const defaultColumns = rowChanges.filter(change => change.useDefault).map(change => sourceNames.get(change.column)!);
     return {
       schema: target.schema,
       table: target.table,
       keyColumns: target.key.columns,
       ...(checkOriginalValues ? {} : { overwriteChangedCells: true }),
-      values: Object.fromEntries(rowChanges.map((change) => [target.editableColumns.find((column) => column.name === change.column)!.sourceName!, change.newValue])),
+      values: Object.fromEntries(rowChanges.filter(change => !change.useDefault).map(change => [sourceNames.get(change.column)!, change.newValue])),
+      ...(defaultColumns.length ? { defaultColumns } : {}),
       original: Object.fromEntries(originalColumns.map((column) => [column.sourceName!, originalRows[rowIndex][column.name]]))
     };
   });
+}
+
+export function stageCellEdits(
+  result: QueryResult,
+  originalRow: Record<string, unknown>,
+  pending: PendingChange[],
+  rowIndex: number,
+  edits: Record<string, CellEdit>
+) {
+  const row = { ...result.rows[rowIndex] };
+  const changes = pending.filter(change => change.rowIndex !== rowIndex || !Object.hasOwn(edits, change.column));
+  for (const [column, edit] of Object.entries(edits)) {
+    const oldValue = originalRow[column];
+    if ('action' in edit) {
+      row[column] = oldValue;
+      if (edit.action === 'default') changes.push({ rowIndex, column, oldValue, newValue: oldValue, useDefault: true });
+    } else {
+      const meta = result.columns.find(item => item.name === column)!;
+      const unchanged = sameCellValue(oldValue, edit.value, meta, result.jsonValuesAsText, true);
+      row[column] = unchanged ? oldValue : edit.value;
+      if (!unchanged) changes.push({ rowIndex, column, oldValue, newValue: edit.value });
+    }
+  }
+  return { row, changes };
 }

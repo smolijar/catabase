@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cellDisplayType, cellText, columnHeaderInfo, parseCellDraft, positionAfterReorder, prettyCell, sameCellValue, selectionText, sortedRows, visibleRowWindow } from '../src/lib/resultsGrid.ts';
+import { cellDisplayType, cellText, columnHeaderInfo, parseCellDraft, positionAfterReorder, prettyCell, sameCellValue, selectedResult, selectionText, sortedRows, visibleRowWindow } from '../src/lib/resultsGrid.ts';
 import type { ColumnMeta, QueryResult, SchemaItem } from '../src/lib/types.ts';
 
 const column = (typeName = 'text', more: Partial<ColumnMeta> = {}): ColumnMeta => ({ name: 'value', typeName, typeOid: 0, nullable: true, generated: false, primaryKey: false, ...more });
@@ -92,6 +92,17 @@ test('selection follows the same original row after a staged edit changes its so
   assert.deepEqual(positionAfterReorder(before, after, { row: 0, column: 2 }), { row: 2, column: 2 });
   assert.deepEqual(positionAfterReorder(before, after, { row: 2, column: 1 }), { row: 1, column: 1 });
   assert.equal(positionAfterReorder(before, [], { row: 0, column: 0 }), null);
+});
+
+test('exporting a selection keeps its column bounds and on-screen row order', () => {
+  const data = result(['30', '20', '10'], 'int8');
+  data.columns.push(column('text', { name: 'label' }));
+  data.rows = data.rows.map((row, index) => ({ ...row, label: ['third', 'second', 'first'][index] }));
+  const ordered = sortedRows(data, { column: 'value', direction: 'asc' });
+  const selection = selectedResult(data, ordered, { row: 1, column: 1 }, { row: 0, column: 1 });
+  assert.deepEqual(selection.columns.map(column => column.name), ['label']);
+  assert.deepEqual(selection.rows, [{ label: 'first' }, { label: 'second' }]);
+  assert.equal(selection.rowCount, 2);
 });
 
 test('typed drafts distinguish empty text, SQL NULL, JSON null and preserve precision', () => {

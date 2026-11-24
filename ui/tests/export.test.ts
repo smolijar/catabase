@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { serializeRows } from '../src/lib/export.ts';
+import { createExportEncoder, exportQueryPages, serializeRows } from '../src/lib/export.ts';
 import type { ColumnMeta, QueryResult } from '../src/lib/types.ts';
 
 function result(types: Record<string, string>, rows: Record<string, unknown>[]): QueryResult {
@@ -54,4 +54,45 @@ test('legacy history JSON string scalars remain strings even when they look like
   assert.deepEqual(JSON.parse(serializeRows(data, 'json')), data.rows);
   data.jsonValuesAsText = false;
   assert.deepEqual(JSON.parse(serializeRows(data, 'json')), data.rows);
+});
+
+test('encoding batches produces one document with one header and preserves empty CSV rows', () => {
+  const sample = result({ note: 'text' }, [{ note: 'first\nline' }, { note: '' }, { note: 'third' }]);
+  for (const format of ['csv', 'tsv', 'json'] as const) {
+    const encoder = createExportEncoder(format);
+    const chunks = sample.rows.map(row => encoder.append({ ...sample, rows: [row] }));
+    chunks.push(encoder.finish());
+    assert.equal(chunks.join(''), serializeRows(sample, format));
+  }
+  assert.equal(serializeRows(sample, 'csv'), 'note\n"first\nline"\n\nthird');
+});
+
+test('paged export waits for each batch, reports offsets, and shrinks the last request to the row limit', async () => {
+  const data = result({ id: 'int4' }, Array.from({ length: 12 }, (_, index) => ({ id: index })));
+  const calls: string[] = [];
+  const progress: Array<{ rows: number; queries: number }> = [];
+  const collected = await exportQueryPages(data, { batchSize: 5, rowLimit: 7 }, new AbortController().signal,
+    async (offset, batchSize) => {
+      calls.push(`fetch ${offset}:${batchSize}`);
+      return { ...data, autoLimited: true, hasMore: offset + batchSize < data.rows.length, rows: data.rows.slice(offset, offset + batchSize) };
+    },
+    async (page) => { calls.push(`write ${page.rows.length}`); },
+    (step) => { if (!step.currentPage) progress.push(step); });
+  assert.deepEqual(calls, ['fetch 0:5', 'write 5', 'fetch 5:2', 'write 2']);
+  assert.deepEqual(progress.map(({ rows, queries }) => [rows, queries]), [[5, 1], [7, 2]]);
+  assert.deepEqual(collected, { rows: 7, capped: true });
+});
+
+test('paged export stops at the end and discards a page that resolves after cancellation', async () => {
+  const data = { ...result({ id: 'int4' }, [{ id: 1 }]), autoLimited: true };
+  let writes = 0;
+  const write = async () => { writes++; };
+  const abort = new AbortController();
+  const options = { batchSize: 5, rowLimit: 10 };
+  assert.deepEqual(await exportQueryPages(data, options, abort.signal, async () => data, write, () => {}), { rows: 1, capped: false });
+  await assert.rejects(exportQueryPages(data, options, abort.signal, async () => {
+    abort.abort();
+    return data;
+  }, write, () => {}), { name: 'AbortError' });
+  assert.equal(writes, 1);
 });

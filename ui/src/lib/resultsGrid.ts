@@ -40,7 +40,6 @@ export function columnHeaderInfo(column: ColumnMeta, schemaItems: SchemaItem[] =
   for (const key of keys.filter((key) => !key.primaryKey)) details.push(`Unique (${key.columns.join(', ')})`);
   for (const key of foreignKeys) details.push(`Foreign key (${key.columns.join(', ')}) → ${key.referencedSchema}.${key.referencedTable} (${key.referencedColumns.join(', ')})`);
   if (column.generated || (source && source.generated)) details.push('Generated — read-only');
-  details.push('Sort loaded rows: ascending → descending → original order');
   return { primaryKey, foreignKey: foreignKeys.length > 0, tooltip: [...new Set(details)].join('\n') };
 }
 
@@ -186,6 +185,16 @@ export function selectionBounds(anchor: CellPosition, focus: CellPosition) {
     firstRow: Math.min(anchor.row, focus.row), lastRow: Math.max(anchor.row, focus.row),
     firstColumn: Math.min(anchor.column, focus.column), lastColumn: Math.max(anchor.column, focus.column)
   };
+}
+
+export function selectedResult(
+  result: QueryResult, rows: IndexedRow[], anchor: CellPosition, focus: CellPosition
+): QueryResult {
+  const bounds = selectionBounds(anchor, focus);
+  const columns = result.columns.slice(bounds.firstColumn, bounds.lastColumn + 1);
+  const selectedRows = rows.slice(bounds.firstRow, bounds.lastRow + 1).map(({ row }) =>
+    Object.fromEntries(columns.map(column => [column.name, row[column.name]])));
+  return { ...result, columns, rows: selectedRows, rowCount: selectedRows.length, hasMore: false };
 }
 
 export function selectionText(rows: IndexedRow[], columns: ColumnMeta[], anchor: CellPosition, focus: CellPosition, jsonValuesAsText = false): string {

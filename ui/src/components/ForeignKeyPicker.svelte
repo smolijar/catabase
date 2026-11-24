@@ -71,9 +71,9 @@
             <ForeignKeyOption {row} keyColumns={target.key.referencedColumns} previewColumns={validData.previewColumns} selected={isSelected(row, selectedRow, target.key.referencedColumns)} {disabled} onPick={() => onPick(target, row)} />
           {/each}
         </div>
-        <p class="fk-status" role="status" title={`Choose a row, then stage the change.${validData.hasMore ? ' First 50 matches; search to narrow the list.' : ''}${target.mappings.length > 1 ? ' All foreign-key components will be staged together.' : ''}`}>{!validData.rows.length ? 'No matching referenced rows.' : `${validData.rows.length}${validData.hasMore ? '+' : ''} ${validData.rows.length === 1 && !validData.hasMore ? 'match' : 'matches'} · committed rows`}</p>
+        <p class="fk-status" role="status" title={`Choose a row to stage the change.${validData.hasMore ? ' Showing the first 50 matches. Search to narrow the list.' : ''}${target.mappings.length > 1 ? ' All foreign-key components will be staged together.' : ''}`}>{!validData.rows.length ? 'No matching referenced rows.' : `${validData.rows.length}${validData.hasMore ? '+' : ''} ${validData.rows.length === 1 && !validData.hasMore ? 'match' : 'matches'} · committed rows`}</p>
       {/if}
-      {#if !validData}<p class="fk-note" title={target.mappings.length > 1 ? 'All foreign-key components will be staged together.' : undefined}>Committed rows · choose, then stage.{target.mappings.length > 1 ? ' Composite key.' : ''}</p>{/if}
+      {#if !validData}<p class="fk-note" title={target.mappings.length > 1 ? 'All foreign-key components will be staged together.' : undefined}>Choose a committed row to stage the change.</p>{/if}
     {/if}
   {/if}
 </section>

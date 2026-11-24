@@ -2,6 +2,7 @@
   type IconName =
     | 'check'
     | 'chevron'
+    | 'chevron-down'
     | 'clear'
     | 'close'
     | 'copy'
@@ -111,6 +112,8 @@
     <path d="M12 3v12M7 10l5 5 5-5M5 21h14" />
   {:else if name === 'chevron'}
     <path d="m9 6 6 6-6 6" />
+  {:else if name === 'chevron-down'}
+    <path d="m6 9 6 6 6-6" />
   {:else if name === 'sparkles'}
     <path d="m12 3 1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2L12 3ZM19 14l.7 2.3L22 17l-2.3.7L19 20l-.7-2.3L16 17l2.3-.7L19 14ZM5 13l.8 2.2L8 16l-2.2.8L5 19l-.8-2.2L2 16l2.2-.8L5 13Z" />
   {:else if name === 'close'}

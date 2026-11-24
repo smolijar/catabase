@@ -223,6 +223,7 @@ async fn reviewed_edits_use_savepoints_inside_automatic_transaction_until_commit
         table: FIXTURE.into(),
         key_columns: vec!["id".into()],
         overwrite_changed_cells: false,
+        default_columns: Vec::new(),
         original: original.rows[0].as_object().unwrap().clone(),
         values: json!({"note": "reviewed"}).as_object().unwrap().clone(),
     };

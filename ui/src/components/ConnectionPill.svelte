@@ -38,9 +38,10 @@
     : `Test ${connection.name}. Click to check the connection.`;
 </script>
 
-<div class="connection-control" class:split={switcher} class:compact>
+<div class="connection-control" class:split-button={switcher} class:compact>
 <button
   class="chip connection-chip"
+  class:split-button-main={switcher}
   class:connected={!disconnected && health === 'success' && !running}
   class:compact
   class:stale={stale && !running}
@@ -60,22 +61,19 @@
   {#if switcher && environment && !disconnected}<span class="environment">{environment}</span>{/if}
   {#if !running && (testing || stale || (!compact && showTestError))}<span class="connection-message" role="status">{message}</span>{/if}
 </button>
-{#if switcher}<button class="switch-arrow" aria-label={connectionLocked ? lockReason : 'Switch connection'} aria-haspopup="dialog" title={connectionLocked ? lockReason : 'Switch or disconnect connection'} disabled={disabled || running || connectionLocked} on:click={onChoose}><span class:chevron={!connectionLocked}><Icon name={connectionLocked ? 'lock' : 'chevron'} size={12} /></span></button>{/if}
+{#if switcher}<button class="switch-arrow split-button-secondary" aria-label={connectionLocked ? lockReason : 'Switch connection'} aria-haspopup="dialog" title={connectionLocked ? lockReason : 'Switch or disconnect connection'} disabled={disabled || running || connectionLocked} on:click={onChoose}><Icon name={connectionLocked ? 'lock' : 'chevron-down'} size={12} /></button>{/if}
 </div>
 
 <style>
   .connection-control { display: inline-flex; flex: 0 1 auto; min-width: 0; max-width: min(560px, 42vw); }
   .connection-control.compact { max-width: min(260px, 23vw); }
   .connection-chip { flex: 0 1 auto; min-width: 0; max-width: 100%; background: var(--surface-1); }
-  .split .connection-chip { border-radius: 4px 0 0 4px; border-right: 0; }
-  .switch-arrow { flex-shrink: 0; width: 28px; padding: 0; border-radius: 0 4px 4px 0; background: var(--surface-1); }
   .connection-chip.compact { max-width: min(260px, 23vw); min-height: 22px; padding: 2px 4px; border-color: transparent; border-radius: 0; background: transparent; font-size: inherit; box-shadow: none; }
   .compact .connection-message { font-size: inherit; }
   .connection-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .connection-message { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
   .connection-user { color: var(--ink-muted); font: 11px var(--font-mono); max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
   .environment { color: var(--accent); background: var(--accent-soft); border-radius: 2px; padding: 0 4px; font: 11px/16px var(--font-mono); text-transform: uppercase; }
-  .chevron { transform: rotate(90deg); color: var(--ink-faint); }
   .connection-name:has(+ .connection-message) { max-width: 200px; }
   .status-dot { flex-shrink: 0; }
   .connection-chip.connected { color: var(--ink); }

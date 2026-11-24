@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assessRowEditing, buildRowUpdates, originalEditColumns } from '../src/lib/rowEditing.ts';
+import { assessRowEditing, buildRowUpdates, originalEditColumns, stageCellEdits } from '../src/lib/rowEditing.ts';
 import type { ColumnMeta, QueryResult, RowKey } from '../src/lib/types.ts';
 
 const column = (name: string, more: Partial<ColumnMeta> = {}): ColumnMeta => ({ name, sourceName: name, tableSchema: 'public', tableName: 'items', typeName: 'text', typeOid: 25, generated: false, primaryKey: false, ...more });
@@ -117,4 +117,28 @@ test('turning off original-value checks keeps every original key component, incl
     overwriteChangedCells: true
   }]);
   assert.throws(() => buildRowUpdates(target, result.rows, [{ ...changes[1], column: 'unknown' }], false), /not editable/);
+});
+
+test('reset restores the original typed value and keeps other staged cells', () => {
+  const original = { id: 'one', name: 'old', count: 7 };
+  const result = data([column('id'), column('name'), column('count', { typeName: 'int4' })], [key(['id'])], [original]);
+  const edited = stageCellEdits(result, original, [], 0, { name: { value: 'new' }, count: { value: '12' } });
+  const reset = stageCellEdits({ ...result, rows: [edited.row] }, original, edited.changes, 0, { count: { action: 'reset' } });
+  assert.deepEqual(reset.row, { id: 'one', name: 'new', count: 7 });
+  assert.deepEqual(reset.changes.map(change => change.column), ['name']);
+  assert.deepEqual(original, { id: 'one', name: 'old', count: 7 });
+});
+
+test('database DEFAULT uses the source column and keeps the optimistic original value guard', () => {
+  const original = { id: 'one', label: null };
+  const result = data([column('id'), column('label', { sourceName: 'name' })], [key(['id'])], [original]);
+  const target = assessRowEditing(result).target!;
+  const staged = stageCellEdits(result, original, [], 0, { label: { action: 'default' } });
+  assert.deepEqual(buildRowUpdates(target, result.rows, staged.changes), [{
+    schema: 'public', table: 'items', keyColumns: ['id'],
+    values: {}, defaultColumns: ['name'], original: { id: 'one', name: null }
+  }]);
+  assert.deepEqual(stageCellEdits(result, original, staged.changes, 0, { label: { value: null } }).changes, []);
+  const literal = stageCellEdits(result, original, staged.changes, 0, { label: { value: 'DEFAULT' } });
+  assert.deepEqual(buildRowUpdates(target, result.rows, literal.changes)[0].values, { name: 'DEFAULT' });
 });

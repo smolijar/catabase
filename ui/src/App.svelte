@@ -11,6 +11,8 @@
   import ConnectionEditor from './components/ConnectionEditor.svelte';
   import ConnectionPill from './components/ConnectionPill.svelte';
   import ResultsGrid from './components/ResultsGrid.svelte';
+  import ResultDetails from './components/ResultDetails.svelte';
+  import ResultExportDialog from './components/ResultExportDialog.svelte';
   import Modal from './components/Modal.svelte';
   import QueryTimingDialog from './components/QueryTimingDialog.svelte';
   import HistoryStorageDialog from './components/HistoryStorageDialog.svelte';
@@ -43,7 +45,8 @@
   import { CONNECTION_SCOPE_KEY, GLOBAL_CONNECTION_KEY, connectionTargets, newTabConnection, restoreConnectionScope, switchTabConnection } from './lib/connectionScope';
   import type { ConnectionScope } from './lib/connectionScope';
   import type { ConnectionAppearance, ThemePreference } from './lib/appearance';
-  import { serializeRows } from './lib/export';
+  import { createExportEncoder, exportFormats, exportQueryPages, isExportFormat, serializeRows } from './lib/export';
+  import type { ExportFormat, ExportOptions, ResultExportProgress } from './lib/export';
   import { api, errorMessage } from './lib/ipc';
   import { startActivity } from './lib/activity';
   import { formatExecutionLog } from './lib/executionLog';
@@ -66,11 +69,10 @@
   import { clampSidebarWidth, DEFAULT_SIDEBAR_WIDTH, restoreSidebarWidth, sidebarWidthBounds } from './lib/sidebarLayout';
   import { listDropTarget, listScrollDelta, reorderList } from './lib/listDrag';
   import type { ListDrop } from './lib/listDrag';
-  import { assessRowEditing, buildRowUpdates } from './lib/rowEditing';
-  import { sameCellValue } from './lib/resultsGrid';
+  import { assessRowEditing, buildRowUpdates, stageCellEdits } from './lib/rowEditing';
   import type { EditTarget } from './lib/rowEditing';
   import { archiveTab, canUseResult, createDraftWriter, createHistoryTab, createQueryTab, duplicateQueryTab, reopenArchivedTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
-  import type { ArchivedTab, PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
+  import type { ArchivedTab, CellEdit, PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
   import type {
     SupermavenStatus,
     AppError,
@@ -95,6 +97,8 @@
   const DEFAULT_SQL = `-- Welcome to Catabase\n-- Add a PostgreSQL connection, then run SQL with Cmd/Ctrl+Enter.\nselect now() as connected_at;`;
   const PAGE_SIZE = 200;
   const VIM_MODE_STORAGE_KEY = 'catabase.vimMode';
+  const COPY_FORMAT_KEY = 'catabase.resultCopyFormat';
+  const exportItems = [...exportFormats.map(format => ({ id: format, label: `Copy as ${format.toUpperCase()}` })), { id: 'export', label: 'Export…' }];
 
   type SidebarTab = 'connections' | 'schema' | 'history' | 'activity' | 'tabs' | 'settings';
   type EditorHandle = {
@@ -108,6 +112,12 @@
   };
   type SchemaGroup = { name: string; items: SchemaItem[] };
   type Operation = { token: string; tabId: string; connectionId: string; kind: 'query' | 'load' | 'export' | 'apply' | 'explain'; startedAt: number; cancelling: boolean };
+  type ExportSource = NonNullable<ReturnType<ResultsGrid['captureExport']>> & {
+    tabId: string;
+    session: ResultSession | null;
+    queryBlockedReason: string;
+  };
+  type ExportWork = { controller: AbortController; queryToken: string | null; finishing: boolean };
   const operationLabels = { query: 'Running', load: 'Loading rows', export: 'Exporting', apply: 'Applying edits', explain: 'Explaining' };
 
   export let onWorkspaceReady: () => void = () => {};
@@ -151,6 +161,12 @@
   let running = false;
   let nowMs = Date.now();
   let operation: Operation | null = null;
+  let resultsGrid: ResultsGrid | undefined;
+  let copyFormat: ExportFormat = 'tsv';
+  let exportSource: ExportSource | null = null;
+  let exportProgress: ResultExportProgress | null = null;
+  let exportWork: ExportWork | null = null;
+  let exportTask: Promise<void> | null = null;
   let explainSession: { query: string; tabId: string; connectionId: string; connectionName: string } | null = null;
   let explainOpening = false;
   let explainState = initialExplainState();
@@ -331,7 +347,7 @@
   $: running = operation !== null;
   $: updateBlocked = updateInstallBlock({
     ready: workspaceLoaded,
-    busy: Boolean(operation || connectionMutation || queryPreparing || showConnectionModal || schemaLoading || showUpdatePreview || explainSession || explainOpening || discardRunConfirmation || tabCloseTask || closingWorkspace),
+    busy: Boolean(operation || connectionMutation || queryPreparing || showConnectionModal || schemaLoading || showUpdatePreview || explainSession || explainOpening || discardRunConfirmation || tabCloseTask || closingWorkspace || exportSource),
     transactionKnown: txStatusKnown,
     transactionActive: txStatus.active,
     stagedEdits: tabs.reduce((count, tab) => count + (tab.id === activeTab ? pendingChanges.length : tab.pendingChanges.length), 0),
@@ -364,21 +380,13 @@
     : result && !resultUsable ? 'Re-run this query on its original connection before editing.'
     : editEligibility.reason;
   $: canLoadMore = Boolean(result?.autoLimited && result.hasMore && resultUsable && !txStatus.active && !running && !connectionMutation && !pendingChanges.length);
+  $: loadMoreBlockedReason = result?.autoLimited && result.hasMore && resultUsable
+    ? txStatus.active ? 'Commit or roll back to load more' : pendingChanges.length ? 'Apply or discard edits to load more' : ''
+    : '';
   $: schemaGroups = groupSchemaItems(schemaItems, schemaSearch);
   $: if (workspaceLoaded) scheduleDraftSave(sql, activeTab, tabConnectionId, tabs, archivedTabs);
   $: if (workspaceLoaded) void refreshSchemaForConnection(liveConnectionId);
   $: if (workspaceLoaded) void loadConnectionStats(activeConnection?.id ?? null);
-  $: exportItems = [
-    { id: 'copy-csv', label: 'Copy as CSV' },
-    { id: 'copy-tsv', label: 'Copy as TSV' },
-    { id: 'copy-json', label: 'Copy as JSON' },
-    { id: 'save-csv', label: 'Save CSV…' },
-    { id: 'save-tsv', label: 'Save TSV…' },
-    { id: 'save-json', label: 'Save JSON…' },
-    { id: 'more-csv', label: 'Re-run & save up to 10k (CSV)…', disabled: !resultUsable || !result?.autoLimited || txStatus.active || running || Boolean(connectionMutation) },
-    { id: 'more-json', label: 'Re-run & save up to 10k (JSON)…', disabled: !resultUsable || !result?.autoLimited || txStatus.active || running || Boolean(connectionMutation) }
-  ];
-
   onMount(() => {
     mounted = true;
     nativeTitlebar = hasNativeMacTitlebar(isTauri(), navigator.platform);
@@ -398,6 +406,10 @@
     } catch { /* Connection switching defaults to the focused tab. */ }
     try { editorFontSize = restoreEditorFontSize(localStorage.getItem(EDITOR_FONT_STORAGE_KEY)); } catch { /* Font controls still work without storage. */ }
     try { vimModeEnabled = localStorage.getItem(VIM_MODE_STORAGE_KEY) === 'true'; } catch { /* Keep the default for this session. */ }
+    try {
+      const savedFormat = localStorage.getItem(COPY_FORMAT_KEY);
+      if (isExportFormat(savedFormat)) copyFormat = savedFormat;
+    } catch { /* Keep the default for this session. */ }
     try { automaticUpdates = localStorage.getItem(AUTO_UPDATE_CHECK_KEY) !== 'false'; } catch { /* Keep the default for this session. */ }
     try {
       const savedResultsHeight = Number(localStorage.getItem('catabase.resultsHeight'));
@@ -477,6 +489,7 @@
 
     return () => {
       flushDraftOnUnload();
+      cancelResultExport();
       mounted = false;
       healthcheck.dispose();
       updateChecker.dispose();
@@ -544,7 +557,7 @@
 
   $: if (diagnosticsPending && workspaceLoaded && !running && !connectionMutation && !closingWorkspace
       && !showConnectionModal && !showUpdatePreview && !discardRunConfirmation && !timingDetails
-      && !picker && !explainSession && !explainOpening && !updateInstalling && !historyStorage && !queryPreparing && !reconnectReview) {
+      && !picker && !explainSession && !explainOpening && !updateInstalling && !historyStorage && !queryPreparing && !reconnectReview && !exportSource) {
     diagnosticsPending = false;
     diagnosticsOpen = true;
   }
@@ -652,6 +665,11 @@
   async function flushWorkspaceForClose() {
     await bootstrapTask;
     await tabCloseTask;
+    if (exportWork) {
+      const choosingFile = exportProgress?.phase === 'choosing-file';
+      cancelResultExport();
+      if (!choosingFile) await exportTask;
+    }
     if (renamingTab) finishRename(false);
     await tick();
     await persistDraftNow();
@@ -992,7 +1010,7 @@
   function handleKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented || !workspaceLoaded || closingWorkspace) return;
     if (tabCloseTask) { event.preventDefault(); return; }
-    if (picker || explainSession || explainOpening || diagnosticsOpen || reconnectReview || queryPreparing || connectionMutation) return;
+    if (picker || explainSession || explainOpening || diagnosticsOpen || reconnectReview || queryPreparing || connectionMutation || exportSource) return;
     const fontAction = fontSizeShortcut(event);
     if (fontAction) {
       event.preventDefault();
@@ -1479,6 +1497,7 @@
     const op = operation;
     if (!op || op.cancelling) return;
     if (op.kind === 'explain') { await explainWorkflow.cancel(); return; }
+    if (op.kind === 'export') { cancelResultExport(); return; }
     op.cancelling = true;
     operation = op;
     try {
@@ -2056,12 +2075,12 @@
     await refreshHistory();
   }
 
-  async function copyResult(format: 'csv' | 'tsv' | 'json') {
-    if (!result || !result.rows.length) {
-      flash('No exportable data.');
-      return;
-    }
-    const source = result;
+  async function copyResult(format: ExportFormat) {
+    const data = resultsGrid?.captureExport();
+    const source = data?.selection ?? data?.loaded;
+    if (!source) return;
+    copyFormat = format;
+    try { localStorage.setItem(COPY_FORMAT_KEY, format); } catch { /* The current session keeps the chosen format. */ }
     try {
       await copyText(() => serializeRows(source, format), `Copy results as ${format.toUpperCase()}`,
         `${source.rows.length} ${source.rows.length === 1 ? 'row' : 'rows'}`);
@@ -2071,51 +2090,113 @@
     }
   }
 
-  async function downloadResult(format: 'csv' | 'tsv' | 'json', full = false) {
-    if (!result || !result.rows.length) {
-      flash('No exportable data.');
-      return;
-    }
-    if (full && txStatus.active) { flash('Commit or roll back before re-running an export.'); return; }
-    if (full && (!resultUsable || !resultSession || operation || connectionMutation || !result.autoLimited)) {
-      flash('Re-run this query on its original connection before requesting a larger export.');
-      return;
-    }
-    const source = result;
-    const session = resultSession;
-    const sourceTabId = activeTab;
-    let op: Operation | null = null;
-    try {
-      const path = await save({ defaultPath: `catabase-${timestamp()}.${format}` });
-      if (!path) return;
-      let exportResult = source;
-      if (full && session?.connectionId) {
-        if (txStatus.active) { flash('Commit or roll back before re-running an export.'); return; }
-        if (operation || connectionMutation) { flash('Wait for the current operation before exporting.'); return; }
-        const sourceTab = sourceTabId === activeTab ? snapshotActive() : tabs.find((tab) => tab.id === sourceTabId);
-        if (!canUseResult(sourceTab?.session ?? null, sourceTab?.connectionId ?? null) || sourceTab?.session?.executedAt !== session.executedAt) {
-          flash('The source results changed. Choose Export again.');
-          return;
-        }
-        op = beginOperation('export', session.connectionId);
-        op.tabId = sourceTabId;
-        flash('Preparing export…');
-        exportResult = await connectionTester.query(op.connectionId, () => api.executeQuery(session.execution.sql, op!.token, 0, 10_000, session.connectionId!, true));
-        if (!isCurrentOperation(op)) return;
-      }
-      await api.exportWriteFile(path, serializeRows(exportResult, format));
-      flash(`${format.toUpperCase()} saved (${exportResult.rows.length} rows${exportResult.hasMore ? ', more rows available' : ''}).`);
-    } catch (error) {
-      flash(normalizeAppError(error).code === '57014' ? 'Export cancelled.' : `Export failed: ${errorMessage(error)}`, normalizeAppError(error).code !== '57014');
-    } finally {
-      if (op) finishOperation(op);
-    }
+  function exportPagingReason(source: QueryResult) {
+    if (!source.autoLimited) return 'This result is already fully loaded.';
+    if (txStatus.active) return 'Commit or roll back to export by re-running the query.';
+    if (!resultUsable) return 'Run the query on its original connection to export more rows.';
+    if (operation || connectionMutation || queryPreparing) return 'Wait for the current operation to finish to export more rows.';
+    return '';
   }
 
   function handleExport(action: string) {
-    const [kind, format] = action.split('-') as [string, 'csv' | 'tsv' | 'json'];
-    if (kind === 'copy') void copyResult(format);
-    else void downloadResult(format, kind === 'more');
+    if (isExportFormat(action)) { void copyResult(action); return; }
+    const captured = resultsGrid?.captureExport();
+    if (!captured || exportWork || closingWorkspace) return;
+    exportProgress = null;
+    exportSource = { ...captured, tabId: activeTab, session: resultSession, queryBlockedReason: exportPagingReason(captured.loaded) };
+  }
+
+  function startResultExport(options: ExportOptions) {
+    if (!exportSource || exportWork || closingWorkspace) return;
+    const work: ExportWork = { controller: new AbortController(), queryToken: null, finishing: false };
+    exportWork = work;
+    exportTask = performResultExport(exportSource, options, work).finally(() => {
+      exportWork = null;
+      exportTask = null;
+    });
+  }
+
+  function cancelResultExport() {
+    if (!exportWork || exportWork.finishing || exportWork.controller.signal.aborted) return;
+    exportWork.controller.abort();
+    if (exportProgress) exportProgress = { ...exportProgress, phase: 'cancelling' };
+    if (operation?.kind === 'export') operation = { ...operation, cancelling: true };
+    if (exportWork.queryToken) void api.cancelQuery(exportWork.queryToken).catch(() => {});
+  }
+
+  async function performResultExport(source: ExportSource, options: ExportOptions, work: ExportWork) {
+    const { signal } = work.controller;
+    const paged = options.scope === 'query';
+    const data = options.scope === 'selection' ? source.selection : source.loaded;
+    const maxRows = paged ? options.rowLimit : data?.rows.length ?? 0;
+    const fileId = crypto.randomUUID();
+    let fileOpen = false;
+    let op: Operation | null = null;
+    const chunks: string[] = [];
+    const encoder = createExportEncoder(options.format);
+    const write = async (content: string) => {
+      signal.throwIfAborted();
+      if (!content) return;
+      if (fileOpen) await api.exportFile(fileId, { action: 'append', content });
+      else chunks.push(content);
+    };
+    exportProgress = { phase: 'running', maxRows, rows: 0, queries: 0, currentPage: null };
+    try {
+      if (!data) throw new Error('Select cells to export first.');
+      if (options.target === 'file') {
+        exportProgress = { ...exportProgress, phase: 'choosing-file' };
+        const path = await save({ defaultPath: `catabase-${timestamp()}.${options.format}`, filters: [{ name: options.format.toUpperCase(), extensions: [options.format] }] });
+        signal.throwIfAborted();
+        if (!path) { exportProgress = null; return; }
+        exportProgress = { ...exportProgress, phase: 'running' };
+        await api.exportFile(fileId, { action: 'open', path });
+        fileOpen = true;
+      }
+      let rows = data.rows.length;
+      let capped = false;
+      if (paged) {
+        signal.throwIfAborted();
+        const session = source.session;
+        if (!session?.connectionId || activeTab !== source.tabId || resultSession?.executedAt !== session.executedAt
+          || resultSession.connectionId !== session.connectionId) {
+          throw new Error('The source results changed. Open Export again.');
+        }
+        const reason = exportPagingReason(source.loaded);
+        if (reason) throw new Error(reason);
+        const connectionId = session.connectionId;
+        op = beginOperation('export', connectionId);
+        const outcome = await exportQueryPages(data, options, signal, async (offset, batchSize) => {
+          const token = crypto.randomUUID();
+          work.queryToken = token;
+          try {
+            return await connectionTester.query(connectionId, () => api.executeQuery(session.execution.sql, token, offset, batchSize, connectionId, true));
+          } finally {
+            work.queryToken = null;
+          }
+        }, page => write(encoder.append(page)), pageProgress => {
+          if (!signal.aborted) exportProgress = { ...pageProgress, phase: 'running', maxRows };
+        });
+        ({ rows, capped } = outcome);
+      } else await write(encoder.append(data));
+      await write(encoder.finish());
+      signal.throwIfAborted();
+      work.finishing = true;
+      exportProgress = { ...exportProgress, phase: 'finishing', rows, currentPage: null };
+      const count = `${rows.toLocaleString()} ${rows === 1 ? 'row' : 'rows'}`;
+      if (fileOpen) {
+        await api.exportFile(fileId, { action: 'finish' });
+        fileOpen = false;
+      } else await copyText(() => chunks.join(''), `Export results as ${options.format.toUpperCase()}`, count);
+      const message = `${count} ${options.target === 'file' ? 'saved' : 'copied'}${capped ? ' · row limit reached' : ''}.`;
+      exportProgress = { ...exportProgress, phase: 'complete', message };
+    } catch (error) {
+      const cancelled = signal.aborted || normalizeAppError(error).code === '57014';
+      exportProgress = { rows: exportProgress?.rows ?? 0, queries: exportProgress?.queries ?? 0, maxRows, currentPage: null,
+        phase: cancelled ? 'cancelled' : 'failed', message: cancelled ? 'Export cancelled.' : `Export failed: ${errorMessage(error)}` };
+    } finally {
+      if (fileOpen) await api.exportFile(fileId, { action: 'discard' }).catch(() => {});
+      if (op) finishOperation(op);
+    }
   }
 
   function enableEditMode(announce = true) {
@@ -2129,19 +2210,19 @@
     return true;
   }
 
-  function updateCells(rowIndex: number, values: Record<string, unknown>) {
-    const columns = Object.keys(values);
-    if (!result?.rows[rowIndex] || !resultUsable || !columns.length || columns.some((column) => !editableColumns.includes(column)) || !enableEditMode(false)) return false;
-    result = {
-      ...result,
-      rows: result.rows.map((row, index) => (index === rowIndex ? { ...row, ...values } : row))
-    };
-    pendingChanges = pendingChanges.filter((change) => !(change.rowIndex === rowIndex && columns.includes(change.column)));
-    for (const [column, newValue] of Object.entries(values)) {
-      const oldValue = originalRows[rowIndex]?.[column];
-      if (!sameCellValue(oldValue, newValue, result.columns.find((item) => item.name === column)!, result.jsonValuesAsText, true)) pendingChanges = [...pendingChanges, { rowIndex, column, oldValue, newValue }];
-    }
-    return true;
+  function updateCells(rowIndex: number, edits: Record<string, CellEdit>) {
+    const entries = Object.entries(edits);
+    if (!result?.rows[rowIndex] || !entries.length || closingWorkspace || operation || connectionMutation) return null;
+    const resetting = entries.every(([, edit]) => 'action' in edit && edit.action === 'reset');
+    if (!resetting && (!resultUsable || entries.some(([column]) => !editableColumns.includes(column)) || !enableEditMode(false))) return null;
+    const original = originalRows[rowIndex];
+    if (!original || entries.some(([column]) => !Object.hasOwn(original, column))) return null;
+    const { row, changes } = stageCellEdits(result, original, pendingChanges, rowIndex, edits);
+    const rows = result.rows.slice();
+    rows[rowIndex] = row;
+    result = { ...result, rows };
+    pendingChanges = changes;
+    return row;
   }
 
   function lookupForeignKey(request: ForeignKeyLookup, token: string) {
@@ -2174,15 +2255,38 @@
     const editedResult = result!;
     const editedSession = resultSession!;
     const editedRows = cloneRows(editedResult.rows);
+    const editedIndices = [...new Set(pendingChanges.map(change => change.rowIndex))];
+    const updates = reviewedUpdates;
     try {
-      const applied = await api.applyRowUpdates(op.connectionId, op.token, reviewedUpdates);
+      const applied = await api.applyRowUpdates(op.connectionId, op.token, updates);
       if (!isCurrentOperation(op)) return;
+      if (applied.commitFeedback.outcome === 'interrupted') {
+        updateReviewError = `${commitFeedbackLabel(applied.commitFeedback)}. Staged edits retained.`;
+        return;
+      }
+      const allDefaultsReturned = updates.every((update, index) => {
+        if (!update.defaultColumns?.length) return true;
+        const resolved = applied.defaultValues?.[index];
+        if (!resolved || update.defaultColumns.some(name => !Object.hasOwn(resolved, name))) return false;
+        for (const column of editedResult.columns) {
+          if (column.sourceName && update.defaultColumns.includes(column.sourceName)) {
+            editedRows[editedIndices[index]][column.name] = resolved[column.sourceName];
+          }
+        }
+        return true;
+      });
+      if (!allDefaultsReturned) {
+        patchTab(op.tabId, resultPatch(null));
+        showUpdatePreview = false;
+        flash(`${commitFeedbackLabel(applied.commitFeedback)}. Run the query again to see the default values.`);
+        return;
+      }
       patchTab(op.tabId, {
-        session: { ...editedSession, data: { ...editedResult, commitFeedback: applied.commitFeedback } },
+        session: { ...editedSession, data: { ...editedResult, rows: editedRows, commitFeedback: applied.commitFeedback } },
         originalRows: editedRows, pendingChanges: [], editMode: false
       });
       showUpdatePreview = false;
-      flash(commitFeedbackLabel(applied.commitFeedback), applied.commitFeedback.outcome === 'interrupted');
+      flash(commitFeedbackLabel(applied.commitFeedback));
     } catch (error) {
       const cancelled = normalizeAppError(error).code === '57014';
       updateReviewError = cancelled ? 'Update cancelled. Staged edits retained.' : `Apply failed: ${errorMessage(error)}`;
@@ -2202,7 +2306,10 @@
   function generateUpdateSql(target: EditTarget, updates: RowUpdate[]): string {
     const columnTypes = new Map([...target.keyColumns, ...target.editableColumns].map((column) => [column.sourceName, column.typeName]));
     return updates.map((update) => {
-      const assignments = Object.entries(update.values).map(([column, value]) => `${quoteIdent(column)} = ${sqlLiteral(value)}`);
+      const assignments = [
+        ...Object.entries(update.values).map(([column, value]) => `${quoteIdent(column)} = ${sqlLiteral(value)}`),
+        ...(update.defaultColumns ?? []).map(column => `${quoteIdent(column)} = DEFAULT`)
+      ];
       const predicates = Object.entries(update.original).map(([column, value]) => {
         const name = quoteIdent(column);
         const literal = sqlLiteral(value);
@@ -2689,96 +2796,97 @@
         on:keydown={resizeResultsWithKeyboard}
       ><span></span></div>
 
-      <section class="results-pane">
-        <div class="results-head">
-          <div class="results-title">
-            <strong>Results</strong>
-            {#if activeOperation}
-              <span class="running-state"><span class="operation-dot" aria-hidden="true"></span>{operationText}</span>
-            {:else if queryError}
-              <span class="failed-state">Failed{historyContext ? ` · ${historyContext.durationMs} ms` : ''}</span>
-            {:else if result}
-              <span class:failed-state={result.commitFeedback?.outcome === 'interrupted'}>
-                {#if !resultCommitLabel || (result.columns.length && result.commitFeedback?.affectedRows === null)}
-                  {result.rowCount}{result.hasMore ? '+' : ''} {result.rowCount === 1 ? 'row' : 'rows'} ·
-                {/if}
-                {#if resultCommitLabel}{resultCommitLabel} · {/if}{result.durationMs} ms
-              </span>
-            {:else if historyContext}
-              <span>No snapshot stored · {historyContext.durationMs} ms</span>
-            {:else}
-              <span>No query run</span>
-            {/if}
-          </div>
-          <div class="results-actions">
-            <ActionMenu label="Export" ariaLabel="Export results" disabled={Boolean(queryError) || !result?.rows.length} items={exportItems} onSelect={handleExport} />
-            {#if editMode && !queryError}
-              <button disabled={!pendingChanges.length || running || Boolean(connectionMutation)} on:click={previewUpdates}>Review {pendingChanges.length} {pendingChanges.length === 1 ? 'edit' : 'edits'}</button>
-              <button disabled={running || Boolean(connectionMutation)} on:click={discardUpdates}>{pendingChanges.length ? 'Discard' : 'Cancel editing'}</button>
-            {:else}
-              <button aria-disabled={Boolean(editDisabledReason)} title={editDisabledReason || 'Edit cells using the selected primary or unique key'} on:click={() => enableEditMode()}><Icon name="edit" size={14} /> Edit cells</button>
-            {/if}
-          </div>
-        </div>
-        {#if resultContext && (!queryError || historyContext)}
-          <div class="result-context">
-            <span>{resultContext.connectionName}</span>
-            <time title={resultContext.executedAt}>{formatHistoryTime(resultContext.executedAt)}</time>
-            {#if resultContext.snapshot}<span class="snapshot-badge">History snapshot · read only</span>{/if}
-            {#if !resultContext.snapshot && resultContext.connectionId !== tabConnectionId}<span class="context-warning">Different connection · run the query to refresh</span>{/if}
-            <details>
-              <summary>Executed SQL</summary>
-              <pre>{resultContext.execution.sql}</pre>
-              {#if resultContext.historyEntryIds?.length}
-                <button on:click={() => copyResultLog(resultContext.historyEntryIds!)}><Icon name="copy" size={14} /> Copy execution log</button>
+      <section class="results-pane" aria-label="Results">
+        {#key `${activeTab}:${resultContext?.executedAt ?? ''}`}
+          <ResultsGrid
+            bind:this={resultsGrid}
+            result={queryError ? null : result} hasDetails={Boolean(resultContext && (!queryError || historyContext))}
+            {editableColumns} {editDisabledReason} {canLoadMore} {loadMoreBlockedReason}
+            schemaItems={resultSession?.connectionId === tabConnectionId ? schemaItems : []}
+            resultContext={`${activeTab}:${resultContext?.executedAt ?? ''}`}
+            readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges}
+            onLoadMore={loadMoreRows} onEditMany={updateCells} onForeignKeyLookup={lookupForeignKey}
+            onCancelLookup={(token) => { void api.cancelQuery(token).catch(() => {}); }} onMessage={flash}
+          >
+            {#snippet status()}
+              {#if activeOperation}
+                <span class="results-status running-state"><span class="operation-dot" aria-hidden="true"></span>{operationText}</span>
+              {:else if queryError}
+                <span class="results-status failed-state">Failed</span>
+              {:else if resultCommitLabel}
+                <span class="results-status" class:failed-state={result?.commitFeedback?.outcome === 'interrupted'}>{resultCommitLabel}</span>
+              {:else if historyContext && !result}
+                <span class="results-status">No snapshot stored</span>
               {/if}
-            </details>
-          </div>
-        {/if}
-        {#if editMode && !queryError}
-          <div class="edit-bar">
-            {pendingChanges.length} pending {pendingChanges.length === 1 ? 'change' : 'changes'}.
-            {#if detectEditTarget()}
-              Apply will update {detectEditTarget()?.schema}.{detectEditTarget()?.table} using {editEligibility.target?.key.primaryKey ? 'primary' : 'unique'} key ({editEligibility.target?.key.columns.join(', ')}).
-            {:else}
-              Editing unavailable: {editEligibility.reason}
-            {/if}
-          </div>
-        {/if}
-        {#if (queryError || !result?.rows.length) && !(activeOperation?.kind === 'query' && !result)}
-          <div class="empty-state results-empty">
-            <Cat mood={queryError ? 'error' : 'asleep'} size={52} muted animate={false} />
-            {#if queryError}
-              <strong>Query failed</strong>
-              <div class="query-error" role="alert" data-selectable-text>
-                <strong>{queryError.message}</strong>
-                {#if queryError.detail}<span>Detail: {queryError.detail}</span>{/if}
-                {#if queryError.hint}<span>Hint: {queryError.hint}</span>{/if}
-                {#if queryError.code}<span>Code: {queryError.code}</span>{/if}
-                {#if queryError.position}<span>Position: {queryError.position}</span>{/if}
+              {#if !queryError && resultContext && !resultContext.snapshot && resultContext.connectionId !== tabConnectionId}
+                <span class="results-status context-warning" title={`Results from ${resultContext.connectionName}. Run the query to refresh.`}>Different connection</span>
+              {/if}
+            {/snippet}
+            {#snippet actions()}
+              {@const copyDisabled = Boolean(queryError) || !result?.rows.length}
+              <div class="results-actions">
+                <div class="result-copy split-button" role="group" aria-label="Copy or export results">
+                  <button type="button" class="split-button-main" aria-label={`Copy as ${copyFormat.toUpperCase()}`} title={`Copy as ${copyFormat.toUpperCase()}`} disabled={copyDisabled} on:click={() => copyResult(copyFormat)}><Icon name="copy" size={11} /> Copy</button>
+                  <ActionMenu ariaLabel="Copy formats and export" disabled={copyDisabled} iconOnly triggerIcon="chevron-down" items={exportItems} onSelect={handleExport} />
+                </div>
+                {#if editMode && !queryError}
+                  <button disabled={!pendingChanges.length || running || Boolean(connectionMutation)} on:click={previewUpdates}>Review {pendingChanges.length} {pendingChanges.length === 1 ? 'edit' : 'edits'}</button>
+                  <button disabled={running || Boolean(connectionMutation)} on:click={discardUpdates}>{pendingChanges.length ? 'Discard' : 'Cancel editing'}</button>
+                {:else}
+                  <button aria-disabled={Boolean(editDisabledReason)} title={editDisabledReason || 'Edit cells using the selected primary or unique key'} on:click={() => enableEditMode()}><Icon name="edit" size={12} /> Edit cells</button>
+                {/if}
               </div>
-            {:else}
-              <strong>{result ? result.columns.length ? 'No rows returned' : 'Statement completed' : tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
-            {/if}
-            {#if queryError && result}
-              <button on:click={() => patchTab(activeTab, { error: null })}>Show previous results</button>
-            {:else if tabKind !== 'query' && (!result || queryError)}
-              <button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>
-            {:else if !result && !queryError && tabKind === 'query'}
-              <p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>
-            {/if}
-          </div>
-        {:else if result?.rows.length}
-          {#key `${activeTab}:${resultSession?.executedAt}`}
-            <ResultsGrid {result} {editableColumns} {editDisabledReason} schemaItems={resultSession?.connectionId === tabConnectionId ? schemaItems : []} {canLoadMore} resultContext={`${activeTab}:${resultSession?.executedAt ?? ''}`} onLoadMore={loadMoreRows} readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges} onEditMany={updateCells} onForeignKeyLookup={lookupForeignKey} onCancelLookup={(token) => { void api.cancelQuery(token).catch(() => {}); }} onMessage={flash} />
-          {/key}
-          <footer class="results-foot">
-            <span>{result.rows.length} loaded {result.hasMore ? '· more available' : ''}</span>
-            {#if activeOperation?.kind !== 'load' && result.autoLimited && result.hasMore && resultUsable}
-              <span>{txStatus.active ? 'Commit or roll back to load more' : pendingChanges.length ? 'Apply or discard edits to load more' : 'Scroll down to load more'}</span>
-            {/if}
-          </footer>
-        {/if}
+            {/snippet}
+            {#snippet notices()}
+              {#if editMode && !queryError}
+                <div class="edit-bar">
+                  {pendingChanges.length} pending {pendingChanges.length === 1 ? 'change' : 'changes'}.
+                  {#if detectEditTarget()}
+                    Apply will update {detectEditTarget()?.schema}.{detectEditTarget()?.table} using {editEligibility.target?.key.primaryKey ? 'primary' : 'unique'} key ({editEligibility.target?.key.columns.join(', ')}).
+                  {:else}
+                    Editing unavailable: {editEligibility.reason}
+                  {/if}
+                </div>
+              {/if}
+            {/snippet}
+            {#snippet details()}
+              {#if resultContext}
+                <ResultDetails
+                  context={resultContext} result={queryError ? null : result} {themeKey}
+                  executedAtLabel={formatHistoryTime(resultContext.executedAt)} durationMs={result?.durationMs ?? historyContext?.durationMs}
+                  outcome={queryError ? 'Failed' : resultCommitLabel || (historyContext && !result ? 'No snapshot stored' : '')}
+                  onCopyLog={copyResultLog}
+                />
+              {/if}
+            {/snippet}
+            {#snippet children()}
+              {#if (queryError || !result?.rows.length) && !(activeOperation?.kind === 'query' && !result)}
+                <div class="empty-state results-empty">
+                  <Cat mood={queryError ? 'error' : 'asleep'} size={52} muted animate={false} />
+                  {#if queryError}
+                    <strong>Query failed</strong>
+                    <div class="query-error" role="alert" data-selectable-text>
+                      <strong>{queryError.message}</strong>
+                      {#if queryError.detail}<span>Detail: {queryError.detail}</span>{/if}
+                      {#if queryError.hint}<span>Hint: {queryError.hint}</span>{/if}
+                      {#if queryError.code}<span>Code: {queryError.code}</span>{/if}
+                      {#if queryError.position}<span>Position: {queryError.position}</span>{/if}
+                    </div>
+                  {:else}
+                    <strong>{result ? result.columns.length ? 'No rows returned' : 'Statement completed' : tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
+                  {/if}
+                  {#if queryError && result}
+                    <button on:click={() => patchTab(activeTab, { error: null })}>Show previous results</button>
+                  {:else if tabKind !== 'query' && (!result || queryError)}
+                    <button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>
+                  {:else if !result && !queryError && tabKind === 'query'}
+                    <p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>
+                  {/if}
+                </div>
+              {/if}
+            {/snippet}
+          </ResultsGrid>
+        {/key}
       </section>
     </section>
   </section>
@@ -2835,6 +2943,13 @@
 
 {#if timingDetails}
   <QueryTimingDialog details={timingDetails} onClose={() => (timingDetails = null)} />
+{/if}
+
+{#if exportSource}
+  <ResultExportDialog defaultFormat={copyFormat} selectionRows={exportSource.selection?.rows.length ?? 0}
+    loadedRows={exportSource.loaded.rows.length} queryBlockedReason={exportSource.queryBlockedReason}
+    connectionName={exportSource.session?.connectionName} progress={exportProgress} busy={Boolean(exportWork)}
+    onStart={startResultExport} onCancel={cancelResultExport} onClose={() => (exportSource = null)} />
 {/if}
 
 {#if toastMessage}

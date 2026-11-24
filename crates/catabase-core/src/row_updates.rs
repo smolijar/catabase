@@ -7,7 +7,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::{CoreError, PgClient, QueryResult, RowKey, StatementObserver, row_keys::load_row_keys};
+use crate::{
+    CoreError, PgClient, QueryResult, RowKey, StatementObserver, pg::row_to_json,
+    row_keys::load_row_keys,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +20,8 @@ pub struct RowUpdate {
     #[serde(default)]
     pub key_columns: Vec<String>,
     pub values: Map<String, Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_columns: Vec<String>,
     pub original: Map<String, Value>,
     #[serde(default)]
     pub overwrite_changed_cells: bool,
@@ -27,6 +32,7 @@ pub struct RowUpdate {
 pub struct ApplyUpdatesResult {
     pub updated_rows: usize,
     pub in_transaction: bool,
+    pub default_values: Vec<Option<Value>>,
 }
 
 #[derive(Clone, Debug)]
@@ -77,7 +83,7 @@ pub async fn apply_row_updates_observed(
 
     let outcome = apply_batch(client, updates, cancelled, observer).await;
     match outcome {
-        Ok(()) => {
+        Ok(default_values) => {
             if let Err(error) = check_cancelled(cancelled) {
                 rollback(client, in_transaction, &savepoint, observer).await?;
                 return Err(error);
@@ -94,6 +100,7 @@ pub async fn apply_row_updates_observed(
             Ok(ApplyUpdatesResult {
                 updated_rows: updates.len(),
                 in_transaction,
+                default_values,
             })
         }
         Err(error) => {
@@ -157,8 +164,9 @@ async fn apply_batch(
     updates: &[RowUpdate],
     cancelled: &AtomicBool,
     observer: Option<&dyn StatementObserver>,
-) -> Result<(), CoreError> {
+) -> Result<Vec<Option<Value>>, CoreError> {
     let mut tables = HashMap::new();
+    let mut default_values = Vec::with_capacity(updates.len());
     for (index, update) in updates.iter().enumerate() {
         check_cancelled(cancelled)?;
         let table_key = (update.schema.clone(), update.table.clone());
@@ -222,21 +230,29 @@ async fn apply_batch(
             observer.started(&history_sql);
         }
         let start = Instant::now();
-        let result = async {
-            let affected = client.execute(&prepared.sql, &parameters).await?;
-            ensure_one_row(affected, index)?;
-            Ok::<_, CoreError>(QueryResult::command(
-                affected as usize,
-                start.elapsed().as_millis(),
-            ))
-        }
-        .await;
+        let result = if update.default_columns.is_empty() {
+            client
+                .execute(&prepared.sql, &parameters)
+                .await
+                .map_err(CoreError::from)
+                .and_then(|affected| ensure_one_row(affected, index).map(|()| None))
+        } else {
+            client
+                .query(&prepared.sql, &parameters)
+                .await
+                .map_err(CoreError::from)
+                .and_then(|rows| {
+                    ensure_one_row(rows.len() as u64, index).map(|()| Some(row_to_json(&rows[0])))
+                })
+        };
         if let Some(observer) = observer {
-            observer.finished(&history_sql, result.as_ref(), start.elapsed().as_millis());
+            let elapsed = start.elapsed().as_millis();
+            let command = QueryResult::command(1, elapsed);
+            observer.finished(&history_sql, result.as_ref().map(|_| &command), elapsed);
         }
-        result?;
+        default_values.push(result?);
     }
-    Ok(())
+    Ok(default_values)
 }
 
 fn ensure_one_row(affected: u64, index: usize) -> Result<(), CoreError> {
@@ -259,7 +275,21 @@ fn build_update_sql(
             "This source table is unavailable or is not an editable table.",
         ));
     }
-    if update.values.is_empty() {
+    let defaults = update.default_columns.iter().collect::<BTreeSet<_>>();
+    if defaults
+        .iter()
+        .any(|name| update.values.contains_key(*name))
+    {
+        return Err(CoreError::message(
+            "Provide either a value or DEFAULT for each changed column.",
+        ));
+    }
+    let changed = update
+        .values
+        .keys()
+        .chain(defaults.iter().copied())
+        .collect::<BTreeSet<_>>();
+    if changed.is_empty() {
         return Err(CoreError::message("No changed values were provided."));
     }
     let key = keys.iter().find(|key| {
@@ -280,12 +310,12 @@ fn build_update_sql(
             "The selected row key is missing a value or contains NULL without NULLS NOT DISTINCT uniqueness. Refresh the result before editing.",
         ));
     }
-    for name in update.original.keys().chain(update.values.keys()) {
+    for name in update.original.keys().chain(changed.iter().copied()) {
         if !columns.contains_key(name) {
             return Err(CoreError::message(format!("Unknown source column: {name}")));
         }
     }
-    for name in update.values.keys() {
+    for &name in &changed {
         if columns[name].generated {
             return Err(CoreError::message(format!(
                 "Generated column {name} cannot be edited."
@@ -303,12 +333,13 @@ fn build_update_sql(
         quote_ident(&update.table)
     );
     let mut json_parameters = Vec::new();
-    let assignments = update
-        .values
-        .keys()
+    let assignments = changed
+        .into_iter()
         .map(|name| {
             let quoted = quote_ident(name);
-            if let Some(json_type) = columns[name].json_type {
+            if defaults.contains(name) {
+                format!("{quoted} = DEFAULT")
+            } else if let Some(json_type) = columns[name].json_type {
                 json_parameters.push(json_parameter(&update.values[name]));
                 format!(
                     "{quoted} = (${}::text)::{json_type}",
@@ -323,6 +354,7 @@ fn build_update_sql(
     let mut predicate_names = key.columns.iter().collect::<BTreeSet<_>>();
     if !update.overwrite_changed_cells {
         predicate_names.extend(update.values.keys());
+        predicate_names.extend(defaults.iter().copied());
     }
     let predicates = predicate_names.iter().map(|name| {
         let quoted = quote_ident(name);
@@ -349,10 +381,18 @@ fn build_update_sql(
             format!("to_jsonb(target.{quoted}) IS NOT DISTINCT FROM to_jsonb(original_values.{quoted})")
         }
     }).collect::<Vec<_>>().join(" AND ");
+    let mut sql = format!(
+        "UPDATE {table} AS target SET {assignments} FROM jsonb_populate_record(NULL::{table}, $1::jsonb) AS new_values, jsonb_populate_record(NULL::{table}, $2::jsonb) AS original_values WHERE {predicates}"
+    );
+    if !defaults.is_empty() {
+        let returning = defaults
+            .into_iter()
+            .map(|name| format!("target.{}", quote_ident(name)))
+            .collect::<Vec<_>>();
+        sql.push_str(&format!(" RETURNING {}", returning.join(", ")));
+    }
     Ok(PreparedUpdate {
-        sql: format!(
-            "UPDATE {table} AS target SET {assignments} FROM jsonb_populate_record(NULL::{table}, $1::jsonb) AS new_values, jsonb_populate_record(NULL::{table}, $2::jsonb) AS original_values WHERE {predicates}"
-        ),
+        sql,
         json_parameters,
         original: predicate_names
             .into_iter()
@@ -453,6 +493,7 @@ mod tests {
             table: "orders".into(),
             key_columns: vec!["id".into(), "tenant_id".into()],
             overwrite_changed_cells: false,
+            default_columns: Vec::new(),
             values: json!({"note": "'; DROP TABLE orders; --"})
                 .as_object()
                 .unwrap()
@@ -462,6 +503,32 @@ mod tests {
                 .unwrap()
                 .clone(),
         }
+    }
+
+    #[test]
+    fn default_assignment_is_guarded_and_returns_the_value() {
+        let mut edit = update();
+        edit.values.clear();
+        edit.default_columns = vec!["note".into()];
+        let prepared = build_update_sql(&edit, &columns(), &keys()).unwrap();
+        assert!(prepared.sql.contains("SET \"note\" = DEFAULT"));
+        assert!(
+            prepared
+                .sql
+                .contains("to_jsonb(target.\"note\") IS NOT DISTINCT FROM")
+        );
+        assert!(prepared.sql.ends_with("RETURNING target.\"note\""));
+        assert_eq!(prepared.original["note"], Value::Null);
+
+        edit.original.remove("note");
+        assert!(build_update_sql(&edit, &columns(), &keys()).is_err());
+        edit.overwrite_changed_cells = true;
+        assert!(build_update_sql(&edit, &columns(), &keys()).is_ok());
+        edit.values.insert("note".into(), json!("DEFAULT"));
+        assert!(build_update_sql(&edit, &columns(), &keys()).is_err());
+        edit.values.clear();
+        edit.default_columns = vec!["calculated".into()];
+        assert!(build_update_sql(&edit, &columns(), &keys()).is_err());
     }
 
     #[test]

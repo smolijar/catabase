@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { UpdaterStatus, UpdateCheck } from './appUpdates';
 import type { ExplainRequest, ExplainResult, ShareExplainRequest } from './explain';
 import type { DiagnosticReport } from './diagnostics';
+import type { ExportFileRequest } from './export';
 import type {
   SupermavenStatus,
   SupermavenRequest,
@@ -86,7 +87,7 @@ export const api = {
   supermavenCancel: (requestId: string) => invoke<void>('supermaven_cancel', { requestId }),
   supermavenUseFree: () => invoke<void>('supermaven_use_free'),
   supermavenOpenActivation: () => invoke<void>('supermaven_open_activation'),
-  exportWriteFile: (path: string, content: string) => invoke<void>('export_write_file', { path, content })
+  exportFile: (fileId: string, request: ExportFileRequest) => invoke<void>('export_file', { fileId, request })
 };
 
 export function errorMessage(error: unknown): string {

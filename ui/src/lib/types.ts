@@ -114,6 +114,7 @@ export interface RowUpdate {
   table: string;
   keyColumns: string[];
   values: Record<string, unknown>;
+  defaultColumns?: string[];
   original: Record<string, unknown>;
   overwriteChangedCells?: boolean;
 }
@@ -121,6 +122,7 @@ export interface RowUpdate {
 export interface ApplyUpdatesResult {
   updatedRows: number;
   inTransaction: boolean;
+  defaultValues?: (Record<string, unknown> | null)[];
   commitFeedback: CommitFeedback;
 }
 

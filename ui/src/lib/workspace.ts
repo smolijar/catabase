@@ -16,7 +16,10 @@ export interface PendingChange {
   column: string;
   oldValue: unknown;
   newValue: unknown;
+  useDefault?: boolean;
 }
+
+export type CellEdit = { value: unknown } | { action: 'reset' | 'default' };
 
 export interface WorkspaceTab {
   id: string;

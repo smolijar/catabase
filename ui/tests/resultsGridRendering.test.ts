@@ -6,7 +6,7 @@ import type { ViteDevServer } from 'vite';
 import type { ColumnMeta, QueryResult, SchemaItem } from '../src/lib/types.ts';
 
 let server: ViteDevServer;
-let renderGrid: () => string;
+let renderGrid: (options?: { hasDetails?: boolean; includeResult?: boolean }) => string;
 
 before(async () => {
   server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), server: { middlewareMode: true, watch: null, hmr: false, ws: false }, appType: 'custom' });
@@ -26,7 +26,13 @@ before(async () => {
     rowCount: 1, durationMs: 1, autoLimited: false, hasMore: false
   };
   const schemaItems: SchemaItem[] = [{ schema: 'public', name: 'children', kind: 'table', columns: [], foreignKeys: [{ name: 'parent_fk', columns: ['parent_id'], referencedSchema: 'public', referencedTable: 'parents', referencedColumns: ['id'] }] }];
-  renderGrid = () => render(Grid, { props: { result, schemaItems, changedCells: [{ rowIndex: 0, column: 'id' }], onForeignKeyLookup: async () => { throw new Error('Rendering must not query the database'); } } }).body;
+  renderGrid = ({ hasDetails = false, includeResult = true } = {}) => render(Grid, { props: {
+    result: includeResult ? result : null,
+    hasDetails,
+    schemaItems,
+    changedCells: [{ rowIndex: 0, column: 'id' }],
+    onForeignKeyLookup: async () => { throw new Error('Rendering must not query the database'); }
+  } }).body;
 });
 
 after(async () => { await server?.close(); });
@@ -47,7 +53,7 @@ test('compact headers keep type/source/key information in accessible tooltips, w
 });
 
 test('typed cells retain exact values, native booleans, NULL and their staged-change indicator', () => {
-  const html = renderGrid();
+  const html = renderGrid().replace(/<!--[\s\S]*?-->/g, '');
   for (const type of ['number', 'string', 'date', 'boolean', 'null']) assert.match(html, new RegExp(`cell value-${type}`));
   assert.match(html, /value-boolean[^\"]*false-value/);
   assert.match(html, />9007199254740993<\/button>/);
@@ -58,4 +64,11 @@ test('typed cells retain exact values, native booleans, NULL and their staged-ch
   assert.match(html, />NULL<\/button>/);
   assert.match(html, /<td class="[^\"]*\bchanged\b/);
   assert.match(html, /Row 1, id \(int8\): 9007199254740993/);
+});
+
+test('a saved execution without rows can still open Details', () => {
+  const html = renderGrid({ hasDetails: true, includeResult: false });
+  assert.match(html, /data-result-view="grid"[^>]+aria-selected="true"/);
+  assert.match(html, /data-result-view="details"/);
+  assert.doesNotMatch(html, /data-result-view="record"/);
 });

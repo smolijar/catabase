@@ -4,6 +4,7 @@ mod clipboard;
 mod dalibo;
 mod diagnostics;
 mod explain;
+mod export_file;
 mod updater;
 
 use std::{
@@ -31,6 +32,7 @@ use catabase_core::{
     sql::{row_change_verb, transaction_activity_scope},
     test_connection as test_pg_connection, validate_transaction_sql,
 };
+use export_file::{ExportFile, ExportFileRequest};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, webview::PageLoadEvent};
 use tauri_plugin_window_state::StateFlags;
@@ -42,6 +44,7 @@ struct AppState {
     pool: RwLock<Option<ActivePool>>,
     tx: Mutex<Option<TxSession>>,
     cancels: Mutex<HashMap<String, CancelEntry>>,
+    exports: Mutex<HashMap<String, ExportFile>>,
     supermaven: Arc<SupermavenClient>,
     updates: updater::UpdateState,
     exit_guard_enabled: AtomicBool,
@@ -1040,13 +1043,37 @@ async fn supermaven_open_activation(state: State<'_, AppState>) -> Result<(), Ap
 }
 
 #[tauri::command]
-async fn export_write_file(
+async fn export_file(
     state: State<'_, AppState>,
-    path: String,
-    content: String,
+    file_id: String,
+    request: ExportFileRequest,
 ) -> Result<(), AppError> {
     let _workspace = state.updates.workspace_operation()?;
-    tokio::fs::write(path, content).await.map_err(Into::into)
+    let mut exports = state.exports.lock().await;
+    match request {
+        ExportFileRequest::Open { path } => {
+            if exports.contains_key(&file_id) {
+                return Err(CoreError::message("This export file is already open.").into());
+            }
+            exports.insert(file_id, ExportFile::open(path)?);
+        }
+        ExportFileRequest::Append { content } => {
+            let file = exports
+                .get_mut(&file_id)
+                .ok_or_else(|| CoreError::message("This export file has closed."))?;
+            file.append(&content).await?;
+        }
+        ExportFileRequest::Finish => {
+            let file = exports
+                .remove(&file_id)
+                .ok_or_else(|| CoreError::message("This export file has closed."))?;
+            file.finish().await?;
+        }
+        ExportFileRequest::Discard => {
+            exports.remove(&file_id);
+        }
+    }
+    Ok(())
 }
 
 fn emit_pool_reset(app: &AppHandle) {
@@ -1891,6 +1918,7 @@ pub fn run() {
                 pool: RwLock::new(None),
                 tx: Mutex::new(None),
                 cancels: Mutex::new(HashMap::new()),
+                exports: Mutex::new(HashMap::new()),
                 supermaven,
                 updates: updater::UpdateState::default(),
                 exit_guard_enabled: AtomicBool::new(false),
@@ -1927,7 +1955,7 @@ pub fn run() {
             explain::share_explain,
             explain::open_explain_link,
             enable_exit_guard,
-            export_write_file,
+            export_file,
             finish_exit,
             get_ddl,
             get_settings,
