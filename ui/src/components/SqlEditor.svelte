@@ -166,6 +166,11 @@
       }
     });
 
+    // Reserve Cmd/Ctrl+Enter for Run. Vim's o calls the line action by ID.
+    const runShortcutOverride = monaco.editor.addKeybindingRule({
+      keybinding: monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter,
+      command: '-editor.action.insertLineAfter'
+    });
     vimCommandContext = editor.createContextKey('catabaseVimCommandMode', false);
     // The Vim adapter leaves Tab unhandled. Keep Monaco's focus navigation available.
     const vimIndentContext = 'catabaseVimCommandMode && editorTextFocus && !editorTabMovesFocus';
@@ -249,6 +254,8 @@
       },
       freeInlineCompletions: () => undefined
     });
+
+    return () => runShortcutOverride.dispose();
   });
 
   onDestroy(() => {
