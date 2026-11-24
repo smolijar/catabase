@@ -26,7 +26,7 @@
   $: stale = !disconnected && health === 'stale';
   $: testError = state?.status === 'error' && state.origin === 'test' ? state.message : '';
   $: showTestError = Boolean(testError) && (health === 'error' || !online);
-  $: message = running ? activity === 'cancelling' ? 'Cancelling…' : 'Running…' : testing ? 'Testing…' : stale ? 'Check stale'
+  $: message = testing ? 'Testing…' : stale ? 'Check stale'
     : disconnected && connection ? `${connection.name}: ${testError}` : testError;
   $: lockReason = `Connection locked to ${lockedConnectionName || connection?.name || 'this tab'}. Right-click the tab to unlock.`;
   $: title = !connection ? connectionLocked ? `${lockReason} Run a query to review and reconnect.` : 'Choose this tab’s database connection'
@@ -58,7 +58,7 @@
   <span class="connection-name">{disconnected ? 'Disconnected' : connection?.name ?? 'Disconnected'}</span>
   {#if switcher && connection && !disconnected}<span class="connection-user">{connection.username}</span>{/if}
   {#if switcher && environment && !disconnected}<span class="environment">{environment}</span>{/if}
-  {#if running || testing || stale || (!compact && showTestError)}<span class="connection-message" role={running ? undefined : 'status'}>{message}</span>{/if}
+  {#if !running && (testing || stale || (!compact && showTestError))}<span class="connection-message" role="status">{message}</span>{/if}
 </button>
 {#if switcher}<button class="switch-arrow" aria-label={connectionLocked ? lockReason : 'Switch connection'} aria-haspopup="dialog" title={connectionLocked ? lockReason : 'Switch or disconnect connection'} disabled={disabled || running || connectionLocked} on:click={onChoose}><span class:chevron={!connectionLocked}><Icon name={connectionLocked ? 'lock' : 'chevron'} size={12} /></span></button>{/if}
 </div>
@@ -76,7 +76,7 @@
   .connection-user { color: var(--ink-muted); font: 11px var(--font-mono); max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
   .environment { color: var(--accent); background: var(--accent-soft); border-radius: 2px; padding: 0 4px; font: 11px/16px var(--font-mono); text-transform: uppercase; }
   .chevron { transform: rotate(90deg); color: var(--ink-faint); }
-  .connection-name:has(+ .connection-message) { flex-shrink: 0; max-width: 200px; }
+  .connection-name:has(+ .connection-message) { max-width: 200px; }
   .status-dot { flex-shrink: 0; }
   .connection-chip.connected { color: var(--ink); }
   .connection-chip.testing { color: var(--warn); opacity: 1; }

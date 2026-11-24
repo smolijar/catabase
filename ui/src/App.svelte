@@ -340,9 +340,9 @@
   $: visibleSidebarWidth = clampSidebarWidth(sidebarWidth, workspaceWidth);
   $: activeOperation = operation?.tabId === activeTab ? operation : null;
   $: operationText = operation
-    ? `${operation.cancelling ? 'Cancelling' : operationLabels[operation.kind]} · ${formatRunningDuration(operation.startedAt, nowMs, 'seconds')}`
+    ? `${operation.cancelling ? 'Cancelling' : operationLabels[operation.kind]} · ${formatRunningDuration(operation.startedAt, nowMs, 'adaptive')}`
     : '';
-  $: transactionDuration = formatRunningDuration(txStatus.startedAt, nowMs);
+  $: transactionDuration = formatRunningDuration(txStatus.startedAt, nowMs, 'adaptive');
   $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
   $: historyContext = tabs.find(tab => tab.id === activeTab)?.historyContext ?? null;
   $: resultContext = resultSession ?? historyContext;
@@ -2335,29 +2335,33 @@
 
 <main class="app-shell" class:native-titlebar={nativeTitlebar} inert={closingWorkspace || Boolean(tabCloseTask) || queryPreparing || Boolean(connectionMutation)} aria-busy={Boolean(tabCloseTask) || queryPreparing || Boolean(connectionMutation)}>
   <header class="toolbar" data-tauri-drag-region={nativeTitlebar ? 'deep' : undefined}>
-    <div class="brand" aria-label="catabase">
-      <Cat mood={activeConnection ? 'awake' : 'asleep'} animate={false} />
-      <span class="wordmark" aria-hidden="true"><b>CAT</b>ABASE<i></i></span>
+    <div class="toolbar-start">
+      <div class="brand" aria-label="catabase">
+        <Cat mood={operation?.kind === 'query' ? 'prompt' : activeConnection ? 'awake' : 'asleep'} animate={operation?.kind === 'query'} />
+        <span class="wordmark" aria-hidden="true"><b>CAT</b>ABASE</span>
+      </div>
+      {#if updateState.update}
+        <button class="update-badge" title={`Catabase ${updateState.update.version} is available`} on:click={openAppUpdates}><Icon name="download" size={12} /><span>Update available</span></button>
+      {/if}
     </div>
-    {#if updateState.update}
-      <button class="update-badge" title={`Catabase ${updateState.update.version} is available`} on:click={openAppUpdates}><Icon name="download" size={12} /><span>Update available</span></button>
-    {/if}
     <button class="workspace-search" aria-label="Search workspace" title="Search workspace (Cmd/Ctrl+K)" on:click={() => picker = 'commands'}><Icon name="search" size={14} /><span>Search tables, queries, connections, history…</span><kbd>⌘K</kbd></button>
-    {#if operation}<button class="operation-status" title="Go to the tab with this operation" on:click={() => switchTab(operation!.tabId)}>{operationText}</button>{/if}
-    <ConnectionPill
-      switcher
-      activity={operation?.connectionId === tabConnectionId ? operation.cancelling ? 'cancelling' : 'running' : null}
-      environment={connectionAppearance.environment}
-      connection={statusConnection}
-      online={Boolean(activeConnection)}
-      connectionLocked={focusedConnectionLocked} {lockedConnectionName}
-      state={tabConnectionTest}
-      now={nowMs}
-      disabled={running || Boolean(connectionMutation)}
-      onTest={testCurrentConnection}
-      onChoose={() => picker = 'connections'}
-    />
-    {#if connectionMutation}<span class="operation-status" role="status">{connectionMutation}</span>{/if}
+    <div class="toolbar-end">
+      {#if operation && !activeOperation}<button class="operation-status" title="Go to the tab with this operation" on:click={() => switchTab(operation!.tabId)}>{operationText}</button>{/if}
+      <ConnectionPill
+        switcher
+        activity={operation?.connectionId === tabConnectionId ? operation.cancelling ? 'cancelling' : 'running' : null}
+        environment={connectionAppearance.environment}
+        connection={statusConnection}
+        online={Boolean(activeConnection)}
+        connectionLocked={focusedConnectionLocked} {lockedConnectionName}
+        state={tabConnectionTest}
+        now={nowMs}
+        disabled={running || Boolean(connectionMutation)}
+        onTest={testCurrentConnection}
+        onChoose={() => picker = 'connections'}
+      />
+      {#if connectionMutation}<span class="operation-status" role="status">{connectionMutation}</span>{/if}
+    </div>
   </header>
 
   <section bind:this={workspaceElement} class="workspace" class:sidebar-open={sidebarOpen} class:resizing-sidebar={resizingSidebar} style={`--sidebar-width: ${visibleSidebarWidth}px`}>
@@ -2785,7 +2789,6 @@
     {#if activeConnection}<button class="status-link" tabindex="-1" title={`Open connection pool settings for ${activeConnection.name}`} on:click={() => { sidebar = 'settings'; sidebarOpen = true; }}>pool {currentPoolStats ? `${currentPoolStats.active} active · ${currentPoolStats.idle} idle · ${currentPoolStats.poolSize} max` : '—'}</button>{/if}
     <button class="status-link" tabindex="-1" title="Open schema browser" on:click={() => { sidebar = 'schema'; sidebarOpen = true; }}>{schemaItems.length ? `${schemaItems.length} schema objects` : schemaLoading ? 'Loading schema…' : 'Schema'}</button>
     <span class="draft-status">{!workspaceLoaded ? 'restoring workspace…' : closingWorkspace || draftStatus === 'saving' ? 'saving drafts…' : draftStatus === 'pending' ? 'saving drafts…' : draftStatus === 'error' ? 'draft save failed' : 'drafts saved'}</span>
-    {#if operation}<span class="footer-operation">{operationText}</span>{/if}
     <span class="cursor-position">Ln {cursorLine}, Col {cursorColumn}</span>
     {#if statusTiming}
       <button class="status-flash status-timing" tabindex="-1" title="Show query timing breakdown" aria-haspopup="dialog" on:click={() => (timingDetails = statusTiming)}>{statusFlash}</button>

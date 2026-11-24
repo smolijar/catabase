@@ -31,18 +31,20 @@ kbd { border: 1px solid var(--line); border-radius: 2px; background: var(--surfa
 .app-shell { display: grid; grid-template-rows: 40px minmax(0, 1fr) 24px; height: 100vh; background: var(--surface-1); }
 .toolbar, .status-bar, .tabs, .results-head, .panel-head, .row-actions, .brand { display: flex; align-items: center; }
 .toolbar { gap: 12px; padding: 0 12px; background: var(--surface-0); border-bottom: 1px solid var(--line); min-width: 0; }
+.app-shell > .toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+.toolbar-start, .toolbar-end { display: flex; align-items: center; gap: inherit; min-width: 0; }
+.toolbar-end { justify-content: flex-end; }
 /* Native macOS controls are overlaid at x=14, y=20 (tauri.conf.json).
    Leave them unobstructed and align the app header in the same titlebar row. */
 .app-shell.native-titlebar { grid-template-rows: 48px minmax(0, 1fr) 24px; }
-.native-titlebar > .toolbar { padding-left: 90px; }
+.native-titlebar > .toolbar > .toolbar-start { padding-left: 78px; }
 html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); }
 .brand { gap: 8px; min-width: 0; flex-shrink: 0; }
 .wordmark { font: 16px/16px 'Silkscreen', var(--font-mono); letter-spacing: -.5px; white-space: nowrap; }
 .wordmark b { color: var(--brand); font-weight: 400; }
-.wordmark i { display: inline-block; width: 7px; height: 13px; margin-left: 3px; background: var(--brand); vertical-align: -1px; }
 .update-badge { flex-shrink: 0; min-height: 22px; height: 22px; padding: 0 7px; gap: 5px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface-1); color: var(--ink-muted); font-size: 11px; font-weight: 400; line-height: 16px; white-space: nowrap; }
 .update-badge .icon { color: var(--brand); }
-.workspace-search { justify-content: flex-start; margin: 0 auto; width: min(360px, 35vw); color: var(--ink-faint); border-color: var(--line); background: var(--surface-1); text-align: left; }
+.workspace-search { justify-content: flex-start; width: clamp(160px, calc(100vw - 736px), 360px); color: var(--ink-faint); border-color: var(--line); background: var(--surface-1); text-align: left; }
 .workspace-search span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-search kbd { margin-left: auto; }
 .muted, .empty { color: var(--ink-muted); }
@@ -53,7 +55,7 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .run-button kbd { border-color: currentColor; background: transparent; color: inherit; opacity: .8; }
 .run-button.cancel-button { background: var(--surface-1); border-color: var(--line-strong); color: var(--danger); }
 .run-button.cancel-button:hover:not(:disabled) { background: var(--danger-soft); filter: none; }
-.operation-status { border: 0; background: transparent; color: var(--warn); font-size: 11px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.operation-status { display: block; border: 0; background: transparent; color: var(--warn); font-size: 11px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace { position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr); min-width: 0; min-height: 0; }
 .workspace.sidebar-open { grid-template-columns: 44px var(--sidebar-width, 280px) 5px minmax(0, 1fr); }
 .workspace.resizing-sidebar, .workspace.resizing-sidebar * { cursor: col-resize !important; user-select: none !important; }
@@ -232,7 +234,6 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .results-empty .query-error { max-width: 72ch; }
 .empty-state-icon { color: var(--ink-faint); }
 .status-bar { gap: 12px; min-width: 0; border-top: 1px solid var(--line); background: var(--surface-0); color: var(--ink-muted); font: 11px/16px var(--font-mono); padding: 0 8px; white-space: nowrap; }
-.footer-operation { color: var(--warn); }
 html:not([data-conn='none']) .status-bar { background: var(--accent-soft); }
 .status-link { min-height: 22px; padding: 2px 4px; border: 0; border-radius: 0; background: transparent; color: inherit; font-size: inherit; white-space: nowrap; }
 .status-flash { min-width: 0; overflow: hidden; margin-left: auto; color: var(--ink-muted); text-overflow: ellipsis; white-space: nowrap; }

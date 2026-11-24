@@ -60,18 +60,19 @@ test('testing displays progress and disables duplicate clicks', () => {
   assert.match(html, /role="status">Testing…/);
 });
 
-test('both connection pills show query activity with their status dot', () => {
+test('both connection pills signal query activity with a dot and accessible label', () => {
   for (const compact of [false, true]) {
     const running = renderPill({ status: 'running' }, compact);
     assert.match(running, /connection-chip[^"]*running/);
     assert.match(running, /aria-label="Running on zenbase docker"/);
     assert.match(running, /aria-busy="true"/);
     assert.match(running, / disabled/);
-    assert.match(running, /connection-message[^>]*>Running…/);
+    assert.match(running, /class="status-dot\b/);
+    assert.doesNotMatch(running, /connection-message/);
     assert.doesNotMatch(running, /Testing/);
     const cancelling = renderPill({ status: 'testing' }, compact, 12345, { activity: 'cancelling' });
     assert.match(cancelling, /aria-label="Cancelling on zenbase docker"/);
-    assert.match(cancelling, /connection-message[^>]*>Cancelling…/);
+    assert.doesNotMatch(cancelling, /connection-message/);
     assert.doesNotMatch(cancelling, /Testing/);
   }
 });
