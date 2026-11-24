@@ -6,6 +6,8 @@
   import 'monaco-editor/esm/vs/editor/contrib/inlineCompletions/browser/inlineCompletions.contribution';
   // editor.api omits the standard word movement, selection and deletion commands.
   import 'monaco-editor/esm/vs/editor/contrib/wordOperations/browser/wordOperations';
+  // monaco-vim uses insertLineAfter for o and O.
+  import 'monaco-editor/esm/vs/editor/contrib/linesOperations/browser/linesOperations';
   import 'monaco-editor/esm/vs/editor/contrib/find/browser/findController';
   import 'monaco-editor/esm/vs/editor/contrib/multicursor/browser/multicursor';
   import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
@@ -88,6 +90,7 @@
   const QUICK_SUGGESTIONS = { other: true, comments: false, strings: false };
 
   let host: HTMLDivElement;
+  let overflowHost: HTMLDivElement | undefined;
   let editor: monaco.editor.IStandaloneCodeEditor | undefined;
   let vimStatus: HTMLDivElement | undefined;
   let vimAdapter: ReturnType<typeof initVimMode> | undefined;
@@ -114,11 +117,17 @@
 
     applyTheme(themeKey);
 
+    // Popups need to escape the editor pane's clipping and remain interactive.
+    overflowHost = document.createElement('div');
+    overflowHost.className = 'monaco-editor sql-editor-widgets';
+    document.body.append(overflowHost);
     editor = monaco.editor.create(host, {
       value,
       language: 'sql',
       theme: 'catabase',
       automaticLayout: true,
+      fixedOverflowWidgets: true,
+      overflowWidgetsDomNode: overflowHost,
       fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize,
       lineHeight: Math.round(fontSize * 20 / 13),
@@ -252,6 +261,7 @@
     highlights?.clear();
     if (keydownHandler) window.removeEventListener('keydown', keydownHandler, true);
     editor?.dispose();
+    overflowHost?.remove();
     editor = undefined;
     highlights = undefined;
   });
