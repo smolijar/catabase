@@ -1,5 +1,10 @@
 type SearchKey = Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'isComposing'>;
 
+export function workspaceSearchShortcut(event: SearchKey): boolean {
+  return !event.isComposing && !event.altKey && !event.shiftKey
+    && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k';
+}
+
 export function editorSearchShortcut(event: SearchKey): 'find' | 'replace' | null {
   if ((!event.metaKey && !event.ctrlKey) || event.shiftKey || event.isComposing) return null;
   if (event.key.toLowerCase() === 'f') return event.altKey ? 'replace' : 'find';

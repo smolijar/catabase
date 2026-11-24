@@ -42,7 +42,14 @@
       {#each matches as item, index (item.id)}
         {#if index === 0 || matches[index - 1].group !== item.group}<div class="group-label" role="presentation">{item.group}</div>{/if}
         <button id={`picker-option-${index}`} data-index={index} title={item.title ? `${item.title}\n${item.detail}` : undefined} role="option" aria-selected={selected === index} class:selected={selected === index} disabled={item.disabled} on:focus={() => selected = index} on:keydown={keydown} on:click={() => onSelect(item.id)}>
-          <span class="item-label">{item.label}</span><span class="detail">{item.detail}</span>{#if item.active}<Icon name="check" size={14} />{/if}
+          {#if item.appearance && item.appearance.color !== 'none'}
+            <span class="connection-color" data-conn={item.appearance.color} aria-hidden="true"></span>
+          {/if}
+          <span class="item-label">{item.label}</span>
+          {#if item.appearance?.environment}
+            <span class="environment" data-conn={item.appearance.color !== 'none' ? item.appearance.color : undefined}>{item.appearance.environment}</span>
+          {/if}
+          <span class="detail">{item.detail}</span>{#if item.active}<Icon name="check" size={14} />{/if}
         </button>
       {/each}
       {#if !matches.length && !searchStatus}<p class="empty">No matches. Try another name.</p>{/if}
@@ -62,6 +69,9 @@
   .picker-list button { width: 100%; justify-content: flex-start; border: 0; background: transparent; padding: 6px 8px; min-height: 32px; }
   .picker-list button.selected { background: var(--surface-3); }
   .item-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .connection-color { flex: 0 0 6px; height: 6px; background: var(--accent); }
+  .environment { flex: 0 0 auto; padding: 0 4px; border-radius: 2px; color: var(--ink-muted); background: var(--surface-3); font: 10px/16px var(--font-mono); text-transform: uppercase; }
+  .environment[data-conn] { color: var(--accent); background: var(--accent-soft); }
   .detail { margin-left: auto; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-faint); font: 11px/16px var(--font-mono); }
   .search-status { margin: 8px; color: var(--ink-muted); font-size: 12px; }
   footer { display: flex; gap: 16px; border-top: 1px solid var(--line); padding: 8px 12px; color: var(--ink-faint); font-size: 11px; }

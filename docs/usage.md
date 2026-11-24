@@ -156,7 +156,7 @@ On macOS, the workspace header shares a row with the native traffic-light contro
 | Shortcut | Action |
 | --- | --- |
 | `Cmd/Ctrl+Enter` | Run the selection or statement at the cursor. |
-| `Cmd/Ctrl+K` | Search the workspace. |
+| `Cmd/Ctrl+K` | Search the workspace and switch saved connections. |
 | `Cmd/Ctrl+F` | Find in the SQL editor. |
 | `Cmd/Ctrl+D` | Select the word at the cursor, then add the next occurrence. |
 | `Cmd+Option+Up/Down` (macOS) | Add a cursor above or below in the SQL editor. |

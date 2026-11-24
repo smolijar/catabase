@@ -1,3 +1,5 @@
+import type { ConnectionAppearance } from './appearance';
+
 export interface PickerItem {
   id: string;
   label: string;
@@ -6,6 +8,7 @@ export interface PickerItem {
   group: string;
   disabled?: boolean;
   active?: boolean;
+  appearance?: ConnectionAppearance;
   /** Full SQL/content to match without forcing it into a compact row label. */
   searchText?: string;
   /** Already filtered by the history database (including error text). */

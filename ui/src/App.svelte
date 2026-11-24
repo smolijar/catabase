@@ -54,7 +54,7 @@
   import { canRequestSupermaven } from './lib/supermavenInline';
   import { createHistorySearch, groupHistory } from './lib/history';
   import type { HistorySearchState } from './lib/history';
-  import { editorSearchShortcut } from './lib/editorSearch';
+  import { editorSearchShortcut, workspaceSearchShortcut } from './lib/editorSearch';
   import { DEFAULT_EDITOR_FONT_SIZE, EDITOR_FONT_STORAGE_KEY, fontSizeShortcut, resizeEditorFont, restoreEditorFontSize } from './lib/editorFont';
   import type { QueryTimingDetails } from './lib/queryTiming';
   import { createConnectionTester } from './lib/connectionTest';
@@ -299,14 +299,29 @@
     void getCurrentWindow().setTheme(theme === 'system' ? null : theme === 'snow' ? 'light' : 'dark')
       .catch(error => console.warn('Could not update the native window theme', error));
   }
+  $: connectionPickerItems = connections.map(connection => {
+    const appearance = appearances[connection.id];
+    const account = `${connection.username} · ${connection.database}`;
+    return {
+      id: `connection:${connection.id}`,
+      label: connection.name,
+      detail: focusedConnectionLocked ? 'Unlock the focused tab to switch' : account,
+      searchText: `${account} ${appearance?.environment ?? ''}`,
+      appearance,
+      group: 'Connections',
+      active: connection.id === activeConnection?.id,
+      disabled: focusedConnectionLocked || running || Boolean(connectionMutation)
+    };
+  });
   $: pickerItems = picker === 'connections'
     ? [
-      ...connections.map(c => ({ id: c.id, label: c.name, detail: focusedConnectionLocked ? 'Unlock the focused tab to switch' : c.username, group: 'Connections', active: c.id === activeConnection?.id, disabled: focusedConnectionLocked || running || Boolean(connectionMutation) })),
+      ...connectionPickerItems,
       ...(activeConnection ? [{ id: 'command:disconnect', label: `Disconnect ${activeConnection.name}`, detail: 'Keep saved connection & drafts', group: 'Actions', disabled: running || Boolean(connectionMutation) }] : [])
     ]
     : [
       ...tabs.map(t => ({ id: `tab:${t.id}`, label: t.title, title: t.id === activeTab ? sql : t.sql, searchText: t.id === activeTab ? sql : t.sql, detail: `${t.kind === 'reference' ? 'Read-only reference' : 'Saved query'} · ${connections.find(c => c.id === t.connectionId)?.name ?? 'No connection'}`, group: 'Open tabs' })),
       ...archivedTabs.map(t => ({ id: `closed-tab:${t.id}`, label: t.title, title: t.sql, searchText: t.sql, detail: `Reopen · ${connections.find(c => c.id === t.connectionId)?.name ?? 'No connection'} · ${formatHistoryTime(t.closedAt)}`, group: 'Closed tabs' })),
+      ...connectionPickerItems,
       ...schemaItems.map(item => ({ id: `table:${item.schema}.${item.name}`, label: `${item.schema}.${item.name}`, detail: `${item.columns.length} columns`, group: 'Tables & views' })),
       ...pickerHistory.entries.map(entry => ({ id: `history:${entry.id}`, label: entry.query.replace(/\s+/g, ' ').slice(0, 200), title: entry.query, detail: `#${entry.id} · ${entry.durationMs} ms · ${connections.find(c => c.id === entry.connectionId)?.name ?? 'Unavailable connection'} · ${formatHistoryTime(entry.executedAt)} · ${entry.isError ? 'Error' : entry.hasResult ? 'Snapshot' : 'SQL only'}`, group: 'History', matched: true })),
       ...(['new', 'connections', 'schema', 'history', 'activity', 'tabs', 'settings', 'find', 'format'] as const).map(id => ({ id: `command:${id}`, label: ({ new: 'New query', connections: 'Switch connection', schema: 'Browse schema', history: 'Query history', activity: 'Activity log', tabs: 'Browse open & closed tabs', settings: 'Settings', find: 'Find in SQL', format: 'Format SQL' })[id], detail: id === 'new' ? '⌘T' : id === 'find' ? '⌘F' : id === 'connections' && focusedConnectionLocked ? 'Unlock the focused tab first' : '', disabled: id === 'connections' && focusedConnectionLocked, group: 'Commands' })),
@@ -398,6 +413,7 @@
     void registerNativeLifecycle();
     void registerHistoryEvents();
     explainEventsReady = registerExplainEvents();
+    window.addEventListener('keydown', captureWorkspaceSearch, true);
     window.addEventListener('keydown', handleKeydown);
     window.addEventListener('beforeunload', flushDraftOnUnload);
     const statsInterval = window.setInterval(() => {
@@ -472,6 +488,7 @@
       media.removeEventListener('change', onSystemTheme);
       layoutObserver.disconnect();
       for (const cleanup of nativeCleanup) cleanup();
+      window.removeEventListener('keydown', captureWorkspaceSearch, true);
       window.removeEventListener('keydown', handleKeydown);
       window.removeEventListener('beforeunload', flushDraftOnUnload);
       window.clearInterval(statsInterval);
@@ -965,6 +982,13 @@
     return Array.from(groups, ([name, groupItems]) => ({ name, items: groupItems }));
   }
 
+  function captureWorkspaceSearch(event: KeyboardEvent) {
+    // Monaco consumes Cmd/Ctrl+K as the first key of an editor chord.
+    if (event.defaultPrevented || !workspaceSearchShortcut(event)) return;
+    handleKeydown(event);
+    if (event.defaultPrevented) event.stopPropagation();
+  }
+
   function handleKeydown(event: KeyboardEvent) {
     if (event.defaultPrevented || !workspaceLoaded || closingWorkspace) return;
     if (tabCloseTask) { event.preventDefault(); return; }
@@ -979,7 +1003,7 @@
     if (showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails) return;
     const command = event.metaKey || event.ctrlKey;
     if (!command) return;
-    if (event.key.toLowerCase() === 'k') {
+    if (workspaceSearchShortcut(event)) {
       event.preventDefault();
       picker = 'commands';
       return;
@@ -1078,9 +1102,12 @@
   function selectPickerItem(id: string) {
     const mode = picker;
     picker = null;
+    if (id.startsWith('connection:')) {
+      void activateConnection(id.slice('connection:'.length));
+      return;
+    }
     if (mode === 'connections') {
       if (id === 'command:disconnect' && tabConnectionId) void disconnectConnection(tabConnectionId);
-      else void activateConnection(id);
       return;
     }
     if (id.startsWith('tab:')) { switchTab(id.slice(4)); return; }
@@ -2315,7 +2342,7 @@
     {#if updateState.update}
       <button class="update-badge" title={`Catabase ${updateState.update.version} is available`} on:click={openAppUpdates}><Icon name="download" size={12} /><span>Update available</span></button>
     {/if}
-    <button class="workspace-search" aria-label="Search tables, queries, history, commands" title="Search workspace (Cmd/Ctrl+K)" on:click={() => picker = 'commands'}><Icon name="search" size={14} /><span>Search tables, queries, history, commands</span><kbd>⌘K</kbd></button>
+    <button class="workspace-search" aria-label="Search workspace" title="Search workspace (Cmd/Ctrl+K)" on:click={() => picker = 'commands'}><Icon name="search" size={14} /><span>Search tables, queries, connections, history…</span><kbd>⌘K</kbd></button>
     {#if operation}<button class="operation-status" title="Go to the tab with this operation" on:click={() => switchTab(operation!.tabId)}>{operationText}</button>{/if}
     <ConnectionPill
       switcher
@@ -2792,7 +2819,9 @@
   <ResumeConnectionDialog {connections} initialConnectionId={reconnectReview.connectionId} {appearances} query={reconnectReview.target.sql} locked={focusedConnectionLocked} globalSelection={connectionScope === 'global'} onConfirm={resolveReconnectReview} onClose={() => resolveReconnectReview(null)} />
 {/if}
 {#if picker}
-  <WorkspacePicker label={picker === 'connections' ? 'Switch connection' : 'Search workspace'} placeholder={picker === 'connections' ? 'Find a connection…' : 'Search tables, queries, history, commands…'} items={pickerItems} onSearch={searchPickerHistory} searchStatus={picker === 'commands' ? pickerHistory.loading ? 'Searching history…' : pickerHistory.error ? `History unavailable: ${pickerHistory.error}` : pickerHistory.total > 20 ? `Showing the 20 newest of ${pickerHistory.total} history matches. Refine your search for older entries.` : '' : ''} onSelect={selectPickerItem} onClose={() => picker = null} />
+  {#key picker}
+    <WorkspacePicker label={picker === 'connections' ? 'Switch connection' : 'Search workspace'} placeholder={picker === 'connections' ? 'Find a connection…' : 'Search tables, queries, connections, history, commands…'} items={pickerItems} onSearch={searchPickerHistory} searchStatus={picker === 'commands' ? pickerHistory.loading ? 'Searching history…' : pickerHistory.error ? `History unavailable: ${pickerHistory.error}` : pickerHistory.total > 20 ? `Showing the 20 newest of ${pickerHistory.total} history matches. Refine your search for older entries.` : '' : ''} onSelect={selectPickerItem} onClose={() => picker = null} />
+  {/key}
 {/if}
 
 {#if explainSession}
