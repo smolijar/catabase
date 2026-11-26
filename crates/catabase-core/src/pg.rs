@@ -748,11 +748,7 @@ async fn execute_simple(
                     })
                     .or_else(|| statements.get(index));
                 if let (Some(observer), Some(failed)) = (observer, failed) {
-                    observer.finished(
-                        &failed.text,
-                        Err(&error),
-                        statement_start.elapsed().as_millis(),
-                    );
+                    observer.batch_error(failed, &error, statement_start.elapsed().as_millis());
                 }
                 return Err(error);
             }
@@ -814,7 +810,7 @@ async fn execute_simple(
                 };
                 let save_start = Instant::now();
                 if let (Some(observer), Some(statement)) = (observer, statements.get(index)) {
-                    observer.finished(&statement.text, Ok(&last), last.duration_ms);
+                    observer.batch_result(statement, &mut last);
                 }
                 history_time += save_start.elapsed();
                 index += 1;

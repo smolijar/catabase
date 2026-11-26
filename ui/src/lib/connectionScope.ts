@@ -1,4 +1,5 @@
 import type { WorkspaceTab } from './workspace';
+import { discardResultEdits } from './workspace.ts';
 
 export type ConnectionScope = 'tab' | 'global';
 export const CONNECTION_SCOPE_KEY = 'catabase.connectionScope';
@@ -22,8 +23,6 @@ export function newTabConnection(scope: ConnectionScope, globalId: string | null
 /** Keep the original result visible as a previous result, without staged values. */
 export function switchTabConnection(tab: WorkspaceTab, connectionId: string): Partial<WorkspaceTab> {
   return {
-    connectionId, pendingChanges: [], editMode: false,
-    session: tab.session && tab.pendingChanges.length && !tab.session.snapshot
-      ? { ...tab.session, data: { ...tab.session.data, rows: structuredClone(tab.originalRows) } } : tab.session
+    connectionId, results: tab.results.map(discardResultEdits)
   };
 }

@@ -1,14 +1,18 @@
 import type { editor } from 'monaco-editor';
 import type { AppError, ExecutionTarget, HistoryEntry, QueryResult } from './types';
 
-export interface ResultSession {
-  data: QueryResult;
+export interface ResultContext {
   execution: ExecutionTarget;
   connectionId: string | null;
   connectionName: string;
   executedAt: string;
+  durationMs?: number;
   historyEntryIds?: number[];
   snapshot: boolean;
+}
+
+export interface ResultSession extends ResultContext {
+  data: QueryResult;
 }
 
 export interface PendingChange {
@@ -21,6 +25,17 @@ export interface PendingChange {
 
 export type CellEdit = { value: unknown } | { action: 'reset' | 'default' };
 
+export interface ResultTab {
+  id: string;
+  context: ResultContext;
+  data: QueryResult | null;
+  error: AppError | null;
+  originalRows: Record<string, unknown>[];
+  pendingChanges: PendingChange[];
+  editMode: boolean;
+  savedSnapshot?: { entryId: number; state: 'unloaded' | 'loading' | 'failed'; message?: string };
+}
+
 export interface WorkspaceTab {
   id: string;
   title: string;
@@ -29,12 +44,8 @@ export interface WorkspaceTab {
   connectionId: string | null;
   connectionLocked?: boolean;
   viewState: editor.ICodeEditorViewState | null;
-  session: ResultSession | null;
-  error: AppError | null;
-  historyContext?: Omit<ResultSession, 'data'> & { durationMs: number };
-  originalRows: Record<string, unknown>[];
-  pendingChanges: PendingChange[];
-  editMode: boolean;
+  results: ResultTab[];
+  activeResultId: string | null;
 }
 
 export type ArchivedTab = Pick<WorkspaceTab, 'id' | 'title' | 'sql' | 'connectionId' | 'connectionLocked' | 'viewState'> & { closedAt: string };
@@ -50,24 +61,57 @@ export function reopenArchivedTab(tab: ArchivedTab): WorkspaceTab {
 }
 
 export function createQueryTab(id: string, title: string, sql = '', connectionId: string | null = null): WorkspaceTab {
-  return { id, title, kind: 'query', sql, connectionId, connectionLocked: false, viewState: null, session: null, error: null, originalRows: [], pendingChanges: [], editMode: false };
+  return { id, title, kind: 'query', sql, connectionId, connectionLocked: false, viewState: null, results: [], activeResultId: null };
 }
 
-/** Failed executions have a saved error, not a QueryResult. Keep their context
- * without inventing an empty successful result or re-running their SQL. */
+export function createResultTab(id: string, context: ResultContext, data: QueryResult | null, error: AppError | null = null): ResultTab {
+  return { id, context, data, error, originalRows: data?.rows ?? [], pendingChanges: [], editMode: false };
+}
+
+export function placeResults(tab: WorkspaceTab, incoming: ResultTab[], append: boolean, pendingId: string | null = null): Pick<WorkspaceTab, 'results' | 'activeResultId'> {
+  const first = incoming.find(result => result.error)?.id ?? incoming[0]?.id ?? null;
+  if (!append) return { results: incoming, activeResultId: first };
+  const results = [...tab.results.filter(result => result.id !== pendingId), ...incoming];
+  const activeResultId = pendingId && tab.activeResultId && tab.activeResultId !== pendingId ? tab.activeResultId : first;
+  return { results, activeResultId };
+}
+
+export function discardResultEdits(result: ResultTab): ResultTab {
+  if (!result.editMode && !result.pendingChanges.length) return result;
+  return {
+    ...result, pendingChanges: [], editMode: false,
+    data: result.data ? { ...result.data, rows: result.originalRows } : null
+  };
+}
+
+function createHistoryResult(entry: HistoryEntry, result: QueryResult | null, connectionName: string, start = 0): ResultTab {
+  const context: ResultContext = {
+    execution: { sql: entry.query, start, end: start + entry.query.length },
+    connectionId: entry.connectionId ?? null, connectionName,
+    executedAt: entry.executedAt, durationMs: entry.durationMs, historyEntryIds: [entry.id], snapshot: true
+  };
+  const item = createResultTab(`history:${entry.id}`, context, entry.isError ? null : result,
+    entry.isError ? { message: entry.errorMessage || 'This query failed, but no error message was saved.' } : null);
+  if (!result && entry.hasResult && !entry.isError) item.savedSnapshot = { entryId: entry.id, state: 'unloaded' };
+  return item;
+}
+
 export function createHistoryTab(entry: HistoryEntry, result: QueryResult | null, connectionName: string): WorkspaceTab {
   const tab = createQueryTab(`history:${entry.id}`, `History #${entry.id}`, entry.query, entry.connectionId ?? null);
-  const context = {
-    execution: { sql: entry.query, start: 0, end: entry.query.length },
-    connectionId: entry.connectionId ?? null, connectionName,
-    executedAt: entry.executedAt, historyEntryIds: [entry.id], snapshot: true
-  };
-  return {
-    ...tab, kind: 'reference',
-    historyContext: { ...context, durationMs: entry.durationMs },
-    session: !entry.isError && result ? { ...context, data: result } : null,
-    error: entry.isError ? { message: entry.errorMessage || 'This query failed, but no error message was saved.' } : null
-  };
+  const item = createHistoryResult(entry, result, connectionName);
+  return { ...tab, kind: 'reference', results: [item], activeResultId: item.id };
+}
+
+export function createHistoryTransactionTab(id: string, title: string, entries: HistoryEntry[], connectionName: string): WorkspaceTab {
+  const sql = entries.map(entry => entry.query).join('\n\n');
+  const tab = createQueryTab(`history-transaction:${id}`, `History · ${title} ${id.slice(0, 8)}`, sql, entries[0]?.connectionId ?? null);
+  let start = 0;
+  const results = entries.map(entry => {
+    const item = createHistoryResult(entry, null, connectionName, start);
+    start = item.context.execution.end + 2;
+    return item;
+  });
+  return { ...tab, kind: 'reference', results, activeResultId: results[0]?.id ?? null };
 }
 
 // Duplicate a draft, not its database results, errors or staged writes.

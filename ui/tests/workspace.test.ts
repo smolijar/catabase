@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { archiveTab, canUseResult, createDraftWriter, createHistoryTab, createQueryTab, duplicateQueryTab, reopenArchivedTab, restoreWorkspace, serializeWorkspace } from '../src/lib/workspace.ts';
+import { archiveTab, canUseResult, createDraftWriter, createHistoryTab, createHistoryTransactionTab, createQueryTab, createResultTab, duplicateQueryTab, placeResults, reopenArchivedTab, restoreWorkspace, serializeWorkspace } from '../src/lib/workspace.ts';
 import type { HistoryEntry, QueryResult } from '../src/lib/types.ts';
 
 test('connection locks survive save, duplicate, archive and reopen', () => {
@@ -27,67 +27,121 @@ const failedHistory: HistoryEntry = {
   executionSize: 100, queryReferences: 1, resultReferences: 0
 };
 
+function liveResult(id: string, sql = 'select 1;') {
+  return createResultTab(id, {
+    execution: { sql, start: 0, end: sql.length }, connectionId: 'db-one', connectionName: 'One', executedAt: '', snapshot: false
+  }, { rows: [{ private: 'secret' }], columns: [], rowCount: 1, durationMs: 1, autoLimited: false, hasMore: false });
+}
+
 test('failed history opens exact SQL and its saved error in a read-only tab without fake result rows', () => {
   const tab = createHistoryTab(failedHistory, null, 'zenbase docker');
+  const [result] = tab.results;
   assert.equal(tab.kind, 'reference');
   assert.equal(tab.sql, failedHistory.query);
   assert.equal(tab.connectionId, 'docker');
-  assert.deepEqual(tab.error, { message: failedHistory.errorMessage });
-  assert.equal(tab.session, null);
-  assert.equal(canUseResult(tab.session, tab.connectionId), false);
-  assert.deepEqual(tab.historyContext, {
+  assert.equal(tab.activeResultId, result.id);
+  assert.deepEqual(result.error, { message: failedHistory.errorMessage });
+  assert.equal(result.data, null);
+  assert.deepEqual(result.context, {
     execution: { sql: failedHistory.query, start: 0, end: failedHistory.query.length },
     connectionId: 'docker', connectionName: 'zenbase docker',
     executedAt: failedHistory.executedAt, historyEntryIds: [failedHistory.id], durationMs: 12, snapshot: true
   });
-  assert.deepEqual(tab.pendingChanges, []);
-  assert.equal(tab.editMode, false);
+  assert.deepEqual(result.pendingChanges, []);
+  assert.equal(result.editMode, false);
 });
 
 test('old failures with missing details or deleted connections still open with an honest fallback', () => {
   const tab = createHistoryTab({ ...failedHistory, errorMessage: null, connectionId: null }, null, 'Unavailable connection');
-  assert.match(tab.error!.message, /failed, but no error message was saved/);
+  assert.match(tab.results[0].error!.message, /failed, but no error message was saved/);
   assert.equal(tab.connectionId, null);
-  assert.equal(tab.historyContext?.connectionName, 'Unavailable connection');
+  assert.equal(tab.results[0].context.connectionName, 'Unavailable connection');
 });
 
 test('successful history still opens row snapshots; stale rows never masquerade as a failed result', () => {
   const result: QueryResult = { columns: [], rows: [{ answer: 42 }], rowCount: 1, durationMs: 3, autoLimited: false, hasMore: false };
-  const success = createHistoryTab({ ...failedHistory, isError: false, errorMessage: null, hasResult: true }, result, 'Docker');
-  assert.equal(success.session?.data, result);
+  const [success] = createHistoryTab({ ...failedHistory, isError: false, errorMessage: null, hasResult: true }, result, 'Docker').results;
+  assert.equal(success.data, result);
   assert.equal(success.error, null);
-  assert.equal(success.session?.snapshot, true);
-  assert.equal(canUseResult(success.session, 'docker'), false);
-  assert.equal(createHistoryTab(failedHistory, result, 'Docker').session, null);
+  assert.equal(success.context.snapshot, true);
+  assert.equal(canUseResult({ ...success.context, data: result }, 'docker'), false);
+  assert.equal(createHistoryTab(failedHistory, result, 'Docker').results[0].data, null);
+});
+
+test('grouped history opens each statement in order with the saved SQL, failure, or snapshot identity', () => {
+  const entries = [
+    { ...failedHistory, id: 40, query: 'BEGIN', isError: false, hasResult: false },
+    { ...failedHistory, id: 41, query: 'SELECT loaded\nLIMIT 200', isError: false, hasResult: true },
+    failedHistory
+  ];
+  const tab = createHistoryTransactionTab('batch-2026', 'SQL batch', entries, 'Docker');
+  assert.equal(tab.id, 'history-transaction:batch-2026');
+  assert.equal(tab.kind, 'reference');
+  assert.equal(tab.activeResultId, 'history:40');
+  assert.equal(tab.sql, entries.map(entry => entry.query).join('\n\n'));
+  assert.deepEqual(tab.results.map(result => result.context.historyEntryIds), [[40], [41], [42]]);
+  for (const result of tab.results) {
+    const { start, end, sql } = result.context.execution;
+    assert.equal(tab.sql.slice(start, end), sql);
+    assert.equal(result.context.snapshot, true);
+    assert.equal(result.data, null);
+  }
+  assert.equal(tab.results[0].savedSnapshot, undefined);
+  assert.deepEqual(tab.results[1].savedSnapshot, { entryId: 41, state: 'unloaded' });
+  assert.deepEqual(tab.results[2].error, { message: failedHistory.errorMessage });
+  assert.equal(tab.results[2].savedSnapshot, undefined);
 });
 
 test('history previews survive tab capture but never contaminate fresh query drafts or saved workspace', () => {
   const preview = createHistoryTab(failedHistory, null, 'Docker');
   const captured = { ...preview, viewState: null };
-  assert.deepEqual(captured.error, preview.error);
-  assert.deepEqual(captured.historyContext, preview.historyContext);
+  assert.deepEqual(captured.results, preview.results);
   const copy = duplicateQueryTab(preview, 'new', [preview]);
   assert.equal(copy.kind, 'query');
   assert.equal(copy.sql, failedHistory.query);
-  assert.equal(copy.error, null);
-  assert.equal(copy.historyContext, undefined);
+  assert.deepEqual(copy.results, []);
+  assert.equal(copy.activeResultId, null);
   const stored = serializeWorkspace([copy, preview], preview.id);
-  assert.equal(stored.includes('historyContext'), false);
+  assert.equal(stored.includes('activeResultId'), false);
   assert.equal(stored.includes('does not exist'), false);
   assert.equal(restoreWorkspace(stored)?.tabs.length, 1);
 });
 
 test('duplicating copies the draft and connection, never query results or staged edits', () => {
   const source = createQueryTab('one', 'Orders', 'select * from orders;', 'db-one');
-  source.editMode = true;
-  source.error = { message: 'Old error', code: 'test', position: null };
-  source.pendingChanges = [{ rowIndex: 0, column: 'private', oldValue: 'secret', newValue: 'changed' }];
-  source.originalRows = [{ private: 'secret' }];
-  source.session = { data: { rows: source.originalRows, columns: [], rowCount: 1, durationMs: 1, autoLimited: false, hasMore: false }, execution: { sql: source.sql, start: 0, end: source.sql.length }, connectionId: 'db-one', connectionName: 'One', executedAt: '', snapshot: false };
+  const result = liveResult('result', source.sql);
+  result.editMode = true;
+  result.pendingChanges = [{ rowIndex: 0, column: 'private', oldValue: 'secret', newValue: 'changed' }];
+  source.results = [result, { ...liveResult('failed'), data: null, error: { message: 'Old error' } }];
+  source.activeResultId = result.id;
   const copy = duplicateQueryTab(source, 'two', [source]);
   assert.deepEqual(copy, createQueryTab('two', 'Orders copy', source.sql, 'db-one'));
-  assert.equal(source.pendingChanges.length, 1);
-  assert.equal(source.session.data.rows[0].private, 'secret');
+  assert.equal(source.results[0].pendingChanges.length, 1);
+  assert.equal(source.results[0].data?.rows[0].private, 'secret');
+});
+
+test('a run replaces all previous results and selects the first result of the new batch', () => {
+  const [a, b, c, first, second] = ['a', 'b', 'c', 'first', 'second'].map(id => liveResult(id));
+  const tab = { ...createQueryTab('editor', 'Query'), results: [a, b, c], activeResultId: b.id };
+  const update = placeResults(tab, [first, second], false);
+  assert.deepEqual(update.results, [first, second]);
+  assert.equal(update.activeResultId, first.id);
+  const failed = { ...second, error: {message: 'Invalid SQL'}, data: null };
+  assert.equal(placeResults(tab, [first, failed], false).activeResultId, failed.id);
+});
+
+test('an append run preserves existing results and replaces only its pending placeholder', () => {
+  const [a, b, pending, first, second] = ['a', 'b', 'pending', 'first', 'second'].map(id => liveResult(id));
+  const tab = { ...createQueryTab('editor', 'Query'), results: [a, b], activeResultId: b.id };
+  const appended = { ...tab, ...placeResults(tab, [pending], true) };
+  assert.deepEqual(appended.results, [a, b, pending]);
+  assert.equal(appended.activeResultId, pending.id);
+  const completed = placeResults(appended, [first, second], true, pending.id);
+  assert.deepEqual(completed.results, [a, b, first, second]);
+  assert.equal(completed.activeResultId, first.id);
+  const switched = placeResults({ ...appended, activeResultId: a.id }, [first, second], true, pending.id);
+  assert.deepEqual(switched.results, [a, b, first, second]);
+  assert.equal(switched.activeResultId, a.id);
 });
 
 test('duplicate names are unique and references become fresh editable query tabs', () => {
@@ -117,14 +171,18 @@ test('restored tabs retain their SQL and connection, including an intentionally 
 
 test('result rows and pending edits are not persisted; reference tabs do not replace query drafts', () => {
   const tab = createQueryTab('one', 'Query', 'select 1;', 'db');
-  tab.pendingChanges = [{ rowIndex: 0, column: 'private', oldValue: 'secret', newValue: 'changed' }];
+  const result = liveResult('result');
+  result.pendingChanges = [{ rowIndex: 0, column: 'private', oldValue: 'secret', newValue: 'changed' }];
+  tab.results = [result];
+  tab.activeResultId = result.id;
   const reference = { ...createQueryTab('history', 'History', 'select 2;'), kind: 'reference' as const };
   const stored = serializeWorkspace([tab, reference], 'history');
   assert.ok(!stored.includes('secret'));
   const restored = restoreWorkspace(stored)!;
   assert.equal(restored.activeId, 'one');
   assert.equal(restored.tabs.length, 1);
-  assert.deepEqual(restored.tabs[0].pendingChanges, []);
+  assert.deepEqual(restored.tabs[0].results, []);
+  assert.equal(restored.tabs[0].activeResultId, null);
 });
 
 test('historical results and results from another connection cannot be extended or edited', () => {
@@ -188,14 +246,15 @@ test('closing can retry a draft after an earlier autosave failure', async () => 
 test('closed tabs persist exact SQL, names, connections and editor positions, never results or staged changes', () => {
   const source = createQueryTab('closed', 'Monthly report', 'select 1;\n\nselect 2;', 'docker');
   source.viewState = { cursorState: [], viewState: { scrollTop: 42 } } as unknown as NonNullable<typeof source.viewState>;
-  source.error = { message: 'private error' };
-  source.originalRows = [{ secret: 'secret row' }];
-  source.pendingChanges = [{ rowIndex: 0, column: 'secret', oldValue: 'private old', newValue: 'private new' }];
-  source.editMode = true;
+  const result = liveResult('result', source.sql);
+  result.pendingChanges = [{ rowIndex: 0, column: 'private', oldValue: 'secret', newValue: 'private new' }];
+  result.editMode = true;
+  source.results = [result, { ...liveResult('failed'), data: null, error: { message: 'private error' } }];
+  source.activeResultId = result.id;
   const archived = archiveTab(source, '2026-10-27T10:00:00Z')!;
   assert.notEqual(archived.viewState, source.viewState);
   const stored = serializeWorkspace([createQueryTab('open', 'Open')], 'open', [archived]);
-  assert.doesNotMatch(stored, /private|secret|pendingChanges|editMode|originalRows|historyContext/);
+  assert.doesNotMatch(stored, /private|secret|pendingChanges|editMode|originalRows|activeResultId/);
   const restored = restoreWorkspace(stored)!;
   assert.equal(restored.tabs.length, 1);
   assert.deepEqual(restored.archivedTabs, [archived]);
@@ -206,10 +265,8 @@ test('closed tabs persist exact SQL, names, connections and editor positions, ne
   assert.equal(reopened.connectionId, 'docker');
   assert.deepEqual(reopened.viewState, source.viewState);
   assert.notEqual(reopened.viewState, archived.viewState);
-  assert.equal(reopened.session, null);
-  assert.equal(reopened.error, null);
-  assert.equal(reopened.editMode, false);
-  assert.deepEqual(reopened.pendingChanges, []);
+  assert.deepEqual(reopened.results, []);
+  assert.equal(reopened.activeResultId, null);
 });
 
 test('empty queries are archived, references and history previews are not', () => {

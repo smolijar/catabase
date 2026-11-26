@@ -1,7 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { editor } from 'monaco-editor/esm/vs/editor/editor.api';
-  import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
 
   export let sql: string;
   export let themeKey: string;
@@ -21,6 +19,10 @@
     const current = ++revision;
     highlighted = '';
     try {
+      const [{ editor }] = await Promise.all([
+        import('monaco-editor/esm/vs/editor/editor.api'),
+        import('monaco-editor/esm/vs/basic-languages/sql/sql.contribution')
+      ]);
       // Monaco's renderer escapes the source text before wrapping it in token markup.
       const html = await editor.colorize(value, 'sql', { tabSize: 2 });
       if (current === revision) highlighted = html;

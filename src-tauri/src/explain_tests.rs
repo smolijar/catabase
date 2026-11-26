@@ -6,6 +6,28 @@ use catabase_core::DEFAULT_EXPLAIN_PREAMBLE;
 use serde_json::{Value, json};
 use std::error::Error;
 
+#[test]
+fn explain_requires_the_reviewed_transaction_context() {
+    let standalone = ExplainTransaction { id: None };
+    let reviewed = ExplainTransaction {
+        id: Some("reviewed".into()),
+    };
+    assert!(standalone.verify(None).is_ok());
+    assert!(reviewed.verify(Some("reviewed")).is_ok());
+    for check in [
+        standalone.verify(Some("opened")),
+        reviewed.verify(Some("replaced")),
+        reviewed.verify(None),
+    ] {
+        assert!(
+            check
+                .unwrap_err()
+                .to_string()
+                .contains("The transaction changed")
+        );
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires explicit CATABASE_TEST_CONNECTION_STORE for saved zenbase docker"]
 async fn two_runs_return_second_plan_and_skip_automatic_transactions() -> Result<(), Box<dyn Error>>

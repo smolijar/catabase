@@ -13,6 +13,7 @@
   import ResultsGrid from './components/ResultsGrid.svelte';
   import ResultDetails from './components/ResultDetails.svelte';
   import ResultExportDialog from './components/ResultExportDialog.svelte';
+  import ResultTabs from './components/ResultTabs.svelte';
   import Modal from './components/Modal.svelte';
   import QueryTimingDialog from './components/QueryTimingDialog.svelte';
   import HistoryStorageDialog from './components/HistoryStorageDialog.svelte';
@@ -22,6 +23,7 @@
   import AppUpdates from './components/AppUpdates.svelte';
   import DiagnosticDialog from './components/DiagnosticDialog.svelte';
   import ResumeConnectionDialog from './components/ResumeConnectionDialog.svelte';
+  import RunBatchDialog from './components/RunBatchDialog.svelte';
   import type { DiagnosticReport } from './lib/diagnostics';
   import CommitModeSelect from './components/CommitModeSelect.svelte';
   import { commitFeedbackLabel, commitModeLabels, transactionCompletionLabel } from './lib/commitMode';
@@ -55,9 +57,9 @@
   import { formatRunningDuration } from './lib/status';
   import { literalTextAttributes } from './lib/textInput';
   import { canRequestSupermaven } from './lib/supermavenInline';
-  import { createHistorySearch, groupHistory } from './lib/history';
+  import { createHistorySearch, groupHistory, transactionLabel } from './lib/history';
   import type { HistorySearchState } from './lib/history';
-  import { editorSearchShortcut, workspaceSearchShortcut } from './lib/editorSearch';
+  import { editorSearchShortcut, runInNewTabModifier, tabCloseShortcut, tabNavigationShortcut, workspaceSearchShortcut } from './lib/editorSearch';
   import { DEFAULT_EDITOR_FONT_SIZE, EDITOR_FONT_STORAGE_KEY, fontSizeShortcut, resizeEditorFont, restoreEditorFontSize } from './lib/editorFont';
   import type { QueryTimingDetails } from './lib/queryTiming';
   import { createConnectionTester } from './lib/connectionTest';
@@ -71,11 +73,12 @@
   import type { ListDrop } from './lib/listDrag';
   import { assessRowEditing, buildRowUpdates, stageCellEdits } from './lib/rowEditing';
   import type { EditTarget } from './lib/rowEditing';
-  import { archiveTab, canUseResult, createDraftWriter, createHistoryTab, createQueryTab, duplicateQueryTab, reopenArchivedTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
-  import type { ArchivedTab, CellEdit, PendingChange, ResultSession, WorkspaceTab } from './lib/workspace';
+  import { archiveTab, canUseResult, createDraftWriter, createHistoryTab, createHistoryTransactionTab, createQueryTab, createResultTab, discardResultEdits, duplicateQueryTab, placeResults, reopenArchivedTab, restoreWorkspace, serializeWorkspace } from './lib/workspace';
+  import type { ArchivedTab, CellEdit, ResultContext, ResultSession, ResultTab, WorkspaceTab } from './lib/workspace';
   import type {
     SupermavenStatus,
     AppError,
+    BatchStatement,
     CommitMode,
     ConnectionInput,
     ConnectionRecord,
@@ -90,6 +93,7 @@
     RowUpdate,
     SchemaItem,
     Settings,
+    StatementRange,
     TxCompletion,
     TxStatus
   } from './lib/types';
@@ -98,6 +102,8 @@
   const PAGE_SIZE = 200;
   const VIM_MODE_STORAGE_KEY = 'catabase.vimMode';
   const COPY_FORMAT_KEY = 'catabase.resultCopyFormat';
+  const primaryRunModifier = /Mac/i.test(navigator.platform) ? 'metaKey' : 'ctrlKey';
+  const [runKey, appendRunKey] = primaryRunModifier === 'metaKey' ? ['⌘↵', '⌘⇧↵'] : ['Ctrl+↵', 'Ctrl+Shift+↵'];
   const exportItems = [...exportFormats.map(format => ({ id: format, label: `Copy as ${format.toUpperCase()}` })), { id: 'export', label: 'Export…' }];
 
   type SidebarTab = 'connections' | 'schema' | 'history' | 'activity' | 'tabs' | 'settings';
@@ -108,12 +114,14 @@
     clearHighlights: () => void;
     markError: (offset: number, message: string) => void;
     getViewState: () => WorkspaceTab['viewState'];
+    focusEditor: () => void;
     getSnapshot: () => { tabId: string; sql: string; viewState: WorkspaceTab['viewState'] };
   };
   type SchemaGroup = { name: string; items: SchemaItem[] };
-  type Operation = { token: string; tabId: string; connectionId: string; kind: 'query' | 'load' | 'export' | 'apply' | 'explain'; startedAt: number; cancelling: boolean };
+  type Operation = { token: string; tabId: string; resultId: string | null; connectionId: string; kind: 'query' | 'load' | 'export' | 'apply' | 'explain'; startedAt: number; cancelling: boolean };
   type ExportSource = NonNullable<ReturnType<ResultsGrid['captureExport']>> & {
     tabId: string;
+    resultId: string;
     session: ResultSession | null;
     queryBlockedReason: string;
   };
@@ -159,15 +167,17 @@
   let cursorLine = 1;
   let cursorColumn = 1;
   let running = false;
+  let appendRunModifier = false;
   let nowMs = Date.now();
   let operation: Operation | null = null;
+  let resultsPane: HTMLElement;
   let resultsGrid: ResultsGrid | undefined;
   let copyFormat: ExportFormat = 'tsv';
   let exportSource: ExportSource | null = null;
   let exportProgress: ResultExportProgress | null = null;
   let exportWork: ExportWork | null = null;
   let exportTask: Promise<void> | null = null;
-  let explainSession: { query: string; tabId: string; connectionId: string; connectionName: string } | null = null;
+  let explainSession: { statements: string[]; tabId: string; connection: ConnectionRecord; transactionId: string | null } | null = null;
   let explainOpening = false;
   let explainState = initialExplainState();
   let explainEventsReady: Promise<void> | null = null;
@@ -184,14 +194,11 @@
     cancel: api.cancelQuery
   }, state => {
     explainState = state;
-    if (operation?.kind === 'explain' && operation.token === state.token) {
+    if (operation?.kind === 'explain' && operation.cancelling !== state.cancelling) {
       operation = { ...operation, cancelling: state.cancelling };
     }
   }, errorMessage);
-  let resultSession: ResultSession | null = null;
-  let result: QueryResult | null = null;
-  let originalRows: Record<string, unknown>[] = [];
-  let queryError: AppError | null = null;
+  let historyOpenRequest = 0;
   let statusFlash = 'Ready';
   let statusTiming: QueryTimingDetails | null = null;
   let timingDetails: QueryTimingDetails | null = null;
@@ -207,13 +214,12 @@
   let txStatus: TxStatus = { active: false, startedAt: null };
   let txStatusKnown = false;
   let txCompletions = new Map<string, TxCompletion>();
-  let editMode = false;
-  let pendingChanges: PendingChange[] = [];
 
   let connections: ConnectionRecord[] = [];
   let lastConnectionId: string | null = null;
   let queryPreparing = false;
-  let reconnectReview: { connectionId: string; target: ExecutionTarget; resolve: (connection: ConnectionRecord | null) => void } | null = null;
+  let reconnectReview: { connectionId: string; statements: string[]; resolve: (connection: ConnectionRecord | null) => void } | null = null;
+  let batchReview: { connection: ConnectionRecord; statements: string[]; resolve: (approved: boolean) => void } | null = null;
   let connectionOrder: string[] = [];
   let connectionList: HTMLUListElement | undefined;
   let connectionDrag: { id: string; x: number; y: number } | null = null;
@@ -345,13 +351,14 @@
     ];
   $: if (picker !== 'commands') pickerHistorySearch.cancel();
   $: running = operation !== null;
+  $: showAppendRun = appendRunModifier && !running && tabKind === 'query';
   $: updateBlocked = updateInstallBlock({
     ready: workspaceLoaded,
     busy: Boolean(operation || connectionMutation || queryPreparing || showConnectionModal || schemaLoading || showUpdatePreview || explainSession || explainOpening || discardRunConfirmation || tabCloseTask || closingWorkspace || exportSource),
     transactionKnown: txStatusKnown,
     transactionActive: txStatus.active,
-    stagedEdits: tabs.reduce((count, tab) => count + (tab.id === activeTab ? pendingChanges.length : tab.pendingChanges.length), 0),
-    cellEditing: tabs.some(tab => tab.id === activeTab ? editMode : tab.editMode)
+    stagedEdits: tabs.flatMap(tab => tab.results).reduce((count, item) => count + item.pendingChanges.length, 0),
+    cellEditing: tabs.some(tab => tab.results.some(item => item.editMode))
   });
   $: visibleSidebarWidth = clampSidebarWidth(sidebarWidth, workspaceWidth);
   $: activeOperation = operation?.tabId === activeTab ? operation : null;
@@ -360,8 +367,20 @@
     : '';
   $: transactionDuration = formatRunningDuration(txStatus.startedAt, nowMs, 'adaptive');
   $: currentPoolStats = poolStatsConnectionId === activeConnection?.id ? poolStats : null;
-  $: historyContext = tabs.find(tab => tab.id === activeTab)?.historyContext ?? null;
-  $: resultContext = resultSession ?? historyContext;
+  $: editorTab = tabs.find(tab => tab.id === activeTab);
+  $: resultTabs = editorTab?.results ?? [];
+  $: selectedResult = resultTabs.find(item => item.id === editorTab?.activeResultId);
+  $: resultOperation = activeOperation?.resultId === (selectedResult?.id ?? null) ? activeOperation : null;
+  $: savedSnapshot = selectedResult?.savedSnapshot;
+  $: if (savedSnapshot?.state === 'unloaded' && editorTab && selectedResult) void loadSavedSnapshot(editorTab.id, selectedResult);
+  $: resultContext = selectedResult?.context ?? null;
+  $: historyContext = resultContext?.snapshot ? resultContext : null;
+  $: result = selectedResult?.data ?? null;
+  $: resultSession = result && resultContext ? { ...resultContext, data: result } : null;
+  $: queryError = selectedResult?.error ?? null;
+  $: originalRows = selectedResult?.originalRows ?? [];
+  $: pendingChanges = selectedResult?.pendingChanges ?? [];
+  $: editMode = Boolean(selectedResult?.editMode);
   $: resultCommitLabel = result?.commitFeedback
     ? commitFeedbackLabel(result.commitFeedback, txCompletions.get(result.commitFeedback.transactionId ?? ''))
     : '';
@@ -425,8 +444,9 @@
     void registerNativeLifecycle();
     void registerHistoryEvents();
     explainEventsReady = registerExplainEvents();
-    window.addEventListener('keydown', captureWorkspaceSearch, true);
+    window.addEventListener('keydown', captureWorkspaceShortcut, true);
     window.addEventListener('keydown', handleKeydown);
+    window.addEventListener('keyup', updateRunModifier, true);
     window.addEventListener('beforeunload', flushDraftOnUnload);
     const statsInterval = window.setInterval(() => {
       if (activeConnection && !closingWorkspace) void loadConnectionStats();
@@ -461,7 +481,7 @@
     // A returning WebView may regain DOM focus without a new native-window
     // event (for example after native menus). Validate that focus natively too.
     const onWindowFocus = () => { if (isTauri()) void nativeFocus.refresh(); else nativeFocus.set(true); };
-    const onWindowBlur = () => nativeFocus.set(false);
+    const onWindowBlur = () => { appendRunModifier = false; nativeFocus.set(false); };
     const onVisibility = () => healthcheck.setVisible(document.visibilityState === 'visible');
     window.addEventListener('focus', onWindowFocus);
     window.addEventListener('blur', onWindowBlur);
@@ -501,8 +521,9 @@
       media.removeEventListener('change', onSystemTheme);
       layoutObserver.disconnect();
       for (const cleanup of nativeCleanup) cleanup();
-      window.removeEventListener('keydown', captureWorkspaceSearch, true);
+      window.removeEventListener('keydown', captureWorkspaceShortcut, true);
       window.removeEventListener('keydown', handleKeydown);
+      window.removeEventListener('keyup', updateRunModifier, true);
       window.removeEventListener('beforeunload', flushDraftOnUnload);
       window.clearInterval(statsInterval);
       window.clearInterval(runningInterval);
@@ -713,9 +734,7 @@
     const tab = tabs.find((candidate) => candidate.id === activeTab)!;
     const editor = editorRef?.getSnapshot();
     const ownsEditor = editor?.tabId === activeTab;
-    return { ...tab, sql: ownsEditor ? editor.sql : sql, connectionId: tabConnectionId, viewState: ownsEditor ? editor.viewState : editorViewState,
-      session: resultSession ? { ...resultSession, data: result! } : null, error: queryError,
-      originalRows, pendingChanges, editMode };
+    return { ...tab, sql: ownsEditor ? editor.sql : sql, connectionId: tabConnectionId, viewState: ownsEditor ? editor.viewState : editorViewState };
   }
 
   function captureActive() {
@@ -729,12 +748,6 @@
     tabKind = tab.kind;
     tabConnectionId = tab.connectionId;
     editorViewState = tab.viewState;
-    resultSession = tab.session;
-    result = tab.session?.data ?? null;
-    queryError = tab.error;
-    originalRows = tab.originalRows;
-    pendingChanges = tab.pendingChanges;
-    editMode = tab.editMode;
     showUpdatePreview = false;
   }
 
@@ -748,17 +761,44 @@
   function patchTab(id: string, patch: Partial<WorkspaceTab>) {
     if (id === activeTab) captureActive();
     tabs = tabs.map((tab) => tab.id === id ? { ...tab, ...patch } : tab);
-    if (id === activeTab) {
-      const tab = tabs.find((tab) => tab.id === id)!;
-      // Keep the live editor/cursor untouched when an async result arrives.
-      tabConnectionId = tab.connectionId;
-      resultSession = tab.session;
-      result = tab.session?.data ?? null;
-      queryError = tab.error;
-      originalRows = tab.originalRows;
-      pendingChanges = tab.pendingChanges;
-      editMode = tab.editMode;
-    }
+    if (id === activeTab && 'connectionId' in patch) tabConnectionId = patch.connectionId ?? null;
+  }
+
+  function patchResult(tabId: string, resultId: string, patch: Partial<ResultTab>) {
+    tabs = tabs.map(tab => tab.id === tabId ? {
+      ...tab, results: tab.results.map(item => item.id === resultId ? { ...item, ...patch } : item)
+    } : tab);
+  }
+
+  function selectResultTab(id: string) {
+    if (selectedResult?.id !== id) patchTab(activeTab, { activeResultId: id });
+  }
+
+  function focusActiveResult(tabId = activeTab) {
+    void tick().then(() => {
+      if (activeTab !== tabId) return;
+      const label = resultsPane?.querySelector<HTMLButtonElement>('.result-tabs [aria-selected="true"]');
+      (label ?? resultsPane)?.focus();
+    });
+  }
+
+  function removeResultTab(tab: WorkspaceTab, resultId: string, returnTo: string | null = null) {
+    const index = tab.results.findIndex(item => item.id === resultId);
+    if (index < 0) return;
+    const results = tab.results.filter(item => item.id !== resultId);
+    const next = results.find(item => item.id === returnTo) ?? results[Math.min(index, results.length - 1)];
+    patchTab(tab.id, {
+      results, activeResultId: tab.activeResultId === resultId ? next?.id ?? null : tab.activeResultId
+    });
+  }
+
+  function closeSelectedResult(id: string) {
+    if (!editorTab || (activeOperation?.resultId === id)) return;
+    const item = editorTab.results.find(item => item.id === id);
+    if (!item) return;
+    if (item.pendingChanges.length && !confirm('Discard staged cell edits and close this result?')) return;
+    removeResultTab(editorTab, id);
+    focusActiveResult();
   }
 
   function defaultTabConnection() {
@@ -1000,9 +1040,19 @@
     return Array.from(groups, ([name, groupItems]) => ({ name, items: groupItems }));
   }
 
-  function captureWorkspaceSearch(event: KeyboardEvent) {
-    // Monaco consumes Cmd/Ctrl+K as the first key of an editor chord.
-    if (event.defaultPrevented || !workspaceSearchShortcut(event)) return;
+  function updateRunModifier(event: KeyboardEvent) {
+    appendRunModifier = runInNewTabModifier(event, primaryRunModifier);
+  }
+
+  function hasResultsFocus(target: EventTarget | null): boolean {
+    return target instanceof Node && Boolean(resultsPane?.contains(target));
+  }
+
+  function captureWorkspaceShortcut(event: KeyboardEvent) {
+    // Monaco can consume these before a bubbling workspace listener sees them.
+    updateRunModifier(event);
+    const closeResult = tabCloseShortcut(event) && hasResultsFocus(event.target);
+    if (event.defaultPrevented || (!workspaceSearchShortcut(event) && !tabNavigationShortcut(event) && !closeResult)) return;
     handleKeydown(event);
     if (event.defaultPrevented) event.stopPropagation();
   }
@@ -1018,7 +1068,30 @@
       try { localStorage.setItem(EDITOR_FONT_STORAGE_KEY, String(editorFontSize)); } catch { /* Keep the current session's preference. */ }
       return;
     }
-    if (showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails) return;
+    if (showConnectionModal || showUpdatePreview || discardRunConfirmation || timingDetails || historyStorage) return;
+    const inResults = hasResultsFocus(event.target);
+    const tabAction = tabNavigationShortcut(event);
+    if (tabAction) {
+      event.preventDefault();
+      const candidates = inResults ? resultTabs : tabs;
+      const current = inResults ? selectedResult?.id : activeTab;
+      if (!candidates.length) return;
+      const index = 'index' in tabAction ? tabAction.index
+        : (candidates.findIndex(tab => tab.id === current) + tabAction.step + candidates.length) % candidates.length;
+      const target = candidates[index];
+      if (target && target.id !== current) {
+        if (inResults) {
+          selectResultTab(target.id);
+          focusActiveResult();
+          return;
+        }
+        const editorFocused = event.target instanceof Element && Boolean(event.target.closest('.editor-host'));
+        switchTab(target.id);
+        if (editorFocused) void tick().then(() => { if (activeTab === target.id) editorRef?.focusEditor(); });
+        else focusTabLabel(target.id);
+      }
+      return;
+    }
     const command = event.metaKey || event.ctrlKey;
     if (!command) return;
     if (workspaceSearchShortcut(event)) {
@@ -1032,24 +1105,26 @@
       editorRef?.find(searchAction === 'replace');
       return;
     }
-    if (event.key === 'Enter') {
+    if (event.key === 'Enter' && !event.altKey && !event.isComposing) {
       const target = event.target;
       if (target instanceof Element && target.closest('.find-widget')) return;
       if (target instanceof Element && target.closest('input, textarea, [contenteditable="true"]') && !target.closest('.monaco-editor')) return;
       event.preventDefault();
-      void runQuery();
+      if (!event.repeat) void runQuery(event.shiftKey);
     } else if (event.key.toLowerCase() === 'b') {
       event.preventDefault();
       sidebarOpen = !sidebarOpen;
     } else if (event.key.toLowerCase() === 'l' && event.shiftKey) {
       event.preventDefault();
-      clearResults();
+      clearResults(inResults);
     } else if (event.key.toLowerCase() === 't') {
       event.preventDefault();
       newQuery();
-    } else if (event.key.toLowerCase() === 'w') {
+    } else if (tabCloseShortcut(event)) {
       event.preventDefault();
-      closeTab(activeTab);
+      if (inResults) {
+        if (selectedResult && !event.repeat) closeSelectedResult(selectedResult.id);
+      } else closeTab(activeTab);
     }
   }
 
@@ -1096,9 +1171,9 @@
     if (tab && (tab.connectionId || tab.connectionLocked)) patchTab(id, { connectionLocked: !tab.connectionLocked });
   }
 
-  function confirmConnectionChange(targets: WorkspaceTab[], id: string, alreadyReviewedTab?: string): Promise<boolean> {
-    const edits = targets.filter(tab => tab.connectionId !== id && tab.id !== alreadyReviewedTab)
-      .reduce((count, tab) => count + tab.pendingChanges.length, 0);
+  function confirmConnectionChange(targets: WorkspaceTab[], id: string, reviewedTabId?: string): Promise<boolean> {
+    const edits = targets.filter(tab => tab.id !== reviewedTabId && tab.connectionId !== id).flatMap(tab => tab.results)
+      .reduce((count, item) => count + item.pendingChanges.length, 0);
     if (!edits) return Promise.resolve(true);
     return new Promise(resolve => {
       discardRunConfirmation = { changeCount: edits, connectionName: connections.find(connection => connection.id === id)?.name ?? connectionForm.name ?? 'another connection', globalSelection: connectionScope === 'global', resolve };
@@ -1293,7 +1368,7 @@
   }
 
   function beginOperation(kind: Operation['kind'], connectionId: string): Operation {
-    const next = { token: crypto.randomUUID(), tabId: activeTab, connectionId, kind, startedAt: Date.now(), cancelling: false };
+    const next = { token: crypto.randomUUID(), tabId: activeTab, resultId: selectedResult?.id ?? null, connectionId, kind, startedAt: Date.now(), cancelling: false };
     operation = next;
     nowMs = next.startedAt;
     return next;
@@ -1311,17 +1386,39 @@
     return operation?.token === op.token;
   }
 
-  function makeSession(data: QueryResult, execution: ExecutionTarget, connectionId: string, snapshot = false): ResultSession {
-    return { data, execution, connectionId, connectionName: connections.find((connection) => connection.id === connectionId)?.name ?? 'Unavailable connection', executedAt: new Date().toISOString(), historyEntryIds: data.historyEntryIds, snapshot };
+  function liveResultContext(execution: ExecutionTarget, connectionId: string | null, executedAt = new Date().toISOString()): ResultContext {
+    return { execution, connectionId, connectionName: connections.find(connection => connection.id === connectionId)?.name ?? 'Unavailable connection', executedAt, snapshot: false };
   }
 
-  function resultPatch(session: ResultSession | null, error: AppError | null = null): Partial<WorkspaceTab> {
-    return { session, originalRows: session ? cloneRows(session.data.rows) : [], pendingChanges: [], editMode: false, error };
+  function showQueryResults(tabId: string, incoming: ResultTab[], append: boolean, pendingId: string | null = null) {
+    const tab = tabs.find(item => item.id === tabId);
+    if (!tab || !incoming.length) return;
+    const restoreFocus = tabId === activeTab && hasResultsFocus(document.activeElement);
+    patchTab(tabId, placeResults(tab, incoming, append, pendingId));
+    if (restoreFocus) focusActiveResult(tabId);
   }
 
-  function confirmDiscardForRun(): Promise<boolean> {
+  function batchResultTabs(context: ResultContext, statements: BatchStatement[], error: AppError | null, feedback?: QueryResult['commitFeedback']) {
+    return statements.flatMap(({ statement, result, durationMs, historyEntryId }) => {
+      if (!result && !error) return [];
+      const statementContext = {
+        ...context, durationMs,
+        execution: { sql: statement.text, start: context.execution.start + statement.start, end: context.execution.start + statement.end },
+        historyEntryIds: historyEntryId == null ? undefined : [historyEntryId]
+      };
+      return [createResultTab(crypto.randomUUID(), statementContext, result && feedback ? { ...result, commitFeedback: feedback } : result, result ? null : error)];
+    });
+  }
+
+  function resolveBatchReview(approved: boolean) {
+    const review = batchReview;
+    batchReview = null;
+    review?.resolve(approved);
+  }
+
+  function confirmDiscardForRun(changeCount: number): Promise<boolean> {
     return new Promise((resolve) => {
-      discardRunConfirmation = { changeCount: pendingChanges.length, resolve };
+      discardRunConfirmation = { changeCount, resolve };
     });
   }
 
@@ -1335,42 +1432,62 @@
     if (!workspaceLoaded || closingWorkspace || operation || connectionMutation || explainSession || explainOpening || tabKind !== 'query') return;
     if (!activeConnection) { sidebar = 'connections'; sidebarOpen = true; flash('Choose a connection for this query.'); return; }
     const tabId = activeTab;
-    const connectionId = activeConnection.id;
-    const connectionName = activeConnection.name;
+    const connection = activeConnection;
     const editor = editorRef;
     const fallback = sql.trim();
     explainOpening = true;
     try {
       await explainEventsReady;
       if (explainEventsError) throw new Error(`Explain progress is unavailable: ${explainEventsError}`);
-      const target = editor ? await editor.getExecutionTarget(api.splitSql) : { sql: fallback };
-      if (!target.sql.trim()) throw new Error('No query to explain.');
-      if (closingWorkspace || operation || connectionMutation || tabId !== activeTab || connectionId !== tabConnectionId) return;
+      const target = editor ? await editor.getExecutionTarget(api.splitSql) : null;
+      const sources = target?.selectedSql ?? [target?.sql ?? fallback];
+      const [splits, transaction] = await Promise.all([
+        Promise.all(sources.map(source => api.splitSql(source, false))),
+        api.txStatus()
+      ]);
+      const statements = splits.flatMap((ranges, index) => ranges.length === 1 ? [sources[index]] : ranges.map(range => range.text));
+      if (!statements.length) throw new Error('No query to explain.');
+      if (closingWorkspace || operation || connectionMutation || tabId !== activeTab || connection.id !== tabConnectionId) return;
       explainWorkflow.reset();
-      explainSession = { query: target.sql, tabId, connectionId, connectionName };
+      explainSession = { statements, tabId, connection, transactionId: transaction.transactionId ?? null };
     } catch (error) { flash(errorMessage(error), true); }
     finally { explainOpening = false; }
   }
 
-  async function runExplain(options: ExplainOptions) {
+  async function runExplain(options: ExplainOptions, approvedIndexes: number[]) {
     const session = explainSession;
     if (!session || operation || connectionMutation || closingWorkspace) return;
+    if (!activeConnection || !sameConnectionSettings(activeConnection, session.connection)) {
+      closeExplain();
+      flash('Connection changed. Reopen Explain to review the current connection.', true);
+      return;
+    }
+    const approved = new Set(approvedIndexes);
+    const statements = session.statements.flatMap((query, index) => approved.has(index) ? [{ query, index }] : []);
+    if (!statements.length) return;
     statusTiming = null;
     statusFlash = 'Running explain…';
-    await explainWorkflow.run({ ...options, query: session.query, connectionId: session.connectionId });
+    await explainWorkflow.run({ ...options, connectionId: session.connection.id, transaction: { id: session.transactionId } }, statements);
     updateExplainStatus();
   }
 
-  async function shareExplain(title: string, comments: string) {
+  async function shareExplain(index: number, title: string, comments: string) {
     if (!explainSession || operation || connectionMutation || closingWorkspace) return;
     statusFlash = 'Sharing explain plan…';
-    await explainWorkflow.retryShare(explainSession.connectionId, title, comments);
+    await explainWorkflow.retryShare(explainSession.connection.id, index, title, comments);
     updateExplainStatus();
   }
 
   function updateExplainStatus() {
-    const { result, error } = explainState;
-    statusFlash = error || (result?.shareError ? 'Explain ready. Sharing did not complete.' : result?.url ? 'Explain ready. Shared on Dalibo.' : 'Explain ready.');
+    const { outcomes, error } = explainState;
+    if (outcomes.length > 1) {
+      const ready = outcomes.filter(outcome => outcome.status === 'ready').length;
+      statusFlash = error || `${ready} of ${outcomes.length} Explain plans ready.`;
+      return;
+    }
+    const outcome = outcomes[0];
+    const result = outcome?.result;
+    statusFlash = error || outcome?.error || (result?.shareError ? 'Explain ready. Sharing did not complete.' : result?.url ? 'Explain ready. Shared on Dalibo.' : 'Explain ready.');
   }
 
   function closeExplain() {
@@ -1379,12 +1496,12 @@
     explainWorkflow.reset();
   }
 
-  async function runQuery() {
+  async function runQuery(append = false) {
     if (closingWorkspace || !workspaceLoaded || explainOpening || explainSession) return;
     if (discardRunConfirmation || reconnectReview || queryPreparing) return;
     if (connectionMutation) { flash(connectionMutation); return; }
     if (operation) {
-      await cancelQuery();
+      if (!append) await cancelQuery();
       return;
     }
     if (tabKind !== 'query') {
@@ -1392,32 +1509,48 @@
       return;
     }
     const tabId = activeTab;
+    const previousId = selectedResult?.id ?? null;
     const initialAssociation = tabConnectionId;
     const draftSql = sql;
     let connectionId = activeConnection?.id ?? null;
     let reconnecting: ConnectionRecord | null = null;
-    let reviewedTarget: ExecutionTarget | null = null;
+    let target: ExecutionTarget = { sql: draftSql.trim(), start: draftSql.length - draftSql.trimStart().length, end: draftSql.trimEnd().length };
+    let targetMs = 0;
     const editor = editorRef;
-    const stillCurrent = (association = initialAssociation) => activeTab === tabId && tabConnectionId === association && sql === draftSql && !operation && !closingWorkspace;
+    const targetStart = performance.now();
+    const stillCurrent = (association = initialAssociation) => activeTab === tabId
+      && (tabs.find(tab => tab.id === tabId)?.activeResultId ?? null) === previousId
+      && tabConnectionId === association && sql === draftSql && !operation && !closingWorkspace;
     queryPreparing = true;
     try {
-      if (pendingChanges.length) {
-        if (!await confirmDiscardForRun()) return;
+      target = editor ? await editor.getExecutionTarget(api.splitSql) : target;
+      if (!target.sql) { flash('No query to execute.'); return; }
+      const split = await api.splitSql(target.sql, false);
+      targetMs = performance.now() - targetStart;
+      if (!stillCurrent()) return;
+      if (!split.length) { flash('No query to execute.'); return; }
+      const statements = split.length === 1 ? [target.sql] : split.map(statement => statement.text);
+      const replacedEdits = append ? 0 : resultTabs.reduce((count, item) => count + item.pendingChanges.length, 0);
+      if (replacedEdits) {
+        if (!await confirmDiscardForRun(replacedEdits)) return;
         await tick();
         if (!stillCurrent()) return;
       }
-      if (!connectionId) {
+      if (activeConnection && statements.length > 2) {
+        const connection = activeConnection;
+        const approved = await new Promise<boolean>(resolve => {
+          batchReview = { connection, statements, resolve };
+        });
+        if (!approved || !stillCurrent() || !activeConnection || !sameConnectionSettings(activeConnection, connection)) return;
+      } else if (!connectionId) {
         const candidate = resumeConnection(connections, initialAssociation, connectionScope === 'global' ? globalConnectionId ?? lastConnectionId : lastConnectionId, focusedConnectionLocked);
         if (!candidate) {
           if (focusedConnectionLocked) throw new Error('This tab’s locked connection is unavailable. Unlock it from the tab menu to choose another.');
           picker = 'connections';
           return;
         }
-        reviewedTarget = editor ? await editor.getExecutionTarget(api.splitSql) : { sql: draftSql.trim(), start: 0, end: draftSql.length };
-        if (!reviewedTarget.sql.trim()) throw new Error('No query to execute.');
-        if (!stillCurrent()) return;
         const reviewed = await new Promise<ConnectionRecord | null>(resolve => {
-          reconnectReview = { connectionId: candidate.id, target: reviewedTarget!, resolve };
+          reconnectReview = { connectionId: candidate.id, statements, resolve };
         });
         if (!reviewed || !stillCurrent()) return;
         if (focusedConnectionLocked && reviewed.id !== initialAssociation) throw new Error('Unlock this tab before changing its connection.');
@@ -1426,7 +1559,7 @@
         captureActive();
         // Reconnecting the same assigned database is not a global selection.
         const targets = reviewed.id === initialAssociation ? [] : connectionTargets(tabs, tabId, connectionScope);
-        if (!await confirmConnectionChange(targets, reviewed.id, tabId) || !stillCurrent()) return;
+        if (!await confirmConnectionChange(targets, reviewed.id, append ? undefined : tabId) || !stillCurrent()) return;
         connectionMutation = 'Connecting…';
         reconnecting = reviewed;
         const connected = await api.activateConnection(reviewed.id);
@@ -1442,51 +1575,71 @@
       }
     } catch (error) {
       if (activeTab === tabId && !closingWorkspace) {
-        setStatus('');
         const failure = normalizeAppError(error);
-        patchTab(tabId, { error: reconnecting ? connectBeforeRunError(failure, reconnecting.name) : failure });
+        if (reconnecting) {
+          const connectionError = connectBeforeRunError(failure, reconnecting.name);
+          if (previousId && !append) patchResult(tabId, previousId, { error: connectionError });
+          else showQueryResults(tabId, [createResultTab(crypto.randomUUID(), liveResultContext(target, reconnecting.id), null, connectionError)], append);
+        } else flash(failure.message, true);
       }
       return;
     } finally { queryPreparing = false; connectionMutation = null; }
     if (!connectionId) return;
-    const op = beginOperation('query', connectionId);
     const timingStart = performance.now();
-    let target: ExecutionTarget = { sql: sql.trim(), start: 0, end: sql.length };
+    const op = beginOperation('query', connectionId);
+    const context = liveResultContext(target, connectionId);
+    let pendingId: string | null = null;
+    if (append) {
+      const placeholder = createResultTab(crypto.randomUUID(), context, null);
+      pendingId = placeholder.id;
+      op.resultId = pendingId;
+      showQueryResults(tabId, [placeholder], true);
+    }
     setStatus('');
     try {
-      target = reviewedTarget ?? (editor ? await editor.getExecutionTarget(api.splitSql) : target);
-      if (!target.sql.trim()) throw new Error('No query to execute.');
-      if (op.cancelling) { setStatus('Query cancelled before execution.'); return; }
-      patchTab(op.tabId, { error: null });
       void loadConnectionStats();
       const invokeStart = performance.now();
       rememberConnection(op.connectionId);
-      const next = await connectionTester.query(op.connectionId, () => api.executeQuery(target.sql, op.token, 0, PAGE_SIZE, op.connectionId));
+      const { statements, ...next } = await connectionTester.query(op.connectionId, () => api.executeQuery(target.sql, op.token, 0, PAGE_SIZE, op.connectionId, false, true));
       const invokeEnd = performance.now();
       if (!isCurrentOperation(op)) return;
-      const session = makeSession(next, target, op.connectionId);
-      patchTab(op.tabId, resultPatch(session));
+      const incoming = statements?.length ? batchResultTabs(context, statements, null, next.commitFeedback)
+        : [createResultTab(crypto.randomUUID(), { ...context, historyEntryIds: next.historyEntryIds }, next)];
+      showQueryResults(tabId, incoming, append, pendingId);
       await tick();
       const uiEnd = performance.now();
       if (!isCurrentOperation(op)) return;
-      const summary = next.commitFeedback
+      const summary = statements?.length ? `${statements.length} statements completed · ${next.durationMs} ms` : next.commitFeedback
         ? `${commitFeedbackLabel(next.commitFeedback)} · ${next.durationMs} ms`
         : `Loaded ${next.rowCount}${next.hasMore ? '+' : ''} ${next.rowCount === 1 ? 'row' : 'rows'} in ${next.durationMs} ms.`;
       setStatus(`${op.cancelling ? 'Query completed before cancellation. ' : ''}${summary}`, {
-        result: next, connectionName: session.connectionName, executedAt: session.executedAt, batch: false,
-        client: { targetMs: invokeStart - timingStart, invokeMs: invokeEnd - invokeStart, uiMs: uiEnd - invokeEnd, totalMs: uiEnd - timingStart }
+        result: next, connectionName: context.connectionName, executedAt: context.executedAt, batch: false,
+        client: { targetMs, invokeMs: invokeEnd - invokeStart, uiMs: uiEnd - invokeEnd, totalMs: targetMs + uiEnd - timingStart }
       });
     } catch (error) {
       if (!isCurrentOperation(op)) return;
-      const normalized = normalizeAppError(error);
+      const { statements, ...normalized } = normalizeAppError(error);
+      const incoming = statements?.length ? batchResultTabs(context, statements, normalized.code === '57014' ? null : normalized) : [];
       if (normalized.code === '57014') {
-        setStatus('Query cancelled.');
+        if (incoming.length) showQueryResults(tabId, incoming, append, pendingId);
+        else if (pendingId) {
+          const tab = tabs.find(item => item.id === tabId);
+          const restoreFocus = tabId === activeTab && hasResultsFocus(document.activeElement);
+          if (tab) removeResultTab(tab, pendingId, previousId);
+          if (restoreFocus) focusActiveResult(tabId);
+        }
+        setStatus(incoming.length ? `Query cancelled after ${incoming.length} completed ${incoming.length === 1 ? 'statement' : 'statements'}.` : 'Query cancelled.');
       } else if (normalized.connectionFailure === 'connect') {
-        const connectionName = connections.find(connection => connection.id === op.connectionId)?.name ?? 'the database';
-        patchTab(op.tabId, { error: connectBeforeRunError(normalized, connectionName) });
+        const failure = connectBeforeRunError(normalized, context.connectionName);
+        if (previousId && !append) patchResult(tabId, previousId, { error: failure });
+        else showQueryResults(tabId, [createResultTab(crypto.randomUUID(), context, null, failure)], append, pendingId);
       } else {
-        patchTab(op.tabId, resultPatch(null, normalized));
-        if (normalized.position && activeTab === op.tabId) editorRef?.markError(target.start + normalized.position - 1, normalized.message);
+        if (!incoming.some(item => item.error)) incoming.push(createResultTab(crypto.randomUUID(), context, null, normalized));
+        showQueryResults(tabId, incoming, append, pendingId);
+        if (normalized.position && activeTab === tabId && sql === draftSql) {
+          const offset = Array.from(target.sql).slice(0, normalized.position - 1).join('').length;
+          editorRef?.markError(target.start + offset, normalized.message);
+        }
       }
     } finally {
       finishOperation(op);
@@ -1523,7 +1676,7 @@
         rows: [...session.data.rows, ...next.rows],
         rowCount: session.data.rows.length + next.rows.length
       };
-      patchTab(op.tabId, resultPatch({ ...session, data: merged }));
+      if (op.resultId) patchResult(op.tabId, op.resultId, { data: merged, originalRows: merged.rows, editMode: false });
       await tick();
       const uiEnd = performance.now();
       if (!isCurrentOperation(op)) return;
@@ -1539,11 +1692,12 @@
     }
   }
 
-  function clearResults() {
+  function clearResults(restoreFocus = false) {
     if (operation?.tabId === activeTab || connectionMutation) return;
-    if (pendingChanges.length && !confirm('Discard staged cell edits and clear results?')) return;
-    patchTab(activeTab, resultPatch(null));
+    if (resultTabs.some(item => item.pendingChanges.length) && !confirm('Discard staged cell edits and clear results?')) return;
+    patchTab(activeTab, { results: [], activeResultId: null });
     editorRef?.clearHighlights();
+    if (restoreFocus) focusActiveResult();
     flash('Results cleared.');
   }
 
@@ -1627,7 +1781,7 @@
     captureActive();
     const targets = connectionTargets(tabs, initiatingTab, connectionScope);
     const previousId = connectionForm.id;
-    if (previousId && tabs.some(tab => tab.connectionId === previousId && (tab.id === activeTab ? pendingChanges : tab.pendingChanges).length)
+    if (previousId && tabs.some(tab => tab.results.some(item => item.context.connectionId === previousId && item.pendingChanges.length))
       && !confirm('Changing connection settings clears affected results and staged edits. Discard these edits and save?')) return;
     connectionMutation = 'Saving connection…';
     savingConnection = true;
@@ -1643,8 +1797,11 @@
       // results obtained using its previous configuration.
       if (previousId) {
         captureActive();
-        for (const tab of tabs.filter((item) => item.connectionId === previousId)) {
-          patchTab(tab.id, { session: null, originalRows: [], pendingChanges: [], editMode: false, error: null });
+        for (const tab of tabs) {
+          for (const item of tab.results.filter(item => !item.context.snapshot && item.context.connectionId === previousId)) {
+            const current = tabs.find(candidate => candidate.id === tab.id);
+            if (current) removeResultTab(current, item.id);
+          }
         }
       }
       applyConnectionSelection(saved.id, targets.map(tab => tab.id));
@@ -1720,7 +1877,7 @@
     if (operation || connectionMutation) return;
     captureActive();
     const affected = tabs.filter(tab => tab.connectionId === id);
-    const count = affected.reduce((total, tab) => total + tab.pendingChanges.length, 0);
+    const count = affected.flatMap(tab => tab.results).reduce((total, item) => total + item.pendingChanges.length, 0);
     if (count && !confirm(`Disconnecting will discard ${count} staged edit${count === 1 ? '' : 's'} across this connection’s tabs. Continue?`)) return;
     connectionMutation = 'Disconnecting…';
     try {
@@ -1728,8 +1885,8 @@
       connectionTester.invalidate(id);
       connectedIds = new Set([...connectedIds].filter(candidate => candidate !== id));
       for (const tab of affected) patchTab(tab.id, {
-        connectionId: tab.connectionLocked ? tab.connectionId : null, editMode: false, pendingChanges: [],
-        session: tab.session ? { ...tab.session, data: { ...tab.session.data, rows: cloneRows(tab.originalRows) } } : null
+        connectionId: tab.connectionLocked ? tab.connectionId : null,
+        results: tab.results.map(discardResultEdits)
       });
       await loadConnections();
       void refreshTxStatus();
@@ -1844,7 +2001,7 @@
 
   function updateTransactionStatus(next: TxStatus) {
     if (next.completion) {
-      const liveIds = new Set(tabs.map(tab => (tab.id === activeTab ? result : tab.session?.data)?.commitFeedback?.transactionId));
+      const liveIds = new Set(tabs.flatMap(tab => tab.results).map(item => item.data?.commitFeedback?.transactionId));
       txCompletions = new Map([...txCompletions].filter(([id]) => liveIds.has(id))).set(next.completion.id, next.completion);
     }
     txStatus = next;
@@ -1996,12 +2153,7 @@
 
   async function copyTransactionLog(transaction: HistoryTransaction) {
     try {
-      const entries: HistoryEntry[] = [];
-      while (entries.length < transaction.statementCount) {
-        const page = await api.historyTransactionPage(transaction.id, entries.length, Math.min(200, transaction.statementCount - entries.length));
-        if (!page.entries.length) break;
-        entries.push(...page.entries);
-      }
+      const entries = await historyTransactionEntries(transaction.id);
       if (!entries.length) throw new Error('This transaction has no statements in history.');
       await copyActivity(entries.map(executionLogText).join('\n\n'));
     } catch (error) {
@@ -2009,17 +2161,50 @@
     }
   }
 
-  async function openHistory(entry: HistoryEntry) {
+  async function historyTransactionEntries(id: string): Promise<HistoryEntry[]> {
+    const { entries, total } = await api.historyTransactionPage(id, 0, 200);
+    while (entries.length < total) {
+      const page = await api.historyTransactionPage(id, entries.length, Math.min(200, total - entries.length));
+      if (!page.entries.length) break;
+      entries.push(...page.entries);
+    }
+    return entries;
+  }
+
+  function historyConnectionName(connectionId: HistoryEntry['connectionId']): string {
+    return connections.find(connection => connection.id === connectionId)?.name ?? 'Unavailable connection';
+  }
+
+  function openHistory(entry: HistoryEntry) {
+    if (closingWorkspace || tabCloseTask) return;
+    historyOpenRequest++;
+    displayReadonlyTab(createHistoryTab(entry, null, historyConnectionName(entry.connectionId)));
+  }
+
+  async function openHistoryTransaction(id: string, title: string) {
+    const request = ++historyOpenRequest;
     try {
-      // Errors already carry their saved message; they have no row snapshot.
-      const result = entry.hasResult && !entry.isError ? (await api.historyGetResult(entry.id)).result : null;
-      if (entry.hasResult && !entry.isError && !result) {
-        flash('No stored result for this entry. Showing its saved SQL.');
-      }
-      displayReadonlyTab(createHistoryTab(entry, result,
-        connections.find(connection => connection.id === entry.connectionId)?.name ?? 'Unavailable connection'));
+      const entries = await historyTransactionEntries(id);
+      if (historyOpenRequest !== request || closingWorkspace || tabCloseTask) return;
+      if (!entries.length) { flash('No saved statements for this transaction.'); return; }
+      const tab = createHistoryTransactionTab(id, title, entries, historyConnectionName(entries[0].connectionId));
+      displayReadonlyTab(tab);
+      focusTabLabel(tab.id);
     } catch (error) {
-      flash(errorMessage(error));
+      if (historyOpenRequest === request) flash(`Could not open history. ${errorMessage(error)}`, true);
+    }
+  }
+
+  async function loadSavedSnapshot(tabId: string, item: ResultTab) {
+    if (!item.savedSnapshot || item.savedSnapshot.state === 'loading') return;
+    const request = { entryId: item.savedSnapshot.entryId, state: 'loading' as const };
+    patchResult(tabId, item.id, { savedSnapshot: request });
+    const isCurrent = () => tabs.find(tab => tab.id === tabId)?.results.find(result => result.id === item.id)?.savedSnapshot === request;
+    try {
+      const { result: snapshot } = await api.historyGetResult(request.entryId);
+      if (isCurrent()) patchResult(tabId, item.id, { data: snapshot, originalRows: snapshot?.rows ?? [], savedSnapshot: undefined });
+    } catch (error) {
+      if (isCurrent()) patchResult(tabId, item.id, { savedSnapshot: { ...request, state: 'failed', message: errorMessage(error) } });
     }
   }
 
@@ -2101,9 +2286,9 @@
   function handleExport(action: string) {
     if (isExportFormat(action)) { void copyResult(action); return; }
     const captured = resultsGrid?.captureExport();
-    if (!captured || exportWork || closingWorkspace) return;
+    if (!captured || !selectedResult || exportWork || closingWorkspace) return;
     exportProgress = null;
-    exportSource = { ...captured, tabId: activeTab, session: resultSession, queryBlockedReason: exportPagingReason(captured.loaded) };
+    exportSource = { ...captured, tabId: activeTab, resultId: selectedResult.id, session: resultSession, queryBlockedReason: exportPagingReason(captured.loaded) };
   }
 
   function startResultExport(options: ExportOptions) {
@@ -2157,7 +2342,7 @@
       if (paged) {
         signal.throwIfAborted();
         const session = source.session;
-        if (!session?.connectionId || activeTab !== source.tabId || resultSession?.executedAt !== session.executedAt
+        if (!session?.connectionId || activeTab !== source.tabId || selectedResult?.id !== source.resultId || resultSession?.executedAt !== session.executedAt
           || resultSession.connectionId !== session.connectionId) {
           throw new Error('The source results changed. Open Export again.');
         }
@@ -2199,29 +2384,24 @@
     }
   }
 
-  function enableEditMode(announce = true) {
-    if (closingWorkspace || operation || connectionMutation || editDisabledReason || !editEligibility.target || !result) return false;
-    if (editMode) return true;
+  function enableEditMode() {
+    if (closingWorkspace || operation || connectionMutation || editDisabledReason || !editEligibility.target || !result || !selectedResult || editMode) return;
     const target = editEligibility.target;
-    editMode = true;
-    originalRows = cloneRows(result.rows);
-    pendingChanges = [];
-    if (announce) flash(`Edit mode enabled for ${target.schema}.${target.table} using ${target.key.primaryKey ? 'primary' : 'unique'} key (${target.key.columns.join(', ')}).`);
-    return true;
+    patchResult(activeTab, selectedResult.id, { editMode: true });
+    flash(`Edit mode enabled for ${target.schema}.${target.table} using ${target.key.primaryKey ? 'primary' : 'unique'} key (${target.key.columns.join(', ')}).`);
   }
 
   function updateCells(rowIndex: number, edits: Record<string, CellEdit>) {
     const entries = Object.entries(edits);
-    if (!result?.rows[rowIndex] || !entries.length || closingWorkspace || operation || connectionMutation) return null;
+    if (!selectedResult || !result?.rows[rowIndex] || !entries.length || closingWorkspace || operation || connectionMutation) return null;
     const resetting = entries.every(([, edit]) => 'action' in edit && edit.action === 'reset');
-    if (!resetting && (!resultUsable || entries.some(([column]) => !editableColumns.includes(column)) || !enableEditMode(false))) return null;
+    if (!resetting && (editDisabledReason || !resultUsable || entries.some(([column]) => !editableColumns.includes(column)))) return null;
     const original = originalRows[rowIndex];
     if (!original || entries.some(([column]) => !Object.hasOwn(original, column))) return null;
     const { row, changes } = stageCellEdits(result, original, pendingChanges, rowIndex, edits);
     const rows = result.rows.slice();
     rows[rowIndex] = row;
-    result = { ...result, rows };
-    pendingChanges = changes;
+    patchResult(activeTab, selectedResult.id, { data: { ...result, rows }, pendingChanges: changes, editMode: true });
     return row;
   }
 
@@ -2241,7 +2421,7 @@
   }
 
   async function applyUpdates() {
-    if (!pendingChanges.length || operation || connectionMutation || !resultUsable || !tabConnectionId) {
+    if (!selectedResult || !pendingChanges.length || operation || connectionMutation || !resultUsable || !tabConnectionId) {
       flash('No pending changes.');
       return;
     }
@@ -2252,8 +2432,8 @@
 
     updateReviewError = '';
     const op = beginOperation('apply', tabConnectionId);
+    const resultId = selectedResult.id;
     const editedResult = result!;
-    const editedSession = resultSession!;
     const editedRows = cloneRows(editedResult.rows);
     const editedIndices = [...new Set(pendingChanges.map(change => change.rowIndex))];
     const updates = reviewedUpdates;
@@ -2276,13 +2456,14 @@
         return true;
       });
       if (!allDefaultsReturned) {
-        patchTab(op.tabId, resultPatch(null));
+        const tab = tabs.find(item => item.id === op.tabId);
+        if (tab) removeResultTab(tab, resultId);
         showUpdatePreview = false;
         flash(`${commitFeedbackLabel(applied.commitFeedback)}. Run the query again to see the default values.`);
         return;
       }
-      patchTab(op.tabId, {
-        session: { ...editedSession, data: { ...editedResult, rows: editedRows, commitFeedback: applied.commitFeedback } },
+      patchResult(op.tabId, resultId, {
+        data: { ...editedResult, rows: editedRows, commitFeedback: applied.commitFeedback },
         originalRows: editedRows, pendingChanges: [], editMode: false
       });
       showUpdatePreview = false;
@@ -2297,10 +2478,9 @@
   }
 
   function discardUpdates() {
-    if (result) result = { ...result, rows: cloneRows(originalRows) };
+    if (!selectedResult) return;
+    patchResult(activeTab, selectedResult.id, discardResultEdits(selectedResult));
     if (pendingChanges.length) flash('Pending edits discarded.');
-    pendingChanges = [];
-    editMode = false;
   }
 
   function generateUpdateSql(target: EditTarget, updates: RowUpdate[]): string {
@@ -2632,7 +2812,7 @@
           {/if}
           {#each groupHistory(history) as group (group.key)}
             {#if group.transaction}
-              <HistoryTransactionGroup transaction={group.transaction} revision={historyRevision} {connections} connectionId={group.entries[0].connectionId} matches={group.entries} searching={Boolean(historySearch.trim())} onCopy={copyHistorySql} onCopyLog={copyHistoryLog} onCopyTransaction={copyTransactionLog} onOpen={openHistory} onDelete={deleteHistory} />
+              <HistoryTransactionGroup transaction={group.transaction} revision={historyRevision} {connections} connectionId={group.entries[0].connectionId} matches={group.entries} searching={Boolean(historySearch.trim())} onCopy={copyHistorySql} onCopyLog={copyHistoryLog} onCopyTransaction={copyTransactionLog} onOpenTransaction={transaction => openHistoryTransaction(transaction.id, transactionLabel(transaction))} onOpen={openHistory} onDelete={deleteHistory} />
             {:else}
               <HistoryEntryCard entry={group.entries[0]} {connections} onCopy={copyHistorySql} onCopyLog={copyHistoryLog} onOpen={openHistory} onDelete={deleteHistory} />
             {/if}
@@ -2719,9 +2899,9 @@
             connectionColor={tabAppearance.color} hasConnection={Boolean(association)} connectionLocked={Boolean(tab.connectionLocked)}
             lockDisabled={running || Boolean(connectionMutation)} onToggleConnectionLock={() => toggleConnectionLock(tab.id)}
             running={operation?.tabId === tab.id}
-            failed={tab.kind === 'query' && tab.id !== activeTab && operation?.tabId !== tab.id && Boolean(tab.error)}
+            failed={tab.kind === 'query' && tab.id !== activeTab && operation?.tabId !== tab.id && tab.results.some(item => item.id === tab.activeResultId && item.error)}
             closeDisabled={operation?.tabId === tab.id}
-            pending={Boolean((tab.id === activeTab ? pendingChanges : tab.pendingChanges).length)}
+            pending={tab.results.some(item => item.pendingChanges.length > 0)}
             renaming={renamingTab === tab.id} {renameValue}
             dragging={draggingTab === tab.id} dropSide={tabDrop?.id === tab.id ? tabDrop.side : null}
             onSelect={() => switchTab(tab.id)} onRename={() => startRename(tab.id)}
@@ -2738,8 +2918,10 @@
         <button aria-label="Find in SQL editor" title="Find in SQL editor (Cmd/Ctrl+F)" disabled={!workspaceLoaded} on:click={() => editorRef?.find()}><Icon name="search" size={16} /></button>
         <button aria-label="Format SQL" title="Format selected SQL, or the entire draft" disabled={!workspaceLoaded || tabKind !== 'query'} on:click={formatSql}><Icon name="format" size={16} /><span class="action-label">Format SQL</span></button>
         <button title="Explain selected SQL or the statement at the cursor" aria-label="Explain query" disabled={!workspaceLoaded || running || Boolean(connectionMutation) || explainOpening || tabKind !== 'query' || !activeConnection} on:click={openExplain}><Icon name="explain" size={16} /><span class="action-label">Explain</span></button>
-        <button class="primary run-button" class:cancel-button={running} on:click={runQuery} disabled={!workspaceLoaded || Boolean(connectionMutation) || queryPreparing || operation?.cancelling || (!running && tabKind !== 'query')} title={activeConnection ? 'Run current statement (Cmd/Ctrl+Enter)' : 'Review a saved connection before running'}>
-          <Icon name={running ? 'stop' : 'play'} size={14} /><span>{operation?.cancelling ? 'Cancelling…' : running ? 'Cancel' : 'Run'}</span><kbd>⌘↵</kbd>
+        <button class="primary run-button" class:cancel-button={running} class:append-run={showAppendRun}
+          on:click={event => runQuery(!running && runInNewTabModifier(event, primaryRunModifier))} disabled={!workspaceLoaded || Boolean(connectionMutation) || queryPreparing || operation?.cancelling || (!running && tabKind !== 'query')} title={running ? 'Cancel the current operation (Cmd/Ctrl+Enter)' : 'Run SQL (Cmd/Ctrl+Enter) · New result tab (Cmd/Ctrl+Shift+Enter)'}>
+          <Icon name={running ? 'stop' : 'play'} size={14} /><span>{operation?.cancelling ? 'Cancelling…' : running ? 'Cancel' : showAppendRun ? 'Run in new tab' : 'Run'}</span>
+          <kbd>{showAppendRun ? appendRunKey : runKey}</kbd>
         </button>
       </div>
       </div>
@@ -2756,6 +2938,10 @@
               </span>
             {:else if txStatus.rowActivity === null}
               <span>Row counts unavailable</span>
+            {/if}
+            {#if txStatus.transactionId}
+              {@const id = txStatus.transactionId}
+              <button on:click={() => openHistoryTransaction(id, 'Transaction')}>Open in History</button>
             {/if}
             <button disabled={running || Boolean(connectionMutation)} on:click={commitTransaction}>Commit</button>
             <button disabled={running || Boolean(connectionMutation)} on:click={rollbackTransaction}>Rollback</button>
@@ -2796,26 +2982,32 @@
         on:keydown={resizeResultsWithKeyboard}
       ><span></span></div>
 
-      <section class="results-pane" aria-label="Results">
-        {#key `${activeTab}:${resultContext?.executedAt ?? ''}`}
+      <section class="results-pane" aria-label="Results" tabindex="-1" bind:this={resultsPane}>
+        {#if resultTabs.length}
+          <ResultTabs results={resultTabs} activeId={selectedResult?.id ?? null} busyId={activeOperation?.resultId} busy={Boolean(activeOperation || connectionMutation)}
+            onSelect={selectResultTab} onClose={closeSelectedResult} onCloseAll={() => clearResults(true)} />
+        {/if}
+        <div id="query-results-panel" class="result-set-panel" role={selectedResult ? 'tabpanel' : undefined}
+          aria-labelledby={selectedResult ? `result-set-${selectedResult.id}` : undefined}>
+        {#key `${activeTab}:${selectedResult?.id ?? ''}`}
           <ResultsGrid
             bind:this={resultsGrid}
-            result={queryError ? null : result} hasDetails={Boolean(resultContext && (!queryError || historyContext))}
+            result={queryError ? null : result} hasDetails={Boolean(resultContext && (result || queryError || !resultOperation))}
             {editableColumns} {editDisabledReason} {canLoadMore} {loadMoreBlockedReason}
             schemaItems={resultSession?.connectionId === tabConnectionId ? schemaItems : []}
-            resultContext={`${activeTab}:${resultContext?.executedAt ?? ''}`}
+            resultContext={`${activeTab}:${selectedResult?.id ?? ''}`}
             readOnly={!resultUsable} disabled={running || Boolean(connectionMutation)} changedCells={pendingChanges}
             onLoadMore={loadMoreRows} onEditMany={updateCells} onForeignKeyLookup={lookupForeignKey}
             onCancelLookup={(token) => { void api.cancelQuery(token).catch(() => {}); }} onMessage={flash}
           >
             {#snippet status()}
-              {#if activeOperation}
+              {#if resultOperation}
                 <span class="results-status running-state"><span class="operation-dot" aria-hidden="true"></span>{operationText}</span>
               {:else if queryError}
                 <span class="results-status failed-state">Failed</span>
               {:else if resultCommitLabel}
                 <span class="results-status" class:failed-state={result?.commitFeedback?.outcome === 'interrupted'}>{resultCommitLabel}</span>
-              {:else if historyContext && !result}
+              {:else if historyContext && !result && !savedSnapshot}
                 <span class="results-status">No snapshot stored</span>
               {/if}
               {#if !queryError && resultContext && !resultContext.snapshot && resultContext.connectionId !== tabConnectionId}
@@ -2853,14 +3045,22 @@
               {#if resultContext}
                 <ResultDetails
                   context={resultContext} result={queryError ? null : result} {themeKey}
-                  executedAtLabel={formatHistoryTime(resultContext.executedAt)} durationMs={result?.durationMs ?? historyContext?.durationMs}
-                  outcome={queryError ? 'Failed' : resultCommitLabel || (historyContext && !result ? 'No snapshot stored' : '')}
+                  executedAtLabel={formatHistoryTime(resultContext.executedAt)} durationMs={result?.durationMs ?? resultContext.durationMs}
+                  outcome={queryError ? 'Failed' : resultCommitLabel || (historyContext && !result && !savedSnapshot ? 'No snapshot stored' : '')}
                   onCopyLog={copyResultLog}
                 />
               {/if}
             {/snippet}
             {#snippet children()}
-              {#if (queryError || !result?.rows.length) && !(activeOperation?.kind === 'query' && !result)}
+              {#if savedSnapshot}
+                <div class="empty-state results-empty">
+                  {#if savedSnapshot.state === 'failed'}
+                    <strong>Could not load the saved result</strong>
+                    <p role="alert">{savedSnapshot.message}</p>
+                    <button on:click={() => selectedResult && loadSavedSnapshot(activeTab, selectedResult)}>Retry</button>
+                  {:else}<p role="status">Loading saved result…</p>{/if}
+                </div>
+              {:else if (queryError || !result?.rows.length) && !(resultOperation?.kind === 'query' && !result)}
                 <div class="empty-state results-empty">
                   <Cat mood={queryError ? 'error' : 'asleep'} size={52} muted animate={false} />
                   {#if queryError}
@@ -2875,10 +3075,10 @@
                   {:else}
                     <strong>{result ? result.columns.length ? 'No rows returned' : 'Statement completed' : tabKind === 'query' ? 'Run a query to see results' : 'SQL reference'}</strong>
                   {/if}
-                  {#if queryError && result}
-                    <button on:click={() => patchTab(activeTab, { error: null })}>Show previous results</button>
+                  {#if queryError && result && selectedResult}
+                    <button on:click={() => selectedResult && patchResult(activeTab, selectedResult.id, { error: null })}>Show previous results</button>
                   {:else if tabKind !== 'query' && (!result || queryError)}
-                    <button on:click={() => newQuery(sql, tabConnectionId)}>Open in new query tab</button>
+                    <button on:click={() => newQuery(resultContext?.execution.sql ?? sql, resultContext?.connectionId ?? tabConnectionId)}>Open in new query tab</button>
                   {:else if !result && !queryError && tabKind === 'query'}
                     <p>Place the cursor in a statement and press <kbd>⌘↵</kbd>.</p>
                   {/if}
@@ -2887,6 +3087,7 @@
             {/snippet}
           </ResultsGrid>
         {/key}
+        </div>
       </section>
     </section>
   </section>
@@ -2927,7 +3128,11 @@
   <DiagnosticDialog report={diagnosticReport} onClose={closeDiagnostics} />
 {/if}
 {#if reconnectReview}
-  <ResumeConnectionDialog {connections} initialConnectionId={reconnectReview.connectionId} {appearances} query={reconnectReview.target.sql} locked={focusedConnectionLocked} globalSelection={connectionScope === 'global'} onConfirm={resolveReconnectReview} onClose={() => resolveReconnectReview(null)} />
+  <ResumeConnectionDialog {connections} initialConnectionId={reconnectReview.connectionId} {appearances} statements={reconnectReview.statements} {themeKey} locked={focusedConnectionLocked} globalSelection={connectionScope === 'global'} onConfirm={resolveReconnectReview} onClose={() => resolveReconnectReview(null)} />
+{/if}
+{#if batchReview}
+  <RunBatchDialog connection={batchReview.connection} appearance={appearances[batchReview.connection.id]} statements={batchReview.statements}
+    {themeKey} onConfirm={() => resolveBatchReview(true)} onClose={() => resolveBatchReview(false)} />
 {/if}
 {#if picker}
   {#key picker}
@@ -2936,7 +3141,8 @@
 {/if}
 
 {#if explainSession}
-  <ExplainDialog query={explainSession.query} connectionName={explainSession.connectionName} transactionActive={txStatus.active}
+  <ExplainDialog statements={explainSession.statements} connection={explainSession.connection} appearance={appearances[explainSession.connection.id]}
+    transactionActive={explainSession.transactionId !== null} {themeKey}
     state={explainState} now={nowMs} onStart={runExplain} onShare={shareExplain} onCancel={() => void explainWorkflow.cancel()}
     onClose={closeExplain} onOpenLink={api.openExplainLink} />
 {/if}
@@ -2989,7 +3195,7 @@
   <Modal label="Discard staged edits?" onClose={() => resolveDiscardForRun(false)}>
     <div class="modal">
       <h2>Discard staged edits?</h2>
-      <p>You have {discardRunConfirmation.changeCount} staged {discardRunConfirmation.changeCount === 1 ? 'cell edit' : 'cell edits'}{discardRunConfirmation.globalSelection ? ' across the affected tabs' : ''}. {#if discardRunConfirmation.connectionName}Switching to {discardRunConfirmation.connectionName} will discard these changes.{:else}Running a new query will replace this result set and discard these changes.{/if} They have not been saved to the database.</p>
+      <p>You have {discardRunConfirmation.changeCount} staged {discardRunConfirmation.changeCount === 1 ? 'cell edit' : 'cell edits'}{discardRunConfirmation.globalSelection ? ' across the affected tabs' : ''}. {#if discardRunConfirmation.connectionName}Switching to {discardRunConfirmation.connectionName} will discard these changes.{:else}Running a new query will replace the current results and discard these changes.{/if} They have not been saved to the database.</p>
       <div class="row-actions">
         <button on:click={() => resolveDiscardForRun(false)}>Keep editing</button>
         <button class="danger-quiet" on:click={() => resolveDiscardForRun(true)}>Discard edits and {discardRunConfirmation.connectionName ? 'switch' : 'run'}</button>

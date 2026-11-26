@@ -18,6 +18,23 @@ pub(super) struct ExplainRequest {
     share: bool,
     connection_id: String,
     query_token: String,
+    transaction: Option<ExplainTransaction>,
+}
+
+#[derive(Deserialize)]
+struct ExplainTransaction {
+    id: Option<String>,
+}
+
+impl ExplainTransaction {
+    fn verify(&self, current: Option<&str>) -> Result<(), CoreError> {
+        if self.id.as_deref() == current {
+            return Ok(());
+        }
+        Err(CoreError::message(
+            "The transaction changed. Reopen Explain to review the current transaction before running.",
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -176,6 +193,14 @@ pub(super) async fn explain_query(
         let mut tx = cancellation
             .setup(async { Ok::<_, CoreError>(state.tx.lock().await) })
             .await?;
+        if let Some(expected) = &request.transaction {
+            expected
+                .verify(tx.as_ref().map(|session| session.history_id.as_str()))
+                .map_err(|error| AppError {
+                    code: Some("CATABASE_EXPLAIN_CONTEXT".into()),
+                    ..AppError::from(error)
+                })?;
+        }
         let local = if let Some(session) = tx.as_mut() {
             check_transaction_connection(&session.connection_id, &active.id)?;
             history.set_transaction(Some(session.history_id.clone()));

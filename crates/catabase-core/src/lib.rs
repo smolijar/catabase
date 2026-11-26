@@ -1,6 +1,6 @@
 mod cancellation;
 mod history;
-pub use history::{StatementHistory, StatementObserver};
+pub use history::{BatchStatement, StatementHistory, StatementObserver};
 pub mod conn_url;
 pub mod error;
 mod explain;

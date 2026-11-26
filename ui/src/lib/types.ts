@@ -6,6 +6,7 @@ export interface AppError {
   code?: string | null;
   position?: number | null;
   connectionFailure?: 'connect' | 'closed' | null;
+  statements?: BatchStatement[];
 }
 
 export interface ConnectionFields {
@@ -87,6 +88,17 @@ export interface QueryResult {
   hasMore: boolean;
   /** New results preserve JSON/JSONB as raw text; older history contains decoded values. */
   jsonValuesAsText?: boolean;
+}
+
+export interface BatchStatement {
+  statement: StatementRange;
+  result: QueryResult | null;
+  durationMs: number;
+  historyEntryId: number | null;
+}
+
+export interface QueryExecution extends QueryResult {
+  statements?: BatchStatement[];
 }
 
 export interface QueryTimings {
@@ -245,6 +257,7 @@ export interface ExecutionTarget {
   sql: string;
   start: number;
   end: number;
+  selectedSql?: string[];
 }
 
 export interface TxStatus {

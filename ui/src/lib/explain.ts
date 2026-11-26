@@ -1,3 +1,5 @@
+import { queryLostConnection } from './connectionTest.ts';
+
 export const DEFAULT_EXPLAIN_PREAMBLE = 'EXPLAIN (ANALYZE, COSTS, VERBOSE, BUFFERS, FORMAT JSON)';
 
 export interface ExplainOptions {
@@ -7,9 +9,12 @@ export interface ExplainOptions {
   comments: string;
   share: boolean;
 }
-export interface ExplainRequest extends ExplainOptions {
-  query: string;
+export interface ExplainRunOptions extends ExplainOptions {
   connectionId: string;
+  transaction?: { id: string | null };
+}
+export interface ExplainRequest extends ExplainRunOptions {
+  query: string;
   queryToken: string;
 }
 export interface ExplainResult {
@@ -34,6 +39,15 @@ export interface ExplainProgress {
   run: number;
   totalRuns: number;
 }
+export interface ExplainStatement {
+  index: number;
+  query: string;
+}
+export interface ExplainOutcome extends ExplainStatement {
+  status: 'queued' | 'running' | 'ready' | 'failed' | 'cancelled' | 'skipped';
+  result: ExplainResult | null;
+  error: string;
+}
 export interface ExplainState {
   token: string | null;
   busy: boolean;
@@ -41,10 +55,11 @@ export interface ExplainState {
   stage: ExplainProgress['stage'] | null;
   stageStartedAt: number | null;
   totalRuns: number;
-  result: ExplainResult | null;
+  activeIndex: number | null;
+  outcomes: ExplainOutcome[];
   error: string;
 }
-export const initialExplainState = (): ExplainState => ({ token: null, busy: false, cancelling: false, stage: null, stageStartedAt: null, totalRuns: 2, result: null, error: '' });
+export const initialExplainState = (): ExplainState => ({ token: null, busy: false, cancelling: false, stage: null, stageStartedAt: null, totalRuns: 2, activeIndex: null, outcomes: [], error: '' });
 export const defaultExplainOptions = (): ExplainOptions => ({ preamble: DEFAULT_EXPLAIN_PREAMBLE, useSecondResult: true, title: '', comments: '', share: true });
 
 export function explainStageLabel(state: ExplainState): string {
@@ -53,8 +68,8 @@ export function explainStageLabel(state: ExplainState): string {
   return `Running ${state.stage === 'secondRun' ? 'second' : 'first'} EXPLAIN (${state.stage === 'secondRun' ? 2 : 1} of ${state.totalRuns})…`;
 }
 
-/** The native command owns both SQL executions and a single cancellation token.
- * Retrying a failed upload uses the captured plan; it never executes SQL again. */
+/** Run approved statements in order, each through the native single-query command.
+ * Keep the workspace busy across the sequence and only cancel the active request. */
 export function createExplainWorkflow(deps: {
   begin: (connectionId: string) => string;
   finish: (token: string) => void;
@@ -69,38 +84,56 @@ export function createExplainWorkflow(deps: {
     state = { ...state, ...patch };
     changed(state);
   }
-  async function perform(connectionId: string, uploadOnly: boolean, work: (token: string) => Promise<ExplainResult>) {
-    if (state.busy || disposed) return;
-    const token = deps.begin(connectionId);
-    set({ token, busy: true, cancelling: false, error: '', stage: uploadOnly ? 'sharing' : 'firstRun', stageStartedAt: now(), result: uploadOnly ? state.result : null });
-    try {
-      const result = await work(token);
-      if (state.token === token) set({ result });
-    } catch (error) {
-      if (state.token !== token) return;
-      const cancelled = state.cancelling && (error as { code?: string })?.code === '57014';
-      const message = cancelled ? (uploadOnly ? 'Sharing cancelled. Dalibo may already have received the plan. The plan is still available below.' : 'Explain cancelled. No plan was shared.') : describe(error);
-      if (uploadOnly && state.result) set({ result: { ...state.result, shareError: message } });
-      else set({ error: message });
-    } finally {
-      if (state.token === token) set({ busy: false, cancelling: false, token: null, stage: null, stageStartedAt: null });
-      deps.finish(token);
-    }
+  function updateOutcome(index: number, patch: Partial<ExplainOutcome>) {
+    set({ outcomes: state.outcomes.map(outcome => outcome.index === index ? { ...outcome, ...patch } : outcome) });
+  }
+  function finish(token: string) {
+    set({ busy: false, cancelling: false, token: null, stage: null, stageStartedAt: null, activeIndex: null });
+    deps.finish(token);
   }
   return {
     reset() { if (!state.busy) { state = initialExplainState(); changed(state); } },
-    run(request: Omit<ExplainRequest, 'queryToken'>) {
-      if (state.busy || disposed) return Promise.resolve();
-      set({ totalRuns: request.useSecondResult ? 2 : 1 });
-      return perform(request.connectionId, false, token => deps.run({ ...request, queryToken: token }));
+    async run(options: ExplainRunOptions, statements: ExplainStatement[]) {
+      if (state.busy || disposed || !statements.length) return;
+      const token = deps.begin(options.connectionId);
+      set({ busy: true, error: '', totalRuns: options.useSecondResult ? 2 : 1,
+        outcomes: statements.map(statement => ({ ...statement, status: 'queued', result: null, error: '' })) });
+      try {
+        for (const { index, query } of statements) {
+          if (state.cancelling || disposed) break;
+          const queryToken = statements.length > 1 ? `${token}:${index}` : token;
+          set({ token: queryToken, activeIndex: index, stage: 'firstRun', stageStartedAt: now() });
+          updateOutcome(index, { status: 'running' });
+          try {
+            const result = await deps.run({ ...options, query, queryToken });
+            updateOutcome(index, { status: 'ready', result });
+          } catch (error) {
+            const code = (error as { code?: string })?.code;
+            const cancelled = state.cancelling && code === '57014';
+            updateOutcome(index, { status: cancelled ? 'cancelled' : 'failed', error: cancelled ? 'Explain cancelled. No plan was shared.' : describe(error) });
+            if (code === 'CATABASE_EXPLAIN_CONTEXT' || queryLostConnection(error)) break;
+          }
+        }
+      } finally {
+        set({ outcomes: state.outcomes.map(outcome => outcome.status === 'queued' ? { ...outcome, status: 'skipped' } : outcome) });
+        finish(token);
+      }
     },
-    retryShare(connectionId: string, title: string, comments: string) {
-      const result = state.result;
-      if (!result || state.busy || disposed) return Promise.resolve();
-      return perform(connectionId, true, async token => {
+    async retryShare(connectionId: string, index: number, title: string, comments: string) {
+      const result = state.outcomes.find(outcome => outcome.index === index)?.result;
+      if (!result || state.busy || disposed) return;
+      const token = deps.begin(connectionId);
+      set({ token, busy: true, error: '', activeIndex: index, stage: 'sharing', stageStartedAt: now() });
+      try {
         const shared = await deps.share({ plan: result.plan, query: result.query, title, comments, queryToken: token });
-        return { ...result, url: shared.url, shareError: null };
-      });
+        updateOutcome(index, { result: { ...result, url: shared.url, shareError: null } });
+      } catch (error) {
+        const cancelled = state.cancelling && (error as { code?: string })?.code === '57014';
+        const shareError = cancelled ? 'Sharing cancelled. Dalibo may already have received the plan. The plan is still available below.' : describe(error);
+        updateOutcome(index, { result: { ...result, shareError } });
+      } finally {
+        finish(token);
+      }
     },
     progress(progress: ExplainProgress) {
       if (!state.busy || progress.queryToken !== state.token) return;

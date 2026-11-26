@@ -21,6 +21,7 @@ import type {
   HistoryStorageStats,
   ForeignKeyLookup,
   ForeignKeyValues,
+  QueryExecution,
   QueryResult,
   RowUpdate,
   SchemaTree,
@@ -51,9 +52,9 @@ export const api = {
   setCommitMode: (mode: CommitMode) => invoke<CommitMode>('set_commit_mode', { mode }),
   setPoolSize: (poolSize: number) => invoke<number>('set_pool_size', { poolSize }),
   setSupermavenEnabled: (enabled: boolean) => invoke<SupermavenStatus>('set_supermaven_enabled', { enabled }),
-  splitSql: (sql: string) => invoke<StatementRange[]>('split_sql', { sql }),
-  executeQuery: (sql: string, queryToken: string, offset = 0, pageSize = 200, connectionId?: string, readOnlyReplay = false) =>
-    invoke<QueryResult>('execute_query', { sql, queryToken, offset, pageSize, connectionId, readOnlyReplay }),
+  splitSql: (sql: string, editorBoundaries = true) => invoke<StatementRange[]>('split_sql', { sql, editorBoundaries }),
+  executeQuery: (sql: string, queryToken: string, offset = 0, pageSize = 200, connectionId?: string, readOnlyReplay = false, captureBatchResults = false) =>
+    invoke<QueryExecution>('execute_query', { sql, queryToken, offset, pageSize, connectionId, readOnlyReplay, captureBatchResults }),
   explainQuery: (request: ExplainRequest) => invoke<ExplainResult>('explain_query', { request }),
   shareExplain: (request: ShareExplainRequest) => invoke<{ url: string }>('share_explain', { request }),
   openExplainLink: (url: string) => invoke<void>('open_explain_link', { url }),

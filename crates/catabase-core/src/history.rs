@@ -6,12 +6,30 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
-use crate::{CoreError, NewHistoryEntry, QueryResult, Storage};
+use crate::{CoreError, NewHistoryEntry, QueryResult, StatementRange, Storage};
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchStatement {
+    pub statement: StatementRange,
+    pub result: Option<QueryResult>,
+    pub duration_ms: u128,
+    pub history_entry_id: Option<i64>,
+}
 
 pub trait StatementObserver: Send + Sync {
     fn started(&self, sql: &str);
     fn finished(&self, sql: &str, result: Result<&QueryResult, &CoreError>, duration_ms: u128);
+
+    fn batch_result(&self, statement: &StatementRange, result: &mut QueryResult) {
+        self.finished(&statement.text, Ok(result), result.duration_ms);
+    }
+
+    fn batch_error(&self, statement: &StatementRange, error: &CoreError, duration_ms: u128) {
+        self.finished(&statement.text, Err(error), duration_ms);
+    }
 }
 
 pub struct StatementHistory<'a> {
@@ -28,6 +46,7 @@ struct RecordingState {
     pending: Option<PendingStatement>,
     recorded: usize,
     saved_ids: Vec<i64>,
+    batch: Option<Vec<BatchStatement>>,
     save_time: Duration,
 }
 
@@ -55,6 +74,15 @@ impl<'a> StatementHistory<'a> {
     pub fn with_observer(mut self, observer: &'a dyn StatementObserver) -> Self {
         self.observer = Some(observer);
         self
+    }
+
+    pub fn collect_batch_results(mut self) -> Self {
+        self.state.get_mut().unwrap().batch = Some(Vec::new());
+        self
+    }
+
+    pub fn take_batch_results(&self) -> Vec<BatchStatement> {
+        self.state.lock().unwrap().batch.take().unwrap_or_default()
     }
 
     pub fn set_transaction(&self, id: Option<String>) {
@@ -97,13 +125,30 @@ impl<'a> StatementHistory<'a> {
             self.finished(sql, Err(error), 0);
         }
     }
+
+    fn finish_statement(
+        &self,
+        sql: &str,
+        result: Result<&QueryResult, &CoreError>,
+        duration_ms: u128,
+    ) -> Option<i64> {
+        let started_at = self
+            .state
+            .lock()
+            .unwrap()
+            .pending
+            .take()
+            .map(|pending| pending.started_at);
+        self.record(sql, result, duration_ms, started_at)
+    }
+
     fn record(
         &self,
         sql: &str,
         result: Result<&QueryResult, &CoreError>,
         duration_ms: u128,
         started_at: Option<DateTime<Utc>>,
-    ) {
+    ) -> Option<i64> {
         if let Some(observer) = self.observer {
             observer.finished(sql, result, duration_ms);
         }
@@ -140,7 +185,9 @@ impl<'a> StatementHistory<'a> {
         }
         state.save_time += start.elapsed();
         drop(state);
+        let id = saved.as_ref().ok().copied();
         (self.notify)(saved.map(|_| ()));
+        id
     }
 }
 
@@ -158,14 +205,33 @@ impl StatementObserver for StatementHistory<'_> {
     }
 
     fn finished(&self, sql: &str, result: Result<&QueryResult, &CoreError>, duration_ms: u128) {
-        let started_at = self
-            .state
-            .lock()
-            .unwrap()
-            .pending
-            .take()
-            .map(|pending| pending.started_at);
-        self.record(sql, result, duration_ms, started_at);
+        self.finish_statement(sql, result, duration_ms);
+    }
+
+    fn batch_result(&self, statement: &StatementRange, result: &mut QueryResult) {
+        let duration_ms = result.duration_ms;
+        let history_entry_id = self.finish_statement(&statement.text, Ok(result), duration_ms);
+        if let Some(batch) = self.state.lock().unwrap().batch.as_mut() {
+            let summary = QueryResult::command(result.row_count, duration_ms);
+            batch.push(BatchStatement {
+                statement: statement.clone(),
+                result: Some(std::mem::replace(result, summary)),
+                duration_ms,
+                history_entry_id,
+            });
+        }
+    }
+
+    fn batch_error(&self, statement: &StatementRange, error: &CoreError, duration_ms: u128) {
+        let history_entry_id = self.finish_statement(&statement.text, Err(error), duration_ms);
+        if let Some(batch) = self.state.lock().unwrap().batch.as_mut() {
+            batch.push(BatchStatement {
+                statement: statement.clone(),
+                result: None,
+                duration_ms,
+                history_entry_id,
+            });
+        }
     }
 }
 
@@ -239,6 +305,35 @@ mod tests {
             storage.history_transaction_page(&id, 0, 50).unwrap().total,
             4
         );
+    }
+
+    #[test]
+    fn batch_capture_preserves_saved_results_and_omits_implicit_begin() {
+        let storage = Storage::in_memory().unwrap();
+        let notify = |saved: Result<(), CoreError>| saved.unwrap();
+        let history = StatementHistory::new(&storage, "docker", &notify).collect_batch_results();
+        let ranges = crate::split_statements("SELECT 1; SELECT missing;");
+        history.finished("BEGIN", Ok(&QueryResult::command(0, 0)), 0);
+        let mut result = QueryResult::command(1, 2);
+        result.rows = vec![serde_json::json!({ "value": "1" })];
+        history.started(&ranges[0].text);
+        history.batch_result(&ranges[0], &mut result);
+        history.started(&ranges[1].text);
+        history.batch_error(&ranges[1], &CoreError::message("Column missing"), 3);
+
+        let ids = history.take_saved_ids();
+        let batch = history.take_batch_results();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].statement, ranges[0]);
+        assert_eq!(batch[0].history_entry_id, Some(ids[1]));
+        assert_eq!(batch[1].statement, ranges[1]);
+        assert_eq!(batch[1].history_entry_id, Some(ids[2]));
+        assert_eq!(batch[1].duration_ms, 3);
+        assert!(batch[1].result.is_none());
+        assert!(result.rows.is_empty());
+        let saved = storage.history_result(ids[1]).unwrap().unwrap();
+        assert_eq!(saved["rows"][0], batch[0].result.as_ref().unwrap().rows[0]);
     }
 
     #[test]

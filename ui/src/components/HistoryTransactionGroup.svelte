@@ -14,6 +14,7 @@
   export let onCopy: (entry: HistoryEntry) => void;
   export let onCopyLog: (entry: HistoryEntry) => void;
   export let onCopyTransaction: (transaction: HistoryTransaction) => Promise<void>;
+  export let onOpenTransaction: (transaction: HistoryTransaction) => void;
   export let onOpen: (entry: HistoryEntry) => void;
   export let onDelete: (id: number) => void;
   let open = false;
@@ -72,13 +73,14 @@
     </div>
   {/if}
 </details>
-  <button class="history-icon-button transaction-copy" aria-label="Copy transaction log" title="Copy transaction log" on:click={() => onCopyTransaction(transaction)}>
-    <Icon name="copy" size={14} />
-  </button>
+  <div class="transaction-actions">
+    <button class="history-icon-button" aria-label="Open transaction results" title="Open transaction results" on:click={() => onOpenTransaction(transaction)}><Icon name="open" size={14} /></button>
+    <button class="history-icon-button" aria-label="Copy transaction log" title="Copy transaction log" on:click={() => onCopyTransaction(transaction)}><Icon name="copy" size={14} /></button>
+  </div>
 </div>
 
 <style>
   .transaction-group { position: relative; }
-  .transaction-group summary { padding-right: 34px; }
-  .transaction-copy { position: absolute; top: 4px; right: 4px; }
+  .transaction-group summary { padding-right: 60px; }
+  .transaction-actions { position: absolute; display: flex; top: 4px; right: 4px; }
 </style>

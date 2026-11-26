@@ -166,11 +166,11 @@
       }
     });
 
-    // Reserve Cmd/Ctrl+Enter for Run. Vim's o calls the line action by ID.
-    const runShortcutOverride = monaco.editor.addKeybindingRule({
-      keybinding: monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter,
-      command: '-editor.action.insertLineAfter'
-    });
+    // Reserve both Run shortcuts. Vim's o and O call the line actions by ID.
+    const runShortcutOverride = monaco.editor.addKeybindingRules([
+      { keybinding: monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, command: '-editor.action.insertLineAfter' },
+      { keybinding: monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, command: '-editor.action.insertLineBefore' }
+    ]);
     vimCommandContext = editor.createContextKey('catabaseVimCommandMode', false);
     // The Vim adapter leaves Tab unhandled. Keep Monaco's focus navigation available.
     const vimIndentContext = 'catabaseVimCommandMode && editorTextFocus && !editorTabMovesFocus';
@@ -526,19 +526,22 @@
     const selections = sourceEditor.getSelections() ?? [];
     const selected = selections
       .filter((selection) => !selection.isEmpty())
-      .map((selection) => ({
-        sql: model.getValueInRange(selection).trim(),
-        start: model.getOffsetAt(selection.getStartPosition()),
-        end: model.getOffsetAt(selection.getEndPosition())
-      }))
+      .map((selection) => {
+        const text = model.getValueInRange(selection);
+        const sql = text.trim();
+        const start = model.getOffsetAt(selection.getStartPosition()) + text.length - text.trimStart().length;
+        return { sql, start, end: start + sql.length };
+      })
       .filter((selection) => selection.sql.length > 0);
 
     if (selected.length) {
       highlightOffsets(selected.map(({ start, end }) => ({ start, end })));
+      const selectedSql = selected.map(selection => selection.sql);
       return {
-        sql: selected.map((selection) => selection.sql).join('\n\n'),
+        sql: selectedSql.join('\n\n'),
         start: selected[0].start,
-        end: selected[selected.length - 1].end
+        end: selected[selected.length - 1].end,
+        selectedSql: selectedSql.length > 1 ? selectedSql : undefined
       };
     }
 
@@ -571,6 +574,10 @@
 
   export function getViewState() {
     return editor?.saveViewState() ?? null;
+  }
+
+  export function focusEditor() {
+    editor?.focus();
   }
 
   export function getSnapshot() {

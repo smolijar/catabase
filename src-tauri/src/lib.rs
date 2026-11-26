@@ -17,11 +17,11 @@ use std::{
 };
 
 use catabase_core::{
-    ApplyUpdatesResult, CommandTimings, CommitMode, ConnectionFields, ConnectionInput,
-    ConnectionRecord, ConnectionStats, CoreError, ForeignKeyLookup, ForeignKeyValues, HistoryPage,
-    HistoryStats, HistoryStorageStats, PgClient, PgErrorInfo, PgPool, PooledPgClient,
-    QueryCancellation, QueryResult, ReflectionCache, RowUpdate, SchemaTree, Settings,
-    StatementHistory, StatementKind, StatementRange, Storage, SupermavenClient,
+    ApplyUpdatesResult, BatchStatement, CommandTimings, CommitMode, ConnectionFields,
+    ConnectionInput, ConnectionRecord, ConnectionStats, CoreError, ForeignKeyLookup,
+    ForeignKeyValues, HistoryPage, HistoryStats, HistoryStorageStats, PgClient, PgErrorInfo,
+    PgPool, PooledPgClient, QueryCancellation, QueryResult, ReflectionCache, RowUpdate, SchemaTree,
+    Settings, StatementHistory, StatementKind, StatementRange, Storage, SupermavenClient,
     SupermavenCompletion, SupermavenRequest, SupermavenStatus, TransactionActivity,
     TransactionActivityTracker, apply_row_updates_observed as apply_rows,
     build_connection_url as build_url, checkout_pool_client, classify_statement,
@@ -116,6 +116,8 @@ struct AppError {
     code: Option<String>,
     position: Option<usize>,
     connection_failure: Option<ConnectionFailure>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    statements: Vec<BatchStatement>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,6 +166,8 @@ struct QueryExecution {
     commit_feedback: Option<CommitFeedback>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     history_entry_ids: Vec<i64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    statements: Vec<BatchStatement>,
 }
 
 impl From<QueryResult> for QueryExecution {
@@ -172,6 +176,7 @@ impl From<QueryResult> for QueryExecution {
             result,
             commit_feedback: None,
             history_entry_ids: Vec::new(),
+            statements: Vec::new(),
         }
     }
 }
@@ -187,6 +192,7 @@ impl QueryExecution {
         Self {
             result,
             history_entry_ids: Vec::new(),
+            statements: Vec::new(),
             commit_feedback: Some(CommitFeedback {
                 outcome,
                 transaction_id,
@@ -267,6 +273,7 @@ impl From<CoreError> for AppError {
                 code,
                 position,
                 connection_failure,
+                statements: Vec::new(),
             };
         }
 
@@ -278,6 +285,7 @@ impl From<CoreError> for AppError {
             code: None,
             position: None,
             connection_failure,
+            statements: Vec::new(),
         }
     }
 }
@@ -482,16 +490,28 @@ async fn set_supermaven_enabled(
 }
 
 #[tauri::command]
-async fn split_sql(sql: String) -> Result<Vec<StatementRange>, AppError> {
-    Ok(split_editor_statements(&sql)
+async fn split_sql(
+    sql: String,
+    editor_boundaries: Option<bool>,
+) -> Result<Vec<StatementRange>, AppError> {
+    let ranges = if editor_boundaries.unwrap_or(true) {
+        split_editor_statements(&sql)
+    } else {
+        split_statements(&sql)
+    };
+    Ok(ranges
         .into_iter()
-        .map(|range| StatementRange {
-            // Monaco offsets are UTF-16 units; the lexer uses UTF-8 bytes.
-            start: sql[..range.start].encode_utf16().count(),
-            end: sql[..range.end].encode_utf16().count(),
-            text: range.text,
-        })
+        .map(|range| editor_statement_range(&sql, range))
         .collect())
+}
+
+fn editor_statement_range(sql: &str, range: StatementRange) -> StatementRange {
+    // Monaco offsets are UTF-16 units.
+    StatementRange {
+        start: sql[..range.start].encode_utf16().count(),
+        end: sql[..range.end].encode_utf16().count(),
+        text: range.text,
+    }
 }
 
 #[tauri::command]
@@ -505,6 +525,7 @@ async fn execute_query(
     page_size: u32,
     connection_id: Option<String>,
     read_only_replay: Option<bool>,
+    capture_batch_results: Option<bool>,
 ) -> Result<QueryExecution, AppError> {
     let _workspace = state.updates.workspace_operation()?;
     // Capture connection/setup failures too. Statement observers replace this
@@ -524,6 +545,7 @@ async fn execute_query(
         let notify = |saved| notify_history(&app, saved);
         let diagnostic_observer = diagnostics::QueryObserver::new(&app);
         let history = StatementHistory::new(&state.storage, &active.id, &notify).with_observer(&diagnostic_observer);
+        let history = if capture_batch_results.unwrap_or(false) { history.collect_batch_results() } else { history };
         let result = run_query_with_state(
             &app,
             &state,
@@ -542,9 +564,14 @@ async fn execute_query(
         )
         .await;
 
+        let statements = history.take_batch_results().into_iter().map(|item| BatchStatement {
+            statement: editor_statement_range(&sql, item.statement),
+            ..item
+        }).collect();
         match result {
             Ok(mut execution) => {
                 execution.history_entry_ids = history.take_saved_ids();
+                execution.statements = statements;
                 let total_ms = command_start.elapsed().as_secs_f64() * 1000.0;
                 let history_ms = history.save_time_ms();
                 if let Some(timings) = execution.result.timings.as_mut() {
@@ -559,6 +586,7 @@ async fn execute_query(
             Err(error) => {
                 history.rejected(&sql, &error);
                 let mut error = AppError::from(error);
+                error.statements = statements;
                 if error.code.as_deref() == Some("25001")
                     && state.tx.lock().await.is_some()
                 {
@@ -2016,7 +2044,7 @@ mod tests {
     #[tokio::test]
     async fn editor_statement_offsets_use_monaco_utf16_units() {
         let sql = "select 'ž🐈';select '猫';select 1";
-        let ranges = split_sql(sql.to_string()).await.unwrap();
+        let ranges = split_sql(sql.to_string(), None).await.unwrap();
         assert_eq!(ranges.len(), 3);
         let last_start = sql.rfind("select 1").unwrap();
         assert_eq!(ranges[0].end, "select 'ž🐈';".encode_utf16().count());
@@ -2027,9 +2055,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_confirmation_counts_the_same_statements_as_postgres_execution() {
+        let sql = "SELECT ';🐈';; -- ;\n\nSELECT $$';'$$; /* ; */\nSELECT 3";
+        let ranges = split_sql(sql.into(), Some(false)).await.unwrap();
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[1].text, "SELECT $$';'$$;");
+        let third = sql.rfind("SELECT 3").unwrap();
+        assert_eq!(ranges[2].start, sql[..third].encode_utf16().count());
+
+        let editor = "SELECT 1\n\nSELECT 2\n\nSELECT 3;";
+        assert_eq!(split_sql(editor.into(), None).await.unwrap().len(), 3);
+        assert_eq!(
+            split_sql(editor.into(), Some(false)).await.unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn editor_cursor_on_begin_targets_only_the_transaction_command() {
         let sql = "WITH foo AS (SELECT 'ž🐈' AS value)\n\nSELECT * FROM foo\nORDER BY value\n\n\nbegin\n\n\nSELECT 1";
-        let ranges = split_sql(sql.to_string()).await.unwrap();
+        let ranges = split_sql(sql.to_string(), None).await.unwrap();
         assert_eq!(ranges.len(), 3);
         let begin_start = sql[..sql.find("begin").unwrap()].encode_utf16().count();
         for cursor in begin_start..begin_start + "begin".len() {
@@ -2049,7 +2094,7 @@ mod tests {
         let index = "create unique index CONCURRENTLY if not exists idx_items_access_token on items (access_token)";
         let sql = format!("{select}\n\n\n{index}");
         let cursor = sql.encode_utf16().count();
-        let ranges = split_sql(sql).await.unwrap();
+        let ranges = split_sql(sql, None).await.unwrap();
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].text, select);
         assert_eq!(ranges[0].end, select.encode_utf16().count());
@@ -2068,7 +2113,7 @@ mod tests {
             "{}{select}\n\n\n\n{grant}\n{table_grant}\n\n{publication}",
             "\n".repeat(62)
         );
-        let ranges = split_sql(sql.clone()).await.unwrap();
+        let ranges = split_sql(sql.clone(), None).await.unwrap();
         assert_eq!(
             ranges
                 .iter()

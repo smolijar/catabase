@@ -67,6 +67,7 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .status-dot.connected, .connected .status-dot { background: var(--ok); }
 .run-button { height: 28px; width: 128px; }
 .run-button kbd { border-color: currentColor; background: transparent; color: inherit; opacity: .8; }
+button.run-button.append-run, button.run-button.append-run:hover:not(:disabled) { width: auto; min-width: 146px; border-color: var(--accent); background: color-mix(in srgb, var(--accent) 82%, var(--surface-1)); }
 .run-button.cancel-button { background: var(--surface-1); border-color: var(--line-strong); color: var(--danger); }
 .run-button.cancel-button:hover:not(:disabled) { background: var(--danger-soft); filter: none; }
 .operation-status { display: block; border: 0; background: transparent; color: var(--warn); font-size: 11px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -220,6 +221,7 @@ html:not([data-conn='none']) .toolbar { border-bottom: 2px solid var(--accent); 
 .edit-bar { padding: 2px 8px; font-size: 11px; line-height: 16px; }
 .execution-highlight { background: var(--accent-soft); }
 .results-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface-1); }
+.result-set-panel { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .results-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: auto; }
 .dropdown.compact .dropdown-trigger { width: auto; flex-shrink: 0; font-size: 12px; }
 .results-actions > button, .result-copy > button { min-height: 22px; padding: 1px 6px; font: 11px/16px var(--font-sans); white-space: nowrap; }

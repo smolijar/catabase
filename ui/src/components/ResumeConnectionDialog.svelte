@@ -2,19 +2,22 @@
   import Modal from './Modal.svelte';
   import Dropdown from './Dropdown.svelte';
   import Icon from './Icon.svelte';
+  import StatementPreviews from './StatementPreviews.svelte';
   import type { ConnectionRecord } from '../lib/types';
   import type { ConnectionAppearance } from '../lib/appearance';
 
   export let connections: ConnectionRecord[];
   export let initialConnectionId: string;
   export let appearances: Record<string, ConnectionAppearance>;
-  export let query: string;
+  export let statements: string[];
+  export let themeKey: string;
   export let locked = false;
   export let globalSelection = false;
   export let onConfirm: (connection: ConnectionRecord) => void;
   export let onClose: () => void;
 
   let selectedId = initialConnectionId;
+  $: statementCount = statements.length;
   $: connection = connections.find(connection => connection.id === selectedId);
   $: appearance = appearances[selectedId] ?? { color: 'none', environment: '' };
   $: options = connections.map(connection => ({ value: connection.id, label: `${connection.name} (${connection.username})` }));
@@ -24,6 +27,7 @@
   <div class="modal resume-connection" data-conn={appearance.color}>
     <div class="panel-head"><h2>Connect before running</h2><button on:click={onClose}>Cancel</button></div>
     <p>This tab is disconnected. Review the connection before running this query.</p>
+    {#if statementCount > 2}<p>The selection contains {statementCount} statements.</p>{/if}
     {#if locked}<p><Icon name="lock" size={12} /> This tab’s connection is locked. Unlock it from the tab menu to choose another connection.</p>
     {:else if globalSelection}<p>Choosing a different connection updates all unlocked tabs.</p>{/if}
     {#if connections.length > 1 && !locked}
@@ -38,8 +42,8 @@
         <dl><div><dt>Database</dt><dd>{connection.database}</dd></div><div><dt>Host</dt><dd>{connection.host}:{connection.port}</dd></div><div><dt>SSL</dt><dd>{connection.ssl ? 'Required' : 'Disabled'}</dd></div></dl>
       </div>
     {:else}<p class="error-text">This saved connection is no longer available. Choose another connection.</p>{/if}
-    <div class="sql-context"><span>SQL to run</span><pre aria-label="SQL to run">{query}</pre></div>
-    <div class="row-actions"><button class="primary" disabled={!connection} on:click={() => connection && onConfirm(connection)}><Icon name="play" size={14} />Connect & run</button></div>
+    <div class="sql-context"><span>SQL to run</span><StatementPreviews {statements} {themeKey} /></div>
+    <div class="row-actions"><button class="primary" disabled={!connection} on:click={() => connection && onConfirm(connection)}><Icon name="play" size={14} />{statementCount > 2 ? `Connect & run ${statementCount} statements` : 'Connect & run'}</button></div>
   </div>
 </Modal>
 
@@ -57,7 +61,7 @@
   dl > div { display: grid; grid-template-columns: 65px minmax(0, 1fr); gap: 10px; }
   dt { color: var(--ink-muted); font-size: 12px; }
   dd { margin: 0; color: var(--ink); font: 12px/18px var(--font-mono); overflow-wrap: anywhere; }
+  .sql-context { display: grid; gap: 6px; }
   .sql-context > span { color: var(--ink-muted); font-size: 12px; }
-  pre { margin: 6px 0 0; padding: 12px; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-0); border: 1px solid var(--line); border-radius: 3px; font-size: 12px; line-height: 18px; }
   .row-actions { justify-content: flex-end; }
 </style>
